@@ -1,5 +1,13 @@
 # @agent-wechat/cli
 
+## 0.11.3
+
+### Patch Changes
+
+- [#113](https://github.com/thisnick/agent-wechat/pull/113) [`55544aa`](https://github.com/thisnick/agent-wechat/commit/55544aa6320b9bed170fd6a614bde7f32ffe3c99) Thanks [@thisnick](https://github.com/thisnick)! - Fix verify_key to use immutable=1 to avoid acquiring locks on WeChat databases
+
+- [#111](https://github.com/thisnick/agent-wechat/pull/111) [`587994b`](https://github.com/thisnick/agent-wechat/commit/587994b98dc7bb7c272e133ad621989ca9513602) Thanks [@thisnick](https://github.com/thisnick)! - Add lazy key extraction to chat and contact query handlers so keys are extracted on demand when missing
+
 ## 0.11.2
 
 ### Patch Changes
