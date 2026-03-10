@@ -396,6 +396,18 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   // ---- Status adapter ----
   status: {
     collectStatusIssues: collectWeChatStatusIssues,
+
+    buildAccountSnapshot: ({ account, runtime }) => {
+      const configured = Boolean(account?.serverUrl?.trim());
+      return {
+        accountId: account?.accountId ?? "default",
+        enabled: account?.enabled ?? false,
+        configured,
+        running: runtime?.running ?? false,
+        connected: runtime?.connected ?? false,
+        linked: runtime?.linked ?? false,
+      };
+    },
   },
 
   // ---- Agent tools adapter ----

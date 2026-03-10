@@ -12,7 +12,7 @@ export function collectWeChatStatusIssues(
   const issues: StatusIssue[] = [];
 
   for (const snapshot of accounts) {
-    if (!snapshot.connected) {
+    if (snapshot.connected === false) {
       issues.push({
         channel: "wechat",
         accountId: snapshot.accountId,
