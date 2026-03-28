@@ -211,7 +211,9 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
     if let Some(ref f) = input.file {
         // Sanitize filename: keep ASCII alphanumerics, dot, hyphen, underscore;
         // replace everything else (including CJK) with underscore so the temp
-        // path stays portable across locales.
+        // path stays portable across locales.  The dot is preserved so that
+        // file extensions survive (e.g. "遗憾.pdf" → "__.pdf"); the mangled
+        // stem is acceptable since this is a transient temp path.
         let safe_name: String = f.filename.chars().map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
                 c

@@ -27,7 +27,7 @@ ABS_PATH="$(realpath "$FILE")"
 # If the path contains non-ASCII characters, copy to an ASCII-safe temp
 # path.  WeChat (Qt) under POSIX locale silently fails to open file://
 # URIs whose path includes non-ASCII bytes.
-if echo "$ABS_PATH" | LC_ALL=C grep -qP '[^\x00-\x7F]'; then
+if ! echo "$ABS_PATH" | iconv -f UTF-8 -t ASCII >/dev/null 2>&1; then
   EXT="${ABS_PATH##*.}"
   SAFE_PATH="/tmp/paste_safe_$(date +%s%N).${EXT}"
   cp "$ABS_PATH" "$SAFE_PATH"
