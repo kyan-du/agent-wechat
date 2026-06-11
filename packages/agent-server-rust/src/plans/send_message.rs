@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
+use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{open_chat, OpenChatResult};
@@ -27,99 +28,6 @@ pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
     pub confirm_attempts: u32,
-}
-
-fn node_has_state(node: &A11yNode, state: &str) -> bool {
-    node.states
-        .as_ref()
-        .map(|s| s.iter().any(|st| st == state))
-        .unwrap_or(false)
-}
-
-/// A candidate composer: the editable text input plus its sibling Send(S) button.
-struct ComposerPair<'a> {
-    edit: &'a A11yNode,
-    send: &'a A11yNode,
-    /// True if this pair lives under the main "Weixin" application frame
-    /// (as opposed to a detached/ghost chat frame leftover in the a11y tree).
-    in_main_frame: bool,
-}
-
-/// Find the composer (editable + Send button) to operate on.
-///
-/// WeChat's accessibility tree can contain *multiple* edit+send pairs:
-/// the live main-window composer plus stale "ghost" frames left behind by
-/// chats that were previously detached into separate windows. A naive
-/// depth-first "take the first pair" grabs the wrong (ghost) composer, whose
-/// input never receives text and whose Send stays DISABLED forever, causing
-/// the plan to loop and ultimately fail with "No action selected".
-///
-/// To be robust we collect every candidate pair, then rank them so the
-/// genuinely active composer wins:
-///   1. editable currently FOCUSED                (strongest signal)
-///   2. Send button NOT disabled                  (composer already has text)
-///   3. pair under the main "Weixin" frame        (not a ghost/detached frame)
-/// The first pair (DFS order) breaks any remaining ties.
-fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let mut candidates: Vec<ComposerPair> = Vec::new();
-    collect_edit_send_pairs(a11y, false, &mut candidates);
-
-    if candidates.is_empty() {
-        return None;
-    }
-
-    // Pick the best candidate by preference, preserving DFS order on ties.
-    let best = candidates.iter().enumerate().min_by_key(|(idx, c)| {
-        let focused = node_has_state(c.edit, "FOCUSED");
-        let send_enabled = !node_has_state(c.send, "DISABLED");
-        // Lower key = higher priority. Each desirable property subtracts rank.
-        let mut score: i32 = 0;
-        if focused {
-            score -= 100;
-        }
-        if send_enabled {
-            score -= 10;
-        }
-        if c.in_main_frame {
-            score -= 1;
-        }
-        // Tie-break: earlier DFS position wins.
-        (score, *idx as i32)
-    });
-
-    best.map(|(_, c)| (c.edit, c.send))
-}
-
-/// Recursively collect all edit+send composer pairs, tracking whether each
-/// pair is inside the main "Weixin" frame.
-fn collect_edit_send_pairs<'a>(
-    node: &'a A11yNode,
-    in_main_frame: bool,
-    out: &mut Vec<ComposerPair<'a>>,
-) {
-    // Once we enter the main "Weixin" frame, everything below it is in-main.
-    let in_main_frame = in_main_frame || (node.role == "frame" && node.name == "Weixin");
-
-    if let Some(children) = &node.children {
-        let send_btn = children
-            .iter()
-            .find(|c| c.role == "push-button" && c.name == "Send(S)");
-        let edit_node = children
-            .iter()
-            .find(|c| c.role == "text" && node_has_state(c, "EDITABLE"));
-
-        if let (Some(edit), Some(send)) = (edit_node, send_btn) {
-            out.push(ComposerPair {
-                edit,
-                send,
-                in_main_frame,
-            });
-        }
-
-        for child in children {
-            collect_edit_send_pairs(child, in_main_frame, out);
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -175,7 +83,11 @@ impl Plan for SendMessagePlan {
                         ))
                     });
 
-                    let force = main_state_id == Some("chat");
+                    // Always run chat-select, even in state "chat_open": the open
+                    // chat may not be the target. This is cheap — chat-select
+                    // itself short-circuits when the target is already the
+                    // current selection.
+                    let force = true;
                     let result = open_chat(&params.chat_id, force, click_xy).await;
 
                     if !result.ok {
@@ -208,13 +120,7 @@ impl Plan for SendMessagePlan {
 
                     plan_state.phase = SendMessagePhase::Inputting;
 
-                    let is_focused = edit_node
-                        .states
-                        .as_ref()
-                        .map(|s| s.iter().any(|st| st == "FOCUSED"))
-                        .unwrap_or(false);
-
-                    if is_focused {
+                    if node_has_state(edit_node, "FOCUSED") {
                         continue;
                     }
 
@@ -286,13 +192,7 @@ impl Plan for SendMessagePlan {
                         None => return None,
                     };
 
-                    let is_disabled = send_btn
-                        .states
-                        .as_ref()
-                        .map(|s| s.iter().any(|st| st == "DISABLED"))
-                        .unwrap_or(false);
-
-                    if is_disabled {
+                    if node_has_state(send_btn, "DISABLED") {
                         plan_state.phase = SendMessagePhase::Done;
                         return Some(SelectedAction {
                             action: actions::wait_short(),
