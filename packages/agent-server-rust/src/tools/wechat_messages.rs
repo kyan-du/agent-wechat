@@ -112,9 +112,11 @@ fn clean_content(content: &str, msg_type: i32) -> String {
                                 let item = &record[abs_start..abs_start + end_offset + "</dataitem>".len()];
                                 let sender_name = extract_xml_tag(item, "sourcename")
                                     .or_else(|| extract_xml_tag(item, "displayname"))
+                                    .map(|value| value.replace("&amp;", "&"))
                                     .unwrap_or_default();
                                 let data_title = extract_xml_tag(item, "datatitle")
                                     .or_else(|| extract_xml_tag(item, "datadesc"))
+                                    .map(|value| value.replace("&amp;", "&"))
                                     .unwrap_or_else(|| "[media]".to_string());
                                 if !sender_name.is_empty() {
                                     parts.push(format!("{sender_name}: {data_title}"));
