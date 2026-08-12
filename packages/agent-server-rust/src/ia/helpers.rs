@@ -163,3 +163,52 @@ pub fn find_frame_for(a11y: &A11yNode, selector: &str) -> Option<FrameHint> {
     walk(a11y, selector, None).and_then(frame_hint_from_node)
 }
 
+
+#[cfg(test)]
+mod composer_tests {
+    use super::*;
+
+    fn node(role: &str, name: &str, states: &[&str], children: Vec<A11yNode>) -> A11yNode {
+        A11yNode {
+            role: role.into(),
+            name: name.into(),
+            bounds: None,
+            children: (!children.is_empty()).then_some(children),
+            parent_index: None,
+            window: None,
+            states: (!states.is_empty()).then(|| states.iter().map(|s| (*s).into()).collect()),
+        }
+    }
+
+    fn composer(focused: bool, disabled: bool) -> A11yNode {
+        let mut edit_states = vec!["EDITABLE"];
+        if focused { edit_states.push("FOCUSED"); }
+        let send_states = if disabled { vec!["DISABLED"] } else { vec![] };
+        node("panel", "", &[], vec![
+            node("text", "composer", &edit_states, vec![]),
+            node("push-button", "Send(S)", &send_states, vec![]),
+        ])
+    }
+
+    #[test]
+    fn focused_composer_wins_over_earlier_ghost_frame() {
+        let tree = node("desktop-frame", "", &[], vec![
+            node("frame", "Detached", &[], vec![composer(false, true)]),
+            node("frame", "Weixin", &[], vec![composer(true, true)]),
+        ]);
+        let (edit, _) = find_edit_and_send_button(&tree).expect("composer");
+        assert!(node_has_state(edit, "FOCUSED"));
+    }
+
+    #[test]
+    fn main_frame_wins_when_other_signals_tie() {
+        let tree = node("desktop-frame", "", &[], vec![
+            node("frame", "Detached", &[], vec![composer(false, true)]),
+            node("frame", "WeChat", &[], vec![composer(false, true)]),
+        ]);
+        let (edit, _) = find_edit_and_send_button(&tree).expect("composer");
+        let main_edit = &tree.children.as_ref().unwrap()[1].children.as_ref().unwrap()[0]
+            .children.as_ref().unwrap()[0];
+        assert!(std::ptr::eq(edit, main_edit));
+    }
+}

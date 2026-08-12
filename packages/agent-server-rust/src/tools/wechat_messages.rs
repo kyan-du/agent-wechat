@@ -440,3 +440,23 @@ pub fn list_messages(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod merged_forward_tests {
+    use super::*;
+
+    #[test]
+    fn parses_escaped_merged_forward_items() {
+        let xml = r#"<msg><appmsg><title>Team history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;datatitle&gt;Hello &amp;amp; welcome&lt;/datatitle&gt;&lt;/dataitem&gt;&lt;dataitem&gt;&lt;displayname&gt;Bob&lt;/displayname&gt;&lt;datadesc&gt;Second&lt;/datadesc&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        assert_eq!(
+            clean_content(xml, 49),
+            "[Chat History] Team history\nAlice: Hello & welcome\nBob: Second"
+        );
+    }
+
+    #[test]
+    fn merged_forward_without_items_falls_back_to_title() {
+        let xml = r#"<msg><appmsg><title>Empty history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        assert_eq!(clean_content(xml, 49), "Empty history");
+    }
+}
