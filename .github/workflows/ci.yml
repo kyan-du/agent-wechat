@@ -2,15 +2,8 @@ name: CI
 
 on:
   pull_request:
-    paths:
-      - 'packages/**'
-      - 'docs/**'
-      - 'pnpm-lock.yaml'
-      - 'package.json'
-      - 'pnpm-workspace.yaml'
-      - 'turbo.json'
-      - 'tsconfig.json'
-      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
 
 jobs:
   changes:
@@ -36,6 +29,9 @@ jobs:
               - 'pnpm-workspace.yaml'
               - 'turbo.json'
               - 'tsconfig.json'
+              - 'MAINTENANCE.md'
+              - 'SECURITY.md'
+              - '.github/dependabot.yml'
               - '.github/workflows/ci.yml'
             rust:
               - 'packages/agent-server-rust/**'
@@ -75,6 +71,14 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+      - name: Lint availability
+        run: |
+          if pnpm run | grep -Eq '^  lint'; then
+            pnpm lint
+          else
+            echo 'No repository-level lint script is defined; not substituting another check.'
+          fi
 
   rust:
     needs: changes

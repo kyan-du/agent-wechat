@@ -1,8 +1,9 @@
 name: Release
 
+# Downstream safety: releases require an explicit maintainer dispatch. The
+# inherited upstream push-to-main trigger would otherwise publish immediately.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
