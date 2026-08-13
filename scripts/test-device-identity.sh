@@ -47,4 +47,38 @@ print("device-identity: eval exports (docker compose not available)")
 PY
 fi
 
+# Concurrent first-run: every process must emit the single persisted winner.
+c="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$c"' EXIT
+outs="$c/outs"
+mkdir -p "$outs"
+unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+for i in $(seq 1 30); do
+  (
+    unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+    "$GEN" "$c" >"$outs/$i"
+  ) &
+done
+wait
+test -f "$c/device-identity.env"
+# shellcheck disable=SC1091
+set -a
+# shellcheck disable=SC1090
+. "$c/device-identity.env"
+set +a
+persisted="${AGENT_WECHAT_MACHINE_ID:?} ${AGENT_WECHAT_HOSTNAME:?} ${AGENT_WECHAT_MAC:?}"
+count=0
+for i in $(seq 1 30); do
+  got="$(
+    unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+    # shellcheck disable=SC1090
+    eval "$(cat "$outs/$i")"
+    printf '%s %s %s' "$AGENT_WECHAT_MACHINE_ID" "$AGENT_WECHAT_HOSTNAME" "$AGENT_WECHAT_MAC"
+  )"
+  test "$got" = "$persisted"
+  count=$((count + 1))
+done
+test "$count" -eq 30
+echo "device-identity: 30 concurrent first-runs emit the persisted winner"
+
 echo "device-identity: same dir stable, second dir differs"
