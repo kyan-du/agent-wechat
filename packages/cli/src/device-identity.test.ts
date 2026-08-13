@@ -17,9 +17,10 @@ import {
   validMachineId,
 } from "./device-identity.ts";
 import {
+  bindExistingContainer,
   containerInspectMatchesIdentity,
-  decideExistingContainer,
   endpointMacs,
+  parseExactlyOneDockerId,
 } from "./container-inspect.ts";
 
 test("generateDeviceIdentity produces a valid tuple", () => {
@@ -67,6 +68,29 @@ test("ensureDeviceIdentity imports JSON and reuses the env winner", () => {
   fs.writeFileSync(path.join(dir, "device-identity.json"), JSON.stringify(seed));
   assert.deepEqual(ensureDeviceIdentity(dir), seed);
   assert.deepEqual(ensureDeviceIdentity(dir), seed);
+});
+
+test("ensureDeviceIdentity recovers two same-inode temp remnants", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const env = path.join(dir, "device-identity.env");
+  const seed = generateDeviceIdentity("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  fs.writeFileSync(
+    env,
+    [
+      `AGENT_WECHAT_MACHINE_ID=${seed.machineId}`,
+      `AGENT_WECHAT_HOSTNAME=${seed.hostname}`,
+      `AGENT_WECHAT_MAC=${seed.mac}`,
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  fs.linkSync(env, path.join(dir, "device-identity.env.one"));
+  fs.linkSync(env, path.join(dir, "device-identity.env.two"));
+  assert.equal(fs.statSync(env).nlink, 3);
+  assert.deepEqual(ensureDeviceIdentity(dir), seed);
+  assert.equal(fs.statSync(env).nlink, 1);
+  assert.equal(fs.existsSync(path.join(dir, "device-identity.env.one")), false);
+  assert.equal(fs.existsSync(path.join(dir, "device-identity.env.two")), false);
 });
 
 test("ensureDeviceIdentity recovers a committed env with an owned temp hard link", () => {
@@ -193,22 +217,85 @@ test("container inspect uses durable env MAC when endpoints are empty (stopped)"
   assert.throws(() => containerInspectMatchesIdentity("[]", identity));
 });
 
-test("decideExistingContainer never treats inspect failure as absent", () => {
+test("bindExistingContainer binds ps/inspect/running to one id", () => {
   const identity = generateDeviceIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-  const raw = inspectFixture(identity, {
-    NetworkSettings: { MacAddress: "", Networks: { bridge: { MacAddress: "" } } },
-  });
+  const id = "a".repeat(64);
+  const other = "b".repeat(64);
+  const raw = JSON.stringify([
+    {
+      Id: id,
+      Config: {
+        Hostname: identity.hostname,
+        Env: [
+          `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+          `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+          `AGENT_WECHAT_MAC=${identity.mac}`,
+        ],
+      },
+      NetworkSettings: { MacAddress: "", Networks: { bridge: { MacAddress: "" } } },
+    },
+  ]);
+  assert.equal(parseExactlyOneDockerId(`${id}\n`), id);
+  assert.throws(() => parseExactlyOneDockerId(`${id}\n${other}\n`));
   assert.deepEqual(
-    decideExistingContainer({ running: false, inspectOk: false, identity }),
+    bindExistingContainer({
+      psAllRaw: `${id}\n${other}\n`,
+      psRunningRaw: "",
+      inspectOk: true,
+      inspectRaw: raw,
+      identity,
+    }),
+    { action: "fail", reason: "ambiguous-id" },
+  );
+  assert.deepEqual(
+    bindExistingContainer({
+      psAllRaw: id,
+      psRunningRaw: "",
+      inspectOk: false,
+      identity,
+    }),
     { action: "fail", reason: "inspect-failed" },
   );
+  const mismatch = JSON.stringify([{ ...JSON.parse(raw)[0], Id: other }]);
   assert.deepEqual(
-    decideExistingContainer({ running: false, inspectOk: true, inspectRaw: raw, identity }),
-    { action: "use-existing", start: true },
+    bindExistingContainer({
+      psAllRaw: id,
+      psRunningRaw: "",
+      inspectOk: true,
+      inspectRaw: mismatch,
+      identity,
+    }),
+    { action: "fail", reason: "id-mismatch" },
   );
   assert.deepEqual(
-    decideExistingContainer({ running: true, inspectOk: true, inspectRaw: raw, identity }),
-    { action: "use-existing", start: false },
+    bindExistingContainer({
+      psAllRaw: id,
+      psRunningRaw: other,
+      inspectOk: true,
+      inspectRaw: raw,
+      identity,
+    }),
+    { action: "fail", reason: "id-mismatch" },
+  );
+  assert.deepEqual(
+    bindExistingContainer({
+      psAllRaw: id,
+      psRunningRaw: "",
+      inspectOk: true,
+      inspectRaw: raw,
+      identity,
+    }),
+    { action: "use-existing", id, start: true },
+  );
+  assert.deepEqual(
+    bindExistingContainer({
+      psAllRaw: id,
+      psRunningRaw: id,
+      inspectOk: true,
+      inspectRaw: raw,
+      identity,
+    }),
+    { action: "use-existing", id, start: false },
   );
 });
 
@@ -231,7 +318,7 @@ test("cmdUp validates identity before docker start", () => {
   assert.ok(start >= 0);
   const body = src.slice(start);
   const identityAt = body.indexOf("ensureDeviceIdentity()");
-  const inspectAt = body.indexOf("decideExistingContainer");
+  const inspectAt = body.indexOf("bindExistingContainer");
   const startAt = body.indexOf('["start"');
   assert.ok(identityAt >= 0);
   assert.ok(inspectAt >= 0);

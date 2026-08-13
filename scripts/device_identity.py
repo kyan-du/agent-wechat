@@ -215,21 +215,21 @@ def harden_regular(path: str) -> None:
 def cleanup_owned_temp_links(path: str, target_info: os.stat_result) -> None:
     directory = os.path.dirname(path)
     base = os.path.basename(path)
-    for name in os.listdir(directory):
-        if name == base or not ENV_TEMP_RE.fullmatch(name):
-            continue
-        candidate = os.path.join(directory, name)
-        try:
-            info = os.lstat(candidate)
-        except FileNotFoundError:
-            continue
-        if (
-            stat.S_ISREG(info.st_mode)
-            and info.st_dev == target_info.st_dev
-            and info.st_ino == target_info.st_ino
-            and info.st_nlink == target_info.st_nlink
-        ):
-            os.unlink(candidate)
+    dev, ino = target_info.st_dev, target_info.st_ino
+    progressed = True
+    while progressed:
+        progressed = False
+        for name in os.listdir(directory):
+            if name == base or not ENV_TEMP_RE.fullmatch(name):
+                continue
+            candidate = os.path.join(directory, name)
+            try:
+                info = os.lstat(candidate)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_dev == dev and info.st_ino == ino:
+                os.unlink(candidate)
+                progressed = True
 
 
 def acquire_lock(lock_path: str) -> int:

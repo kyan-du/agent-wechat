@@ -110,22 +110,23 @@ function hardenRegular(target: string): void {
 function cleanupOwnedTempLinks(target: string, targetStat: fs.Stats): void {
   const dir = path.dirname(target);
   const base = path.basename(target);
-  for (const name of fs.readdirSync(dir)) {
-    if (name === base || !ENV_TEMP_RE.test(name)) continue;
-    const candidate = path.join(dir, name);
-    let st: fs.Stats;
-    try {
-      st = fs.lstatSync(candidate);
-    } catch {
-      continue;
-    }
-    if (
-      st.isFile() &&
-      st.dev === targetStat.dev &&
-      st.ino === targetStat.ino &&
-      st.nlink === targetStat.nlink
-    ) {
-      fs.unlinkSync(candidate);
+  const { dev, ino } = targetStat;
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const name of fs.readdirSync(dir)) {
+      if (name === base || !ENV_TEMP_RE.test(name)) continue;
+      const candidate = path.join(dir, name);
+      let st: fs.Stats;
+      try {
+        st = fs.lstatSync(candidate);
+      } catch {
+        continue;
+      }
+      if (st.isFile() && st.dev === dev && st.ino === ino) {
+        fs.unlinkSync(candidate);
+        progressed = true;
+      }
     }
   }
 }

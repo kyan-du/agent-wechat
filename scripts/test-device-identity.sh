@@ -394,6 +394,18 @@ test "$AGENT_WECHAT_MACHINE_ID" = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 test "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_nlink)' "$crashdir/device-identity.env")" = "1"
 test ! -e "$crashdir/device-identity.env.crashremnant"
 
+multidir="$(mktemp -d)"
+printf 'AGENT_WECHAT_MACHINE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\nAGENT_WECHAT_HOSTNAME=thinkpad-555\nAGENT_WECHAT_MAC=00:1b:21:ee:ee:ee\n' >"$multidir/device-identity.env"
+ln "$multidir/device-identity.env" "$multidir/device-identity.env.one"
+ln "$multidir/device-identity.env" "$multidir/device-identity.env.two"
+test "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_nlink)' "$multidir/device-identity.env")" = "3"
+unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+eval "$("$GEN" "$multidir")"
+test "$AGENT_WECHAT_MACHINE_ID" = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+test "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_nlink)' "$multidir/device-identity.env")" = "1"
+test ! -e "$multidir/device-identity.env.one"
+test ! -e "$multidir/device-identity.env.two"
+
 # Symlink identity path is rejected and does not write through the target.
 sdir="$(mktemp -d)"
 victim="$sdir/victim.env"

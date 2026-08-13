@@ -7,7 +7,7 @@ import {
   ensureDeviceIdentity as loadDeviceIdentity,
   type DeviceIdentity,
 } from "./device-identity.js";
-import { decideExistingContainer } from "./container-inspect.js";
+import { bindExistingContainer, parseExactlyOneDockerId } from "./container-inspect.js";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import qrTerminal from "qrcode-terminal";
@@ -34,11 +34,11 @@ function failExistingContainer(message: string): never {
   process.exit(1);
 }
 
-function inspectExistingContainer(): { ok: true; raw: string } | { ok: false } {
+function inspectExistingContainer(id: string): { ok: true; raw: string } | { ok: false } {
   try {
     return {
       ok: true,
-      raw: execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" }),
+      raw: execFileSync("docker", ["inspect", id], { encoding: "utf-8" }),
     };
   } catch {
     return { ok: false };
@@ -1084,16 +1084,25 @@ async function cmdUp(opts: { proxy?: string } = {}) {
   const identity = ensureDeviceIdentity();
   let image = getImageTag();
 
-  const existingId = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
+  const existingRaw = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
     encoding: "utf-8",
-  }).trim();
-  if (existingId) {
-    const running = execFileSync("docker", ["ps", "-q", "-f", `name=^${CONTAINER_NAME}$`], {
+  });
+  if (existingRaw.trim()) {
+    let boundId: string;
+    try {
+      boundId = parseExactlyOneDockerId(existingRaw);
+    } catch {
+      failExistingContainer(
+        `Ambiguous or invalid ${CONTAINER_NAME} container ID from docker ps. Run: wx down && wx up`,
+      );
+    }
+    const runningRaw = execFileSync("docker", ["ps", "-q", "-f", `name=^${CONTAINER_NAME}$`], {
       encoding: "utf-8",
-    }).trim();
-    const inspected = inspectExistingContainer();
-    const decision = decideExistingContainer({
-      running: Boolean(running),
+    });
+    const inspected = inspectExistingContainer(boundId);
+    const decision = bindExistingContainer({
+      psAllRaw: existingRaw,
+      psRunningRaw: runningRaw,
       inspectOk: inspected.ok,
       inspectRaw: inspected.ok ? inspected.raw : undefined,
       identity,
@@ -1106,10 +1115,10 @@ async function cmdUp(opts: { proxy?: string } = {}) {
       );
     }
     if (decision.start) {
-      console.log(`Starting existing container ${CONTAINER_NAME}...`);
-      execFileSync("docker", ["start", CONTAINER_NAME], { stdio: "inherit" });
+      console.log(`Starting existing container ${decision.id}...`);
+      execFileSync("docker", ["start", decision.id], { stdio: "inherit" });
     } else {
-      console.log(`Container ${CONTAINER_NAME} is already running.`);
+      console.log(`Container ${decision.id} is already running.`);
     }
     console.log(`API: http://localhost:${DEFAULT_PORT}`);
     printNoVncUrl();
