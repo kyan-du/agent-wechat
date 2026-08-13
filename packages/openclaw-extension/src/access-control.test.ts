@@ -25,6 +25,10 @@ function baseAccount(overrides: Partial<ResolvedWeChatAccount> = {}): ResolvedWe
     groups: {},
     pollIntervalMs: 1000,
     authPollIntervalMs: 30000,
+    catchUpMode: "read-only",
+    catchUpMaxMessages: 10,
+    catchUpMaxAgeMs: 300000,
+    mediaPartDelayMs: 750,
     ...overrides,
   };
 }

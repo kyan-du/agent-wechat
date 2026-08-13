@@ -1,6 +1,12 @@
 use super::types::A11yNode;
 use regex::Regex;
 
+/// Match WeChat's composer send button in supported English and Chinese UIs.
+/// Keep this exact to avoid treating unrelated buttons as send controls.
+pub fn is_send_button_name(name: &str) -> bool {
+    matches!(name.trim(), "Send" | "Send(S)" | "发送" | "发送(S)")
+}
+
 // ============================================
 // Ancestor Traversal
 // ============================================
@@ -544,6 +550,16 @@ mod tests {
         // Descendant (space) should find list-items anywhere under root
         let results = query_selector_all(&tree, r#"list-item"#);
         assert_eq!(results.len(), 3);
+    }
+
+    #[test]
+    fn test_send_button_name_locales() {
+        assert!(is_send_button_name("Send(S)"));
+        assert!(is_send_button_name("Send"));
+        assert!(is_send_button_name("发送(S)"));
+        assert!(is_send_button_name("发送"));
+        assert!(!is_send_button_name("Cancel"));
+        assert!(!is_send_button_name("Send file"));
     }
 
     #[test]

@@ -59,8 +59,19 @@ pub enum Action {
         #[serde(skip_serializing_if = "Option::is_none")]
         selector: Option<String>,
     },
+    #[serde(rename = "paste_file")]
+    PasteFile { path: String },
+    #[serde(rename = "paste_image")]
+    PasteImage {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+    },
     #[serde(rename = "key")]
     Key { combo: String },
+    /// A key press that crosses the irreversible UI send boundary.
+    #[serde(rename = "commit_key")]
+    CommitKey { combo: String },
     #[serde(rename = "scroll")]
     Scroll {
         direction: ScrollDirection,

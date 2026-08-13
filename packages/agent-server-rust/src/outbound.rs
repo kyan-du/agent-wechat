@@ -432,13 +432,14 @@ async fn execute_send(params: &SendMessageParams) -> SendResult {
     let plan = SendMessagePlan;
     let cancel = CancellationToken::new();
     let noop_emit = |_: SubscriptionEvent| {};
-    let (result, _plan_state) =
+    let (result, plan_state) =
         run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
+    let error = plan_state.diagnostic_error.or(result.error);
 
     SendResult {
         success: result.success,
-        error_code: result.error.clone(),
-        error: result.error,
+        error_code: error.clone(),
+        error,
     }
 }
 
