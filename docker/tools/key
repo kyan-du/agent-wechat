@@ -31,9 +31,7 @@ if [ "${1:-}" = "--window" ]; then
 
   # Activate the window first
   SCRIPT_DIR="$(dirname "$0")"
-  "$SCRIPT_DIR/window-activate" "$WIN_PID" "$WIN_X" "$WIN_Y" "$WIN_W" "$WIN_H" >/dev/null || {
-    echo "Warning: could not activate window" >&2
-  }
+  "$SCRIPT_DIR/window-activate" "$WIN_PID" "$WIN_X" "$WIN_Y" "$WIN_W" "$WIN_H" >/dev/null || exit 10
 fi
 
 if [ -z "${1:-}" ]; then

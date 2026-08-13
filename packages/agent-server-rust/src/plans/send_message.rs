@@ -1,10 +1,10 @@
 use super::Plan;
+use crate::execution::actions::ActionExecutionResult;
 use crate::ia::actions;
 use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
-use crate::tools::exec::{exec_command, ExecOptions};
 
 pub struct SendMessagePlan;
 
@@ -28,7 +28,7 @@ pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
     pub confirm_attempts: u32,
-    /// Set before returning the action that commits the message to the UI.
+    /// Set only once the irreversible Return/send command is attempted.
     pub send_action_executed: bool,
     /// Stable diagnostic code returned when the plan fails closed.
     pub diagnostic_error: Option<String>,
@@ -50,13 +50,31 @@ fn reset_after_popup(plan_state: &mut SendMessagePlanState) -> Result<(), &'stat
     Ok(())
 }
 
-fn arm_single_send(plan_state: &mut SendMessagePlanState) -> Result<(), &'static str> {
+fn allow_single_send(plan_state: &mut SendMessagePlanState) -> Result<(), &'static str> {
     if plan_state.send_action_executed {
         plan_state.diagnostic_error = Some("duplicate_send_action_suppressed".to_string());
         return Err("duplicate_send_action_suppressed");
     }
-    plan_state.send_action_executed = true;
     Ok(())
+}
+
+fn record_action_result(plan_state: &mut SendMessagePlanState, result: &ActionExecutionResult) {
+    match result {
+        Ok(commit_attempted) => {
+            if *commit_attempted {
+                plan_state.send_action_executed = true;
+                plan_state.phase = SendMessagePhase::Confirming;
+            }
+        }
+        Err(error) => {
+            if error.commit_attempted {
+                plan_state.send_action_executed = true;
+                plan_state.diagnostic_error = Some("send_commit_uncertain".to_string());
+            } else {
+                plan_state.diagnostic_error = Some(error.diagnostic.to_string());
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -227,18 +245,16 @@ impl Plan for SendMessagePlan {
                             Some("localized_composer_not_found".to_string());
                         return None;
                     }
-                    if arm_single_send(plan_state).is_err() {
+                    if allow_single_send(plan_state).is_err() {
                         return None;
                     }
 
-                    plan_state.phase = SendMessagePhase::Confirming;
-
                     if let Some(fp) = &params.file_path {
-                        exec_command("paste-file", &[fp], &ExecOptions::default()).await;
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
+                                Action::PasteFile { path: fp.clone() },
                                 Action::Wait { ms: 100 },
-                                Action::Key {
+                                Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
                             ]),
@@ -250,15 +266,14 @@ impl Plan for SendMessagePlan {
                     }
 
                     if let Some(ip) = &params.image_path {
-                        let mut args: Vec<&str> = vec![ip];
-                        if let Some(mime) = &params.image_mime {
-                            args.push(mime);
-                        }
-                        exec_command("paste-image", &args, &ExecOptions::default()).await;
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
+                                Action::PasteImage {
+                                    path: ip.clone(),
+                                    mime: params.image_mime.clone(),
+                                },
                                 Action::Wait { ms: 100 },
-                                Action::Key {
+                                Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
                             ]),
@@ -280,7 +295,7 @@ impl Plan for SendMessagePlan {
                                     selector: None,
                                 },
                                 Action::Wait { ms: 100 },
-                                Action::Key {
+                                Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
                             ]),
@@ -335,6 +350,15 @@ impl Plan for SendMessagePlan {
             }
         }
     }
+
+    fn action_executed(
+        &self,
+        plan_state: &mut SendMessagePlanState,
+        result: &ActionExecutionResult,
+    ) -> bool {
+        record_action_result(plan_state, result);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -385,16 +409,51 @@ mod tests {
     }
 
     #[test]
-    fn single_plan_can_arm_only_one_send_action() {
+    fn pre_send_failure_is_definite_and_does_not_arm_guard() {
         let mut state = SendMessagePlan.initial_plan_state();
-        assert_eq!(arm_single_send(&mut state), Ok(()));
-        assert_eq!(
-            arm_single_send(&mut state),
-            Err("duplicate_send_action_suppressed")
+        record_action_result(
+            &mut state,
+            &Err(crate::execution::actions::ActionExecutionError {
+                diagnostic: "message_input_failed",
+                commit_attempted: false,
+                detail: "input failed".to_string(),
+            }),
         );
+        assert!(!state.send_action_executed);
         assert_eq!(
             state.diagnostic_error.as_deref(),
-            Some("duplicate_send_action_suppressed")
+            Some("message_input_failed")
+        );
+        assert_eq!(allow_single_send(&mut state), Ok(()));
+    }
+
+    #[test]
+    fn commit_attempt_arms_guard_and_suppresses_duplicate() {
+        let mut state = SendMessagePlan.initial_plan_state();
+        record_action_result(&mut state, &Ok(true));
+        assert!(state.send_action_executed);
+        assert!(matches!(state.phase, SendMessagePhase::Confirming));
+        assert_eq!(
+            allow_single_send(&mut state),
+            Err("duplicate_send_action_suppressed")
+        );
+    }
+
+    #[test]
+    fn failed_commit_is_uncertain_and_arms_guard() {
+        let mut state = SendMessagePlan.initial_plan_state();
+        record_action_result(
+            &mut state,
+            &Err(crate::execution::actions::ActionExecutionError {
+                diagnostic: "send_commit_uncertain",
+                commit_attempted: true,
+                detail: "key failed".to_string(),
+            }),
+        );
+        assert!(state.send_action_executed);
+        assert_eq!(
+            state.diagnostic_error.as_deref(),
+            Some("send_commit_uncertain")
         );
     }
 }
