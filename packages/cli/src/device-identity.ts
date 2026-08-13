@@ -16,6 +16,7 @@ const MAC_RE = /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/;
 const PREFIXES = ["lenovo-pc", "honor-pc", "xiaomi-pc", "asus-pc", "dell-pc", "hp-pc", "thinkpad"];
 const ENV_NAME = "device-identity.env";
 const JSON_NAME = "device-identity.json";
+const ENV_TEMP_RE = /^device-identity\.env\.(?:\d+\.[0-9a-f]{8}|[A-Za-z0-9_-]+)$/;
 
 function hasLineBreak(value: string): boolean {
   return value.includes("\n") || value.includes("\r");
@@ -88,7 +89,11 @@ function hardenRegular(target: string): void {
   const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
   const fd = fs.openSync(target, flags);
   try {
-    const st = fs.fstatSync(fd);
+    let st = fs.fstatSync(fd);
+    if (st.nlink > 1) {
+      cleanupOwnedTempLinks(target, st);
+      st = fs.fstatSync(fd);
+    }
     if (st.nlink !== 1) throw new Error(`${target} has unexpected link count ${st.nlink}`);
     if (typeof process.getuid === "function") {
       const uid = process.getuid();
@@ -102,11 +107,35 @@ function hardenRegular(target: string): void {
   }
 }
 
+function cleanupOwnedTempLinks(target: string, targetStat: fs.Stats): void {
+  const dir = path.dirname(target);
+  const base = path.basename(target);
+  for (const name of fs.readdirSync(dir)) {
+    if (name === base || !ENV_TEMP_RE.test(name)) continue;
+    const candidate = path.join(dir, name);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(candidate);
+    } catch {
+      continue;
+    }
+    if (
+      st.isFile() &&
+      st.dev === targetStat.dev &&
+      st.ino === targetStat.ino &&
+      st.nlink === targetStat.nlink
+    ) {
+      fs.unlinkSync(candidate);
+    }
+  }
+}
+
 function parseEnvFile(target: string): DeviceIdentity {
   requireAbsentOrRegular(target);
   const data = fs.readFileSync(target);
   if (data.includes(0)) throw new Error(`NUL in ${target}`);
-  const text = data.toString("ascii");
+  if (data.some((byte) => byte > 0x7f)) throw new Error(`non-ascii identity in ${target}`);
+  const text = data.toString("utf-8");
   let machineId: string | undefined;
   let hostname: string | undefined;
   let mac: string | undefined;

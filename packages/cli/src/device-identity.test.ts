@@ -14,6 +14,7 @@ import {
   validMac,
   validMachineId,
 } from "./device-identity.ts";
+import { containerInspectMatchesIdentity, endpointMacs } from "./container-inspect.ts";
 
 test("generateDeviceIdentity produces a valid tuple", () => {
   const identity = generateDeviceIdentity(randomBytes(16).toString("hex"));
@@ -62,6 +63,39 @@ test("ensureDeviceIdentity imports JSON and reuses the env winner", () => {
   assert.deepEqual(ensureDeviceIdentity(dir), seed);
 });
 
+test("ensureDeviceIdentity recovers a committed env with an owned temp hard link", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const env = path.join(dir, "device-identity.env");
+  const tmp = path.join(dir, `device-identity.env.${process.pid}.abcd1234`);
+  const seed = generateDeviceIdentity("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  fs.writeFileSync(
+    env,
+    [
+      `AGENT_WECHAT_MACHINE_ID=${seed.machineId}`,
+      `AGENT_WECHAT_HOSTNAME=${seed.hostname}`,
+      `AGENT_WECHAT_MAC=${seed.mac}`,
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  fs.linkSync(env, tmp);
+  assert.equal(fs.statSync(env).nlink, 2);
+  assert.deepEqual(ensureDeviceIdentity(dir), seed);
+  assert.equal(fs.statSync(env).nlink, 1);
+  assert.equal(fs.existsSync(tmp), false);
+});
+
+test("ensureDeviceIdentity rejects non-ascii persisted env bytes", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const payload = Buffer.from(
+    "AGENT_WECHAT_MACHINE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nAGENT_WECHAT_HOSTNAME=lenovo-pc-100\nAGENT_WECHAT_MAC=00:1b:21:00:00:01\n",
+    "ascii",
+  );
+  payload[payload.length - 3] = 0xb1;
+  fs.writeFileSync(path.join(dir, "device-identity.env"), payload);
+  assert.throws(() => ensureDeviceIdentity(dir), /non-ascii identity/);
+});
+
 test("buildDockerRunArgs keeps identity and proxy on argv boundaries", () => {
   const identity = generateDeviceIdentity("ffffffffffffffffffffffffffffffff");
   const args = buildDockerRunArgs(identity, {
@@ -76,6 +110,47 @@ test("buildDockerRunArgs keeps identity and proxy on argv boundaries", () => {
   assert.equal(args.includes(`AGENT_WECHAT_MAC=${identity.mac}`), true);
   assert.equal(args.includes("PROXY=http://user:p;rm -rf /@evil:8080"), true);
   assert.equal(args.join(" ").includes("docker "), false);
+});
+
+test("container inspect identity check reads Docker endpoint MACs", () => {
+  const identity = generateDeviceIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  const inspect = JSON.stringify([
+    {
+      Config: {
+        Hostname: identity.hostname,
+        Env: [
+          `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+          `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+          `AGENT_WECHAT_MAC=${identity.mac}`,
+        ],
+      },
+      NetworkSettings: {
+        Networks: {
+          bridge: { MacAddress: identity.mac },
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(Array.from(endpointMacs(JSON.parse(inspect)[0])), [identity.mac]);
+  assert.equal(containerInspectMatchesIdentity(inspect, identity), true);
+  const wrong = inspect.replace(identity.mac, "00:1b:21:00:00:02");
+  assert.equal(containerInspectMatchesIdentity(wrong, identity), false);
+  const missing = JSON.stringify([{ Config: JSON.parse(inspect)[0].Config, NetworkSettings: { Networks: { bridge: {} } } }]);
+  assert.equal(containerInspectMatchesIdentity(missing, identity), false);
+  const ambiguous = JSON.stringify([
+    {
+      Config: JSON.parse(inspect)[0].Config,
+      NetworkSettings: {
+        Networks: {
+          bridge: { MacAddress: identity.mac },
+          other: { MacAddress: "00:1b:21:00:00:02" },
+        },
+      },
+    },
+  ]);
+  assert.equal(containerInspectMatchesIdentity(ambiguous, identity), false);
+  assert.throws(() => containerInspectMatchesIdentity("NOT_JSON", identity));
+  assert.throws(() => containerInspectMatchesIdentity("[]", identity));
 });
 
 test("cmdUp validates identity before docker start", () => {

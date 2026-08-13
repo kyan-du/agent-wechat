@@ -325,6 +325,12 @@ if "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
   exit 1
 fi
 
+python3 -c 'open("'"$envdir"'/device-identity.env","wb").write(b"AGENT_WECHAT_MACHINE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nAGENT_WECHAT_HOSTNAME=lenovo-pc-100\nAGENT_WECHAT_MAC=00:1b:21:00:00:\xb1\n")'
+if "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
+  echo "non-ascii env byte should be rejected" >&2
+  exit 1
+fi
+
 echo "device-identity: malformed and injected values are rejected without executing"
 
 # CLI JSON is imported into the canonical env file; conflicting files fail.
@@ -376,6 +382,18 @@ cli_out="$(
 )"
 test "$cli_out" = "$AGENT_WECHAT_MACHINE_ID $AGENT_WECHAT_HOSTNAME $AGENT_WECHAT_MAC"
 
+# Crash after link-before-unlink must not permanently brick a committed env.
+crashdir="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "${envdir:-}" "$kdir" "$kdir2" "$xdir" "$zdir" "$crashdir"' EXIT
+printf 'AGENT_WECHAT_MACHINE_ID=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\nAGENT_WECHAT_HOSTNAME=thinkpad-555\nAGENT_WECHAT_MAC=00:1b:21:ee:ee:ee\n' >"$crashdir/device-identity.env"
+ln "$crashdir/device-identity.env" "$crashdir/device-identity.env.crashremnant"
+test "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_nlink)' "$crashdir/device-identity.env")" = "2"
+unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+eval "$("$GEN" "$crashdir")"
+test "$AGENT_WECHAT_MACHINE_ID" = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+test "$(python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_nlink)' "$crashdir/device-identity.env")" = "1"
+test ! -e "$crashdir/device-identity.env.crashremnant"
+
 # Symlink identity path is rejected and does not write through the target.
 sdir="$(mktemp -d)"
 victim="$sdir/victim.env"
@@ -389,4 +407,5 @@ test "$(cat "$victim")" = "keep"
 grep -Fq symlink "$sdir/err"
 
 echo "device-identity: JSON import, conflict, CLI reuse, and symlink rejection"
+echo "device-identity: publish crash remnants recover"
 echo "device-identity: same dir stable, second dir differs"

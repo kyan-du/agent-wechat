@@ -22,6 +22,7 @@ MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 ENV_NAME = "device-identity.env"
 JSON_NAME = "device-identity.json"
 LOCK_NAME = ".device-identity.lock"
+ENV_TEMP_RE = re.compile(r"^device-identity\.env\.(?:\d+\.[0-9a-f]{8}|[A-Za-z0-9_-]+)$")
 
 
 def die(message: str) -> None:
@@ -183,6 +184,9 @@ def harden_regular(path: str) -> None:
     fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
+        if info.st_nlink > 1:
+            cleanup_owned_temp_links(path, info)
+            info = os.fstat(fd)
         if info.st_nlink != 1:
             die(f"{path} has unexpected link count {info.st_nlink}")
         if info.st_uid != os.getuid() and os.getuid() != 0:
@@ -190,6 +194,26 @@ def harden_regular(path: str) -> None:
         os.fchmod(fd, 0o600)
     finally:
         os.close(fd)
+
+
+def cleanup_owned_temp_links(path: str, target_info: os.stat_result) -> None:
+    directory = os.path.dirname(path)
+    base = os.path.basename(path)
+    for name in os.listdir(directory):
+        if name == base or not ENV_TEMP_RE.fullmatch(name):
+            continue
+        candidate = os.path.join(directory, name)
+        try:
+            info = os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        if (
+            stat.S_ISREG(info.st_mode)
+            and info.st_dev == target_info.st_dev
+            and info.st_ino == target_info.st_ino
+            and info.st_nlink == target_info.st_nlink
+        ):
+            os.unlink(candidate)
 
 
 def acquire_lock(lock_path: str) -> int:

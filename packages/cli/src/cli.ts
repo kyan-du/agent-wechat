@@ -7,6 +7,7 @@ import {
   ensureDeviceIdentity as loadDeviceIdentity,
   type DeviceIdentity,
 } from "./device-identity.js";
+import { containerInspectMatchesIdentity } from "./container-inspect.js";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import qrTerminal from "qrcode-terminal";
@@ -15,7 +16,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 declare const PKG_VERSION: string;
-const VERSION = PKG_VERSION;
+const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
 const CONTAINER_NAME = "agent-wechat";
 const GHCR_IMAGE = "ghcr.io/thisnick/agent-wechat";
 const DEFAULT_PORT = 6174;
@@ -27,39 +28,43 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
+class ExistingContainerInspectionError extends Error {}
+class ContainerNotFoundError extends Error {}
+
+function failExistingContainerInspection(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
+function dockerInspectContainer(): string {
+  try {
+    return execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" });
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    if (status === 1) throw new ContainerNotFoundError(`${CONTAINER_NAME} not found`);
+    throw new ExistingContainerInspectionError(`Cannot inspect ${CONTAINER_NAME}`);
+  }
+}
+
 function assertExistingContainerMatches(identity: DeviceIdentity): void {
   let raw: string;
   try {
-    raw = execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" });
+    raw = dockerInspectContainer();
+  } catch (error) {
+    if (error instanceof ContainerNotFoundError) throw error;
+    failExistingContainerInspection(`Cannot inspect ${CONTAINER_NAME}; recreate with wx down && wx up.`);
+  }
+  try {
+    if (containerInspectMatchesIdentity(raw, identity)) return;
   } catch {
-    console.error(`Cannot inspect ${CONTAINER_NAME}; recreate with wx down && wx up.`);
-    process.exit(1);
-  }
-  const info = JSON.parse(raw)[0] as {
-    Config?: { Hostname?: string; Env?: string[] };
-    NetworkSettings?: { MacAddress?: string };
-  };
-  const env = info.Config?.Env ?? [];
-  const value = (key: string) =>
-    env.find((entry) => entry.startsWith(`${key}=`))?.slice(key.length + 1);
-  const hostname = info.Config?.Hostname;
-  const mac = (info.NetworkSettings?.MacAddress || "").toLowerCase();
-  const machineId = value("AGENT_WECHAT_MACHINE_ID");
-  const envHost = value("AGENT_WECHAT_HOSTNAME");
-  const envMac = value("AGENT_WECHAT_MAC");
-  const macOk = !mac || mac === identity.mac;
-  if (
-    hostname !== identity.hostname ||
-    machineId !== identity.machineId ||
-    (envHost && envHost !== identity.hostname) ||
-    (envMac && envMac !== identity.mac) ||
-    !macOk
-  ) {
-    console.error(
-      `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
+    failExistingContainerInspection(
+      `Cannot verify existing ${CONTAINER_NAME} container identity. Run: wx down && wx up`,
     );
-    process.exit(1);
   }
+  console.error(
+    `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
+  );
+  process.exit(1);
 }
 
 function ensureDeviceIdentity(): DeviceIdentity {
@@ -1121,7 +1126,10 @@ async function cmdUp(opts: { proxy?: string } = {}) {
       printIdentityCheck();
       return;
     }
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ContainerNotFoundError)) {
+      throw error;
+    }
     // No container found, continue to create
   }
 
@@ -1218,8 +1226,10 @@ async function cmdLogs() {
   }
 }
 
-// Parse and run
-program.parseAsync(process.argv).catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// Parse and run when invoked as the CLI, but allow tests to import helpers.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  program.parseAsync(process.argv).catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
