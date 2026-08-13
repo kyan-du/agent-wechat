@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Message } from "@agent-wechat/shared";
-import { isCatchUpBatch, selectCatchUpMessages } from "./catch-up.ts";
+import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.ts";
 
 function message(localId: number, ageMs: number, nowMs: number): Message {
   return {
@@ -49,6 +49,18 @@ test("selectCatchUpMessages makes recovery read-only while advancing the cursor"
   assert.deepEqual(result.messages, []);
   assert.equal(result.cursor, 5);
   assert.equal(result.skipped, 2);
+});
+
+test("recovery cursor never jumps to a session ID not returned by message storage", () => {
+  const nowMs = Date.parse("2026-08-13T06:00:00Z");
+  const selection = selectCatchUpMessages([
+    message(98, 10_000, nowMs),
+    message(99, 5_000, nowMs),
+  ], { maxMessages: 10, maxAgeMs: 60_000, nowMs }, "read-only");
+  const sessionLastMsgLocalId = 100;
+
+  assert.equal(recoveryCursor(selection), 99);
+  assert.ok(recoveryCursor(selection) < sessionLastMsgLocalId);
 });
 
 test("selectCatchUpMessages advances the cursor when every message is stale", () => {

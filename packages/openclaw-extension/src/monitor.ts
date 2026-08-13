@@ -4,7 +4,7 @@ import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pi
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
-import { isCatchUpBatch, selectCatchUpMessages } from "./catch-up.js";
+import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
   normalizeWeChatCommandBody,
@@ -851,19 +851,21 @@ async function processUnreadChat(
       catchUpLimits,
       liveAccount.catchUpMode,
     );
-    const recoveryCursor = Math.max(selection.cursor, chat.lastMsgLocalId ?? 0);
+    // Only advance through rows that were actually observed. session.db can
+    // advertise a newer ID before its message_N.db row is visible.
+    const observedCursor = recoveryCursor(selection);
 
     if (liveAccount.catchUpMode === "read-only") {
-      lastSeenId.set(chatId, recoveryCursor);
+      lastSeenId.set(chatId, observedCursor);
       log?.info?.(
-        `[wechat:${liveAccount.accountId}] Recovery read-only: advanced ${chatId} to ${recoveryCursor} without dispatching ${newMessages.length} msg(s)`,
+        `[wechat:${liveAccount.accountId}] Recovery read-only: advanced ${chatId} to ${observedCursor} without dispatching ${newMessages.length} msg(s)`,
       );
       return;
     }
 
     newMessages = selection.messages;
     if (newMessages.length === 0) {
-      lastSeenId.set(chatId, recoveryCursor);
+      lastSeenId.set(chatId, observedCursor);
       log?.info?.(
         `[wechat:${liveAccount.accountId}] Recovery skipped ${selection.skipped} stale msg(s) in ${chatId}`,
       );

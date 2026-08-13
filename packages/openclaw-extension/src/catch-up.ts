@@ -14,6 +14,10 @@ export type CatchUpSelection = {
   skipped: number;
 };
 
+export function recoveryCursor(selection: CatchUpSelection): number {
+  return selection.cursor;
+}
+
 export function isCatchUpBatch(messages: Message[], limits: CatchUpLimits): boolean {
   if (messages.length > limits.maxMessages) return true;
 
