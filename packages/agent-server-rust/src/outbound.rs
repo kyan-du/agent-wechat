@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -214,6 +217,7 @@ struct OutboundTask {
 #[derive(Clone)]
 pub struct OutboundSender {
     config: OutboundConfig,
+    control: Arc<OutboundControl>,
     tx: mpsc::Sender<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
 }
@@ -227,16 +231,19 @@ pub fn outbound_sender() -> &'static OutboundSender {
 impl OutboundSender {
     pub fn spawn(config: OutboundConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let control = Arc::new(OutboundControl::new(config.read_only));
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(config.idempotency_ttl)));
+        let worker_control = Arc::clone(&control);
         let worker_store = Arc::clone(&idempotency);
         let worker_config = config.clone();
 
         tokio::spawn(async move {
-            worker_loop(worker_config, rx, worker_store).await;
+            worker_loop(worker_config, worker_control, rx, worker_store).await;
         });
 
         Self {
             config,
+            control,
             tx,
             idempotency,
         }
@@ -248,7 +255,7 @@ impl OutboundSender {
         idempotency_key: Option<String>,
     ) -> OutboundSendResponse {
         let now = Instant::now();
-        if self.config.read_only {
+        if self.control.is_read_only() {
             cleanup_temp_files(&params);
             return OutboundSendResponse::Rejected(OutboundError::read_only());
         }
@@ -311,7 +318,7 @@ impl OutboundSender {
             jitter_ms: self.config.jitter.as_millis(),
             task_ttl_ms: self.config.task_ttl.as_millis(),
             idempotency_ttl_ms: self.config.idempotency_ttl.as_millis(),
-            read_only: self.config.read_only,
+            read_only: self.control.is_read_only(),
             idempotency_entries: self
                 .idempotency
                 .lock()
@@ -321,15 +328,39 @@ impl OutboundSender {
     }
 }
 
+pub struct OutboundControl {
+    read_only: AtomicBool,
+}
+
+impl OutboundControl {
+    fn new(read_only: bool) -> Self {
+        Self {
+            read_only: AtomicBool::new(read_only),
+        }
+    }
+
+    #[cfg(test)]
+    fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::SeqCst);
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.read_only.load(Ordering::SeqCst)
+            || env_bool("AGENT_WECHAT_OUTBOUND_DISABLED")
+            || env_bool("AGENT_WECHAT_READ_ONLY")
+    }
+}
+
 async fn worker_loop(
     config: OutboundConfig,
+    control: Arc<OutboundControl>,
     mut rx: mpsc::Receiver<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
     while let Some(task) = rx.recv().await {
         let now = Instant::now();
-        if now.duration_since(task.enqueued_at) > config.task_ttl {
+        if task_expired(&task, now, config.task_ttl) {
             reject_without_idempotency_cache(task, expired_result(), &idempotency);
             continue;
         }
@@ -339,9 +370,23 @@ async fn worker_loop(
             tokio::time::sleep(delay).await;
         }
 
+        let now = Instant::now();
+        if control.is_read_only() {
+            reject_without_idempotency_cache(task, read_only_result(), &idempotency);
+            continue;
+        }
+        if task_expired(&task, now, config.task_ttl) {
+            reject_without_idempotency_cache(task, expired_result(), &idempotency);
+            continue;
+        }
+
         let result = execute_send(&task.params).await;
         complete_task(task, result, &idempotency, Instant::now());
     }
+}
+
+fn task_expired(task: &OutboundTask, now: Instant, task_ttl: Duration) -> bool {
+    now.duration_since(task.enqueued_at) > task_ttl
 }
 
 async fn execute_send(params: &SendMessageParams) -> SendResult {
@@ -424,6 +469,10 @@ fn queue_full_result() -> SendResult {
     send_error("QUEUE_FULL")
 }
 
+fn read_only_result() -> SendResult {
+    send_error("OUTBOUND_DISABLED")
+}
+
 fn expired_result() -> SendResult {
     send_error("QUEUE_EXPIRED")
 }
@@ -479,9 +528,7 @@ impl SpacingPolicy {
 
 #[derive(Clone)]
 enum IdempotencyEntry {
-    InProgress {
-        expires_at: Instant,
-    },
+    InProgress,
     Completed {
         expires_at: Instant,
         result: SendResult,
@@ -517,12 +564,8 @@ impl IdempotencyStore {
                 IdempotencyStart::Completed(result.clone())
             }
             None => {
-                self.entries.insert(
-                    key.to_string(),
-                    IdempotencyEntry::InProgress {
-                        expires_at: now + self.ttl,
-                    },
-                );
+                self.entries
+                    .insert(key.to_string(), IdempotencyEntry::InProgress);
                 self.order.push_back(key.to_string());
                 IdempotencyStart::Inserted
             }
@@ -550,26 +593,11 @@ impl IdempotencyStore {
     }
 
     fn prune(&mut self, now: Instant) {
-        while let Some(key) = self.order.front() {
-            let expired = match self.entries.get(key) {
-                Some(IdempotencyEntry::InProgress { expires_at })
-                | Some(IdempotencyEntry::Completed { expires_at, .. }) => *expires_at <= now,
-                None => true,
-            };
-            if !expired {
-                break;
-            }
-            if let Some(key) = self.order.pop_front() {
-                let should_remove = match self.entries.get(&key) {
-                    Some(IdempotencyEntry::InProgress { expires_at })
-                    | Some(IdempotencyEntry::Completed { expires_at, .. }) => *expires_at <= now,
-                    None => true,
-                };
-                if should_remove {
-                    self.entries.remove(&key);
-                }
-            }
-        }
+        self.entries.retain(|_, entry| match entry {
+            IdempotencyEntry::InProgress => true,
+            IdempotencyEntry::Completed { expires_at, .. } => *expires_at > now,
+        });
+        self.order.retain(|key| self.entries.contains_key(key));
     }
 }
 
@@ -647,14 +675,35 @@ mod tests {
     }
 
     #[test]
-    fn idempotency_key_can_be_reused_after_ttl() {
+    fn completed_idempotency_key_can_be_reused_after_ttl() {
+        let now = Instant::now();
+        let mut store = IdempotencyStore::new(Duration::from_secs(5));
+
+        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
+        store.complete(
+            "k",
+            now + Duration::from_secs(1),
+            SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+            },
+        );
+        assert!(matches!(
+            store.start("k", now + Duration::from_secs(6)),
+            IdempotencyStart::Inserted
+        ));
+    }
+
+    #[test]
+    fn in_progress_idempotency_key_does_not_expire_after_ttl() {
         let now = Instant::now();
         let mut store = IdempotencyStore::new(Duration::from_secs(5));
 
         assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(6)),
-            IdempotencyStart::Inserted
+            store.start("k", now + Duration::from_secs(60)),
+            IdempotencyStart::InProgress
         ));
     }
 
@@ -671,6 +720,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
         let sender = OutboundSender {
             config,
+            control: Arc::new(OutboundControl::new(false)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
         };
@@ -753,6 +803,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
         let sender = OutboundSender {
             config,
+            control: Arc::new(OutboundControl::new(true)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
         };
@@ -769,6 +820,117 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn queued_task_rechecks_pause_after_spacing_delay() {
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::from_millis(25),
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            read_only: false,
+        };
+        let control = Arc::new(OutboundControl::new(true));
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            Arc::clone(&idempotency),
+        ));
+
+        let (first_tx, first_rx) = oneshot::channel();
+        tx.try_send(OutboundTask {
+            params: test_params("first"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("first".to_string()),
+            result_tx: first_tx,
+        })
+        .unwrap();
+        let first = first_rx.await.unwrap();
+        assert_eq!(first.error.as_deref(), Some("OUTBOUND_DISABLED"));
+
+        let (second_tx, second_rx) = oneshot::channel();
+        control.set_read_only(false);
+        tx.try_send(OutboundTask {
+            params: test_params("second"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("second".to_string()),
+            result_tx: second_tx,
+        })
+        .unwrap();
+        control.set_read_only(true);
+
+        let second = second_rx.await.unwrap();
+        assert_eq!(second.error.as_deref(), Some("OUTBOUND_DISABLED"));
+        assert!(matches!(
+            idempotency
+                .lock()
+                .unwrap()
+                .start("second", Instant::now() + Duration::from_secs(1)),
+            IdempotencyStart::Inserted
+        ));
+
+        drop(tx);
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_task_rechecks_ttl_after_spacing_delay() {
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::from_millis(30),
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_millis(10),
+            idempotency_ttl: Duration::from_secs(60),
+            read_only: false,
+        };
+        let control = Arc::new(OutboundControl::new(true));
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            Arc::clone(&idempotency),
+        ));
+
+        let (first_tx, first_rx) = oneshot::channel();
+        tx.try_send(OutboundTask {
+            params: test_params("first"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("first".to_string()),
+            result_tx: first_tx,
+        })
+        .unwrap();
+        let first = first_rx.await.unwrap();
+        assert_eq!(first.error.as_deref(), Some("OUTBOUND_DISABLED"));
+
+        let (second_tx, second_rx) = oneshot::channel();
+        control.set_read_only(false);
+        tx.try_send(OutboundTask {
+            params: test_params("second"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("second".to_string()),
+            result_tx: second_tx,
+        })
+        .unwrap();
+
+        let second = second_rx.await.unwrap();
+        assert_eq!(second.error.as_deref(), Some("QUEUE_EXPIRED"));
+        assert!(matches!(
+            idempotency
+                .lock()
+                .unwrap()
+                .start("second", Instant::now() + Duration::from_secs(1)),
+            IdempotencyStart::Inserted
+        ));
+
+        drop(tx);
+        worker.await.unwrap();
+    }
+
     #[test]
     fn status_reports_queue_config_and_idempotency_entries() {
         let config = OutboundConfig {
@@ -782,6 +944,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
         let sender = OutboundSender {
             config,
+            control: Arc::new(OutboundControl::new(true)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
         };
