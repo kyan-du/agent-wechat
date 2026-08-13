@@ -100,14 +100,17 @@ wx up    # auto-pulls ghcr.io/thisnick/agent-wechat
 See [`docker-compose.yml`](./docker-compose.yml) for a full example. Key points:
 
 ```yaml
-# Generate a token first:
+# Generate a token and device identity first:
 #   mkdir -p ~/.config/agent-wechat
 #   openssl rand -hex 32 > ~/.config/agent-wechat/token
 #   chmod 600 ~/.config/agent-wechat/token
+#   eval "$(./scripts/device-identity.sh)"
 
 services:
   agent-wechat:
     image: ghcr.io/thisnick/agent-wechat:latest
+    hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+    mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     security_opt:
       - seccomp=unconfined
     cap_add:
@@ -125,6 +128,9 @@ services:
       - AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS=${AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS:-1500}
       - AGENT_WECHAT_OUTBOUND_JITTER_MS=${AGENT_WECHAT_OUTBOUND_JITTER_MS:-250}
       - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
+      - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_MAC=${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     restart: unless-stopped
 
 volumes:
