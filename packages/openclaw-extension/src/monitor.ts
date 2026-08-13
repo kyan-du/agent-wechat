@@ -4,6 +4,8 @@ import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pi
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
+import { isCatchUpBatch, selectCatchUpMessages } from "./catch-up.js";
+import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
@@ -649,49 +651,48 @@ async function dispatchSegment(
           );
 
           if (mediaList.length > 0) {
+            const media: MediaPart[] = [];
             for (const mediaUrl of mediaList) {
-              try {
-                const fsmod = await import("fs/promises");
-                const pathmod = await import("path");
+              const fsmod = await import("fs/promises");
+              const pathmod = await import("path");
 
-                let base64: string;
-                let mimeType: string;
-                let filename: string;
-                if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-                  const res = await fetch(mediaUrl);
-                  const buffer = await res.arrayBuffer();
-                  base64 = Buffer.from(buffer).toString("base64");
-                  mimeType = res.headers.get("content-type") ?? "application/octet-stream";
-                  const urlPath = new URL(mediaUrl).pathname;
-                  filename = pathmod.basename(urlPath) || "file";
-                } else {
-                  const buf = await fsmod.readFile(mediaUrl);
-                  base64 = buf.toString("base64");
-                  filename = pathmod.basename(mediaUrl);
-                  const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
-                  const extMime: Record<string, string> = {
-                    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-                    gif: "image/gif", webp: "image/webp",
-                  };
-                  mimeType = extMime[ext] ?? "application/octet-stream";
-                }
-
-                const isImage = mimeType.startsWith("image/");
-                if (isImage) {
-                  await client.sendMessage({ chatId, image: { data: base64, mimeType } });
-                } else {
-                  await client.sendMessage({ chatId, file: { data: base64, filename } });
-                }
-              } catch (err) {
-                log?.error?.(`[wechat:${liveAccount.accountId}] Failed to send media: ${err}`);
+              let base64: string;
+              let mimeType: string;
+              let filename: string;
+              if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+                const res = await fetch(mediaUrl);
+                if (!res.ok) throw new Error(`Media download failed: ${res.status}`);
+                const buffer = await res.arrayBuffer();
+                base64 = Buffer.from(buffer).toString("base64");
+                mimeType = res.headers.get("content-type") ?? "application/octet-stream";
+                const urlPath = new URL(mediaUrl).pathname;
+                filename = pathmod.basename(urlPath) || "file";
+              } else {
+                const buf = await fsmod.readFile(mediaUrl);
+                base64 = buf.toString("base64");
+                filename = pathmod.basename(mediaUrl);
+                const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
+                const extMime: Record<string, string> = {
+                  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+                  gif: "image/gif", webp: "image/webp",
+                };
+                mimeType = extMime[ext] ?? "application/octet-stream";
               }
+
+              media.push(mimeType.startsWith("image/")
+                ? { image: { data: base64, mimeType } }
+                : { file: { data: base64, filename } });
             }
-            // Send text caption separately if present
-            if (text) {
-              await client.sendMessage({ chatId, text });
-            }
+            await sendLogicalMediaTask({
+              client,
+              chatId,
+              media,
+              caption: text || undefined,
+              interPartDelayMs: liveAccount.mediaPartDelayMs,
+            });
           } else if (text) {
-            await client.sendMessage({ chatId, text });
+            const result = await client.sendMessage({ chatId, text });
+            if (!result.success) throw new Error(result.error ?? "Send failed");
           }
         },
         onError: (err: unknown, info: any) => {
@@ -787,10 +788,11 @@ async function processUnreadChat(
     }
   }
 
-  // Determine how many messages to fetch
+  // Bound recovery reads even when WeChat reports a very large unread backlog.
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
-  const fetchLimit = Math.max(chat.unreadCount, 20);
+  const recoveryWindow = Math.max(liveAccount.catchUpMaxMessages, 20);
+  const fetchLimit = Math.min(Math.max(chat.unreadCount, 20), recoveryWindow);
 
   let messages: Message[];
   try {
@@ -836,6 +838,42 @@ async function processUnreadChat(
       return;
     }
     newMessages.sort((a, b) => a.localId - b.localId);
+  }
+
+  const catchUpLimits = {
+    maxMessages: liveAccount.catchUpMaxMessages,
+    maxAgeMs: liveAccount.catchUpMaxAgeMs,
+  };
+  const isRecovery = firstPoll || (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits));
+  if (isRecovery) {
+    const selection = selectCatchUpMessages(
+      newMessages,
+      catchUpLimits,
+      liveAccount.catchUpMode,
+    );
+    const recoveryCursor = Math.max(selection.cursor, chat.lastMsgLocalId ?? 0);
+
+    if (liveAccount.catchUpMode === "read-only") {
+      lastSeenId.set(chatId, recoveryCursor);
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Recovery read-only: advanced ${chatId} to ${recoveryCursor} without dispatching ${newMessages.length} msg(s)`,
+      );
+      return;
+    }
+
+    newMessages = selection.messages;
+    if (newMessages.length === 0) {
+      lastSeenId.set(chatId, recoveryCursor);
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Recovery skipped ${selection.skipped} stale msg(s) in ${chatId}`,
+      );
+      return;
+    }
+    if (selection.skipped > 0) {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Recovery limited ${chatId} to ${newMessages.length} recent msg(s); skipped ${selection.skipped}`,
+      );
+    }
   }
 
   log?.info?.(

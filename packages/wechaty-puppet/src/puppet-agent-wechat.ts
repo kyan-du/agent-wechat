@@ -10,6 +10,7 @@ import type { Chat, Contact, Message, LoginSubscriptionEvent } from '@agent-wech
 
 const require = createRequire(import.meta.url)
 const { version: VERSION } = require('../package.json')
+import { runPollIfIdle, type PollGuard } from './poll-guard.js'
 import {
   chatToContactPayload,
   contactToContactPayload,
@@ -31,6 +32,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
 
   private client!: WeChatClient
   private pollTimer?: ReturnType<typeof setInterval>
+  private pollGuard: PollGuard = { inFlight: false }
   private loginHandle?: { close: () => void }
   private loginTerminalSeen = false
   private loginFailureEmitted = false
@@ -243,7 +245,11 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     log.verbose('PuppetAgentWeChat', 'startPolling(%dms)', this.pollIntervalMs)
 
     this.pollTimer = setInterval(() => {
-      void this.pollMessages()
+      void runPollIfIdle(this.pollGuard, () => this.pollMessages()).then((ran) => {
+        if (!ran) {
+          log.verbose('PuppetAgentWeChat', 'Skipping overlapping poll')
+        }
+      })
     }, this.pollIntervalMs)
   }
 
