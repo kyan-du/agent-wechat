@@ -11,6 +11,14 @@ import type { Chat, Contact, Message, LoginSubscriptionEvent } from '@agent-wech
 const require = createRequire(import.meta.url)
 const { version: VERSION } = require('../package.json')
 import {
+  invalidatePollLifecycle,
+  runPollIfIdle,
+  startPollLifecycle,
+  stopPollLifecycle,
+  type PollContext,
+  type PollLifecycle,
+} from './poll-guard.js'
+import {
   chatToContactPayload,
   contactToContactPayload,
   chatToRoomPayload,
@@ -31,6 +39,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
 
   private client!: WeChatClient
   private pollTimer?: ReturnType<typeof setInterval>
+  private pollLifecycle: PollLifecycle = { generation: 0 }
   private loginHandle?: { close: () => void }
   private loginTerminalSeen = false
   private loginFailureEmitted = false
@@ -114,7 +123,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
   override async onStop(): Promise<void> {
     log.verbose('PuppetAgentWeChat', 'onStop()')
 
-    this.stopPolling()
+    await this.stopPolling()
 
     if (this.loginHandle) {
       this.loginHandle.close()
@@ -242,35 +251,50 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     if (this.pollTimer) return
     log.verbose('PuppetAgentWeChat', 'startPolling(%dms)', this.pollIntervalMs)
 
+    const generation = startPollLifecycle(this.pollLifecycle)
     this.pollTimer = setInterval(() => {
-      void this.pollMessages()
+      void runPollIfIdle(this.pollLifecycle, generation, context => this.pollMessages(context)).then((ran) => {
+        if (!ran) {
+          log.verbose('PuppetAgentWeChat', 'Skipping overlapping poll')
+        }
+      })
     }, this.pollIntervalMs)
   }
 
-  private stopPolling(): void {
+  private async stopPolling(): Promise<void> {
     if (this.pollTimer) {
       clearInterval(this.pollTimer)
       this.pollTimer = undefined
     }
+    await stopPollLifecycle(this.pollLifecycle)
   }
 
-  private async pollMessages(): Promise<void> {
+  private async pollMessages(context: PollContext): Promise<void> {
     try {
       const auth = await this.client.authStatus()
       if (auth.status !== 'logged_in' || !auth.loggedInUser) {
         log.warn('PuppetAgentWeChat', 'Account logged out, stopping poll')
-        this.stopPolling()
+        invalidatePollLifecycle(this.pollLifecycle)
+        if (this.pollTimer) {
+          clearInterval(this.pollTimer)
+          this.pollTimer = undefined
+        }
         await this.logout('WeChat logged out')
         return
       }
       if (auth.loggedInUser !== this.currentUserId) {
         log.warn('PuppetAgentWeChat', 'User changed from %s to %s', this.currentUserId, auth.loggedInUser)
-        this.stopPolling()
+        invalidatePollLifecycle(this.pollLifecycle)
+        if (this.pollTimer) {
+          clearInterval(this.pollTimer)
+          this.pollTimer = undefined
+        }
         await this.logout('User changed')
         return
       }
 
       const chats = await this.client.listChats(50)
+      if (!context.isCurrent()) return
 
       // Update contact/room stores
       for (const chat of chats) {
@@ -287,28 +311,30 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       )
 
       for (const chat of unreadChats) {
-        await this.processUnreadChat(chat)
+        if (!context.isCurrent()) return
+        await this.processUnreadChat(chat, context)
       }
 
       // Catch-up: check tracked chats where lastMsgLocalId advanced
       for (const chat of chats) {
+        if (!context.isCurrent()) return
         if (chat.username.startsWith('gh_')) continue
         const prevSeen = this.lastSeenId.get(chat.username)
         if (prevSeen === undefined) continue
         if (unreadChats.some(c => c.username === chat.username)) continue
         if (!chat.lastMsgLocalId || chat.lastMsgLocalId <= prevSeen) continue
 
-        await this.processUnreadChat(chat)
+        await this.processUnreadChat(chat, context)
       }
     } catch (err) {
       log.warn('PuppetAgentWeChat', 'pollMessages error: %s', err)
     }
 
-    // Feed the watchdog so gRPC clients don't timeout
-    this.emit('heartbeat', { data: 'poll' })
+    // Feed the watchdog so gRPC clients don't timeout.
+    if (context.isCurrent()) this.emit('heartbeat', { data: 'poll' })
   }
 
-  private async processUnreadChat(chat: Chat): Promise<void> {
+  private async processUnreadChat(chat: Chat, context: PollContext): Promise<void> {
     const chatId = chat.username
     const firstPoll = !this.lastSeenId.has(chatId)
     const prevLastSeen = this.lastSeenId.get(chatId) ?? 0
@@ -317,6 +343,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     let messages: Message[]
     try {
       messages = await this.client.listMessages(chatId, fetchLimit)
+      if (!context.isCurrent()) return
     } catch (err) {
       log.warn('PuppetAgentWeChat', 'Failed to list messages for %s: %s', chatId, err)
       return
@@ -348,6 +375,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     const selfId = this.currentUserId
 
     for (const msg of newMessages) {
+      if (!context.isCurrent()) return
       // Skip self-sent messages
       if (msg.isSelf) continue
 
@@ -358,12 +386,14 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       this.emit('message', { messageId })
     }
 
+    if (!context.isCurrent()) return
     const maxId = Math.max(...newMessages.map(m => m.localId))
     this.lastSeenId.set(chatId, maxId)
 
     // Clear unreads after processing
     try {
       await this.client.openChat(chatId, true)
+      if (!context.isCurrent()) return
     } catch (err) {
       log.warn('PuppetAgentWeChat', 'Failed to clear unreads for %s: %s', chatId, err)
     }

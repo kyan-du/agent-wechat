@@ -43,7 +43,11 @@
             }
           },
           "pollIntervalMs": { "type": "integer", "minimum": 100 },
-          "authPollIntervalMs": { "type": "integer", "minimum": 1000 }
+          "authPollIntervalMs": { "type": "integer", "minimum": 1000 },
+          "catchUpMode": { "type": "string", "enum": ["read-only", "latest"] },
+          "catchUpMaxMessages": { "type": "integer", "minimum": 1 },
+          "catchUpMaxAgeMs": { "type": "integer", "minimum": 1000 },
+          "mediaPartDelayMs": { "type": "integer", "minimum": 0 }
         }
       }
     }

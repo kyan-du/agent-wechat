@@ -3,7 +3,7 @@ use crate::ia::actions;
 use crate::ia::helpers::find_edit_and_send_button;
 use crate::ia::selectors::{query_selector, query_selector_all};
 use crate::ia::types::*;
-use crate::tools::chat_select::{open_chat, OpenChatResult};
+use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
 
 pub struct ChatOpenPlan;
 
@@ -88,7 +88,7 @@ impl Plan for ChatOpenPlan {
                     let force = main_state_id == Some("chat");
                     let result = open_chat(&params.chat_id, force, click_xy).await;
 
-                    if !result.ok {
+                    if confirm_target(&result, &params.chat_id).is_err() {
                         plan_state.result = Some(result);
                         return None;
                     }

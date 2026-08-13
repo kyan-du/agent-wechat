@@ -10,11 +10,11 @@ use crate::db::get_db;
 use crate::execution::run_execution_loop;
 use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
+use crate::sessions::manager::get_session;
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
-use crate::sessions::manager::get_session;
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -258,7 +258,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
     let cancel = CancellationToken::new();
     let noop_emit = |_: SubscriptionEvent| {};
 
-    let (result, _plan_state) =
+    let (result, plan_state) =
         run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
 
     // Clean up temp files
@@ -271,6 +271,6 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
 
     Json(SendResult {
         success: result.success,
-        error: result.error,
+        error: plan_state.diagnostic_error.or(result.error),
     })
 }

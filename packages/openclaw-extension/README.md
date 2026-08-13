@@ -151,6 +151,10 @@ All config lives under `channels.wechat` in OpenClaw's config file:
 | `groups` | object | `{}` | Per-group overrides (e.g. `{ "id@chatroom": { "requireMention": false, "enabled": true, "groupPolicy": "allowlist", "allowFrom": ["wxid_..."] } }`) |
 | `pollIntervalMs` | integer | `1000` | Message polling interval |
 | `authPollIntervalMs` | integer | `30000` | Auth status check interval |
+| `catchUpMode` | `"read-only" \| "latest"` | `"read-only"` | On startup/recovery, advance the cursor without replying (`read-only`) or dispatch only the bounded recent suffix (`latest`) |
+| `catchUpMaxMessages` | integer | `10` | Maximum messages eligible for a recovery dispatch |
+| `catchUpMaxAgeMs` | integer | `300000` | Maximum age of messages eligible for a recovery dispatch |
+| `mediaPartDelayMs` | integer | `750` | Minimum delay between media items and their caption in one logical send task |
 
 ## Development
 

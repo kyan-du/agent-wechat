@@ -1,4 +1,4 @@
-use super::selectors::query_selector;
+use super::selectors::{is_send_button_name, query_selector};
 use super::types::{A11yNode, Bounds, FrameHint};
 
 /// Generate a stable hash from a string.
@@ -52,7 +52,7 @@ fn is_main_frame(node: &A11yNode) -> bool {
     node.role == "frame" && (node.name == "Weixin" || node.name == "WeChat")
 }
 
-/// A candidate composer: the editable text input plus its sibling Send(S) button.
+/// A candidate composer: the editable text input plus its sibling localized Send button.
 struct ComposerPair<'a> {
     edit: &'a A11yNode,
     send: &'a A11yNode,
@@ -61,7 +61,7 @@ struct ComposerPair<'a> {
     in_main_frame: bool,
 }
 
-/// Find the composer (editable + Send button) to operate on.
+/// Find the composer (editable + localized Send button) to operate on.
 ///
 /// WeChat's accessibility tree can contain *multiple* edit+send pairs:
 /// the live main-window composer plus stale "ghost" frames left behind by
@@ -109,7 +109,7 @@ fn collect_edit_send_pairs<'a>(
     if let Some(children) = &node.children {
         let send_btn = children
             .iter()
-            .find(|c| c.role == "push-button" && c.name == "Send(S)");
+            .find(|c| c.role == "push-button" && is_send_button_name(&c.name));
         let edit_node = children
             .iter()
             .find(|c| c.role == "text" && node_has_state(c, "EDITABLE"));
@@ -180,14 +180,18 @@ mod composer_tests {
         }
     }
 
-    fn composer(focused: bool, disabled: bool) -> A11yNode {
+    fn composer_named(send_name: &str, focused: bool, disabled: bool) -> A11yNode {
         let mut edit_states = vec!["EDITABLE"];
         if focused { edit_states.push("FOCUSED"); }
         let send_states = if disabled { vec!["DISABLED"] } else { vec![] };
         node("panel", "", &[], vec![
             node("text", "composer", &edit_states, vec![]),
-            node("push-button", "Send(S)", &send_states, vec![]),
+            node("push-button", send_name, &send_states, vec![]),
         ])
+    }
+
+    fn composer(focused: bool, disabled: bool) -> A11yNode {
+        composer_named("Send(S)", focused, disabled)
     }
 
     #[test]
@@ -210,5 +214,16 @@ mod composer_tests {
         let main_edit = &tree.children.as_ref().unwrap()[1].children.as_ref().unwrap()[0]
             .children.as_ref().unwrap()[0];
         assert!(std::ptr::eq(edit, main_edit));
+    }
+
+    #[test]
+    fn chinese_send_button_is_supported() {
+        let tree = node(
+            "frame",
+            "Weixin",
+            &[],
+            vec![composer_named("发送(S)", true, false)],
+        );
+        assert!(find_edit_and_send_button(&tree).is_some());
     }
 }
