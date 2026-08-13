@@ -14,7 +14,14 @@ export WECHAT_HOME=${WECHAT_HOME:-/home/wechat}
 # Persistent device identity (before WeChat starts)
 # ============================================
 if [ -x /opt/identity.sh ]; then
-  /opt/identity.sh || echo "[identity] warning: identity script failed" >&2
+  if ! /opt/identity.sh; then
+    if [ "${AGENT_WECHAT_ALLOW_IDENTITY_MISMATCH:-0}" = "1" ]; then
+      echo "[identity] AGENT_WECHAT_ALLOW_IDENTITY_MISMATCH=1; continuing after identity failure" >&2
+    else
+      echo "[identity] refusing to start WeChat with a mismatched or missing identity" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # ============================================

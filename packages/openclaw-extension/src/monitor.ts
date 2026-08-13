@@ -1029,6 +1029,7 @@ async function processUnreadChat(
       newestTimestampMs: newestTs,
       nowMs: Date.now(),
       catchupDispatched: catchup?.catchupDispatched ?? 0,
+      catchupBudget: liveAccount.catchUpChatBudget,
     });
     if (catchup && !catchup.allowDispatch && decision.action === "dispatch") {
       log?.info?.(
@@ -1038,7 +1039,7 @@ async function processUnreadChat(
     }
     if (decision.action === "defer") {
       log?.info?.(
-        `[wechat:${liveAccount.accountId}] Catch-up budget reached; keeping ${chatId} for later`,
+        `[wechat:${liveAccount.accountId}] Catch-up hold for ${chatId} (budget ${liveAccount.catchUpChatBudget}); raise channels.wechat.catchUpChatBudget to continue`,
       );
       return "deferred";
     }

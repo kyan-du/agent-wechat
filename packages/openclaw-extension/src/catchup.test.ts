@@ -108,3 +108,12 @@ test("seven-chat reconnect caps at five and holds the rest without a live burst"
   assert.equal(run.dispatched, 5);
   assert.equal(run.reconnect, true);
 });
+
+test("raising catchUpChatBudget continues held chats one per poll", () => {
+  const run = simulateReconnectPolls(7, 5, 20, (tick) => (tick >= 6 ? 7 : 5));
+  assert.deepEqual(run.ticks.slice(0, 5), [1, 1, 1, 1, 1]);
+  assert.equal(run.ticks[5], 0);
+  assert.deepEqual(run.ticks.slice(6, 8), [1, 1]);
+  assert.equal(run.ticks.reduce((sum, n) => sum + n, 0), 7);
+  assert.equal(run.reconnect, false);
+});

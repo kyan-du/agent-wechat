@@ -564,6 +564,11 @@ pub struct SendResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    /// True once Return/CommitKey was attempted. Post-commit diagnostics
+    /// (`send_result_uncertain`, missing composer, popup) must still count
+    /// as usage because the message may already have left.
+    #[serde(default)]
+    pub commit_attempted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

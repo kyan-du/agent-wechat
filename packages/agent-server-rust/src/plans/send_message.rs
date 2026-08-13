@@ -511,4 +511,24 @@ mod tests {
             Some("send_commit_uncertain")
         );
     }
+
+    #[test]
+    fn confirmation_diagnostics_after_successful_return_keep_commit_armed() {
+        let mut state = SendMessagePlan.initial_plan_state();
+        record_action_result(&mut state, &Ok(true));
+        assert!(state.send_action_executed);
+        assert!(matches!(state.phase, SendMessagePhase::Confirming));
+
+        state.diagnostic_error = Some("composer_missing_during_confirmation".into());
+        assert!(state.send_action_executed);
+        assert_eq!(
+            reset_after_popup(&mut state),
+            Err("popup_after_send_action")
+        );
+        assert_eq!(
+            state.diagnostic_error.as_deref(),
+            Some("popup_after_send_action")
+        );
+        assert!(state.send_action_executed);
+    }
 }

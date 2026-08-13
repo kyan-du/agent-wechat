@@ -157,6 +157,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         catchUpMode: { type: "string", enum: ["read-only", "latest"] },
         catchUpMaxMessages: { type: "integer", minimum: 1 },
         catchUpMaxAgeMs: { type: "integer", minimum: 1000 },
+        catchUpChatBudget: { type: "integer", minimum: 1 },
         mediaPartDelayMs: { type: "integer", minimum: 0 },
       },
     },
@@ -186,6 +187,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
           catchUpMode: "read-only",
           catchUpMaxMessages: 10,
           catchUpMaxAgeMs: 300000,
+          catchUpChatBudget: 5,
           mediaPartDelayMs: 750,
         };
       }

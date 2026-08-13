@@ -51,7 +51,9 @@ AGENT_WECHAT_HOSTNAME=$AGENT_WECHAT_HOSTNAME
 AGENT_WECHAT_MAC=$AGENT_WECHAT_MAC
 EOF
 
-# Also emit for `eval $(scripts/device-identity.sh)`
-printf 'AGENT_WECHAT_MACHINE_ID=%s\n' "$AGENT_WECHAT_MACHINE_ID"
-printf 'AGENT_WECHAT_HOSTNAME=%s\n' "$AGENT_WECHAT_HOSTNAME"
-printf 'AGENT_WECHAT_MAC=%s\n' "$AGENT_WECHAT_MAC"
+# Emit exports so `eval "$(./scripts/device-identity.sh)"` populates the
+# environment Compose interpolation reads. The persisted file stays KEY=value
+# for `set -a; . file` / `--env-file`.
+printf 'export AGENT_WECHAT_MACHINE_ID=%s\n' "$AGENT_WECHAT_MACHINE_ID"
+printf 'export AGENT_WECHAT_HOSTNAME=%s\n' "$AGENT_WECHAT_HOSTNAME"
+printf 'export AGENT_WECHAT_MAC=%s\n' "$AGENT_WECHAT_MAC"

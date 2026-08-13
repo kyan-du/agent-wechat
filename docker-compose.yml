@@ -4,8 +4,10 @@
 #   openssl rand -hex 32 > ~/.config/agent-wechat/token
 #   chmod 600 ~/.config/agent-wechat/token
 #   eval "$(./scripts/device-identity.sh)"
+# The script prints `export KEY=value` so Compose interpolation can see them.
 # Hostname and MAC must be applied at create time; the container cannot
-# change the UTS hostname with only NET_ADMIN.
+# change the UTS hostname with only NET_ADMIN. Identity failure aborts
+# the entrypoint before WeChat starts.
 
 services:
   agent-wechat:

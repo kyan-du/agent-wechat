@@ -195,6 +195,7 @@ export const sendResultSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   error: z.string().optional(),
+  commitAttempted: z.boolean().optional(),
 });
 
 export const getMediaParamsSchema = z.object({

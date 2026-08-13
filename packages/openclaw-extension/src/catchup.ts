@@ -49,6 +49,8 @@ export function shouldFoldSegments(isReconnect: boolean): boolean {
 /**
  * Stay in reconnect while leftover backlog exists.
  * Budget never flips remaining chats to live; they stay held (no auto-send).
+ * Raise `catchUpChatBudget` (hot-reload) to continue held chats, still one
+ * send per poll. Held chats are not dropped from lastSeen.
  */
 export function nextReconnectState(input: {
   reconnect: boolean;
@@ -74,12 +76,16 @@ export function simulateReconnectPolls(
   chatCount: number,
   budget = DEFAULT_CATCHUP_BUDGET,
   maxTicks = 20,
+  budgetAtTick?: (tick: number) => number,
 ): { ticks: number[]; reconnect: boolean; dispatched: number } {
   let remaining = chatCount;
   let reconnect = true;
   let dispatched = 0;
   const ticks: number[] = [];
   for (let i = 0; i < maxTicks && reconnect && remaining > 0; i++) {
+    if (budgetAtTick) {
+      budget = budgetAtTick(i);
+    }
     let dispatchedThisTick = 0;
     let deferred = 0;
     for (let c = 0; c < remaining; c++) {

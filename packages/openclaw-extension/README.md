@@ -154,6 +154,7 @@ All config lives under `channels.wechat` in OpenClaw's config file:
 | `catchUpMode` | `"read-only" \| "latest"` | `"read-only"` | On startup/recovery, advance the cursor without replying (`read-only`) or dispatch only the bounded recent suffix (`latest`) |
 | `catchUpMaxMessages` | integer | `10` | Maximum messages eligible for a recovery dispatch |
 | `catchUpMaxAgeMs` | integer | `300000` | Maximum age of messages eligible for a recovery dispatch |
+| `catchUpChatBudget` | integer | `5` | Max chats that auto-reply in one reconnect window. Leftovers stay held; raise this to continue, one send per poll |
 | `mediaPartDelayMs` | integer | `750` | Minimum delay between media items and their caption in one logical send task |
 
 ## Development

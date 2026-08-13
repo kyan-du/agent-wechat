@@ -158,6 +158,7 @@ impl IntoResponse for OutboundSendResponse {
                         success: false,
                         error_code: Some(error.code),
                         error: Some(error.message),
+                        commit_attempted: false,
                     }),
                 )
                     .into_response()
@@ -636,13 +637,13 @@ async fn worker_loop(
         };
 
         let result = execute_send(&task.params).await;
-        if result.success || result.error_code.as_deref() == Some("send_commit_uncertain") {
-            usage.lock().expect("usage poisoned").record_success(
-                &task.params.chat_id,
-                Instant::now(),
-                SystemTime::now(),
-            );
-        }
+        apply_send_result_to_usage(
+            &usage,
+            &result,
+            &task.params.chat_id,
+            Instant::now(),
+            SystemTime::now(),
+        );
         complete_task(task, result, &idempotency, Instant::now());
     }
 }
@@ -707,12 +708,39 @@ async fn execute_send(params: &SendMessageParams) -> SendResult {
     let noop_emit = |_: SubscriptionEvent| {};
     let (result, plan_state) =
         run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
-    let error = plan_state.diagnostic_error.or(result.error);
+    send_result_from_plan(result.success, &plan_state, result.error)
+}
 
+fn send_result_from_plan(
+    success: bool,
+    plan_state: &crate::plans::send_message::SendMessagePlanState,
+    result_error: Option<String>,
+) -> SendResult {
+    let error = plan_state.diagnostic_error.clone().or(result_error);
     SendResult {
-        success: result.success,
+        success,
         error_code: error.clone(),
         error,
+        commit_attempted: plan_state.send_action_executed,
+    }
+}
+
+fn counts_toward_usage(result: &SendResult) -> bool {
+    result.success || result.commit_attempted
+}
+
+fn apply_send_result_to_usage(
+    usage: &Mutex<Usage>,
+    result: &SendResult,
+    chat_id: &str,
+    now: Instant,
+    wall: SystemTime,
+) {
+    if counts_toward_usage(result) {
+        usage
+            .lock()
+            .expect("usage poisoned")
+            .record_success(chat_id, now, wall);
     }
 }
 
@@ -761,6 +789,7 @@ fn send_error(error: &str) -> SendResult {
         success: false,
         error_code: Some(error.to_string()),
         error: Some(error.to_string()),
+        commit_attempted: false,
     }
 }
 
@@ -949,6 +978,7 @@ mod tests {
                 success: false,
                 error_code: Some("UNCERTAIN_AFTER_SEND".to_string()),
                 error: Some("UNCERTAIN_AFTER_SEND".to_string()),
+                commit_attempted: true,
             },
         );
 
@@ -974,6 +1004,7 @@ mod tests {
                 success: true,
                 error_code: None,
                 error: None,
+                commit_attempted: true,
             },
         );
         assert!(matches!(
@@ -1336,6 +1367,7 @@ mod tests {
                 success: false,
                 error_code: Some("send_commit_uncertain".into()),
                 error: Some("send_commit_uncertain".into()),
+                commit_attempted: true,
             },
         );
         match store.start("k", now + Duration::from_millis(1)) {
@@ -1377,6 +1409,7 @@ mod tests {
                 success: true,
                 error_code: None,
                 error: None,
+                commit_attempted: true,
             },
         );
         match sender.send(test_params("hello"), Some("replay".into())).await {
@@ -1448,6 +1481,76 @@ mod tests {
         usage.hour_count = 2;
         usage.hour_key = wall.duration_since(UNIX_EPOCH).unwrap().as_secs() / 3600;
         assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 500).is_err());
+    }
+
+    fn post_commit_result(code: &str) -> SendResult {
+        SendResult {
+            success: false,
+            error_code: Some(code.into()),
+            error: Some(code.into()),
+            commit_attempted: true,
+        }
+    }
+
+    #[test]
+    fn post_commit_diagnostics_count_as_usage() {
+        let usage = Mutex::new(Usage::new());
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        for code in [
+            "send_commit_uncertain",
+            "send_result_uncertain",
+            "composer_missing_during_confirmation",
+            "popup_after_send_action",
+        ] {
+            apply_send_result_to_usage(&usage, &post_commit_result(code), "chat", now, wall);
+        }
+        let snapshot = usage.lock().unwrap();
+        assert_eq!(snapshot.hour_count, 4);
+        assert_eq!(snapshot.day_count, 4);
+        assert!(snapshot.last_per_chat.contains_key("chat"));
+    }
+
+    #[test]
+    fn pre_commit_failures_do_not_count_as_usage() {
+        let usage = Mutex::new(Usage::new());
+        apply_send_result_to_usage(
+            &usage,
+            &SendResult {
+                success: false,
+                error_code: Some("target_confirmation_identity_mismatch".into()),
+                error: Some("target_confirmation_identity_mismatch".into()),
+                commit_attempted: false,
+            },
+            "chat",
+            Instant::now(),
+            SystemTime::now(),
+        );
+        let snapshot = usage.lock().unwrap();
+        assert_eq!(snapshot.hour_count, 0);
+        assert_eq!(snapshot.day_count, 0);
+    }
+
+    #[test]
+    fn successful_return_then_uncertain_confirmation_is_commit_attempted() {
+        let mut plan_state = crate::plans::send_message::SendMessagePlanState {
+            phase: crate::plans::send_message::SendMessagePhase::Confirming,
+            open_result: None,
+            confirm_attempts: 0,
+            send_action_executed: true,
+            diagnostic_error: None,
+        };
+        for code in [
+            "send_result_uncertain",
+            "composer_missing_during_confirmation",
+            "popup_after_send_action",
+        ] {
+            plan_state.diagnostic_error = Some(code.into());
+            let result = send_result_from_plan(false, &plan_state, None);
+            assert!(result.commit_attempted, "{code}");
+            assert!(counts_toward_usage(&result), "{code}");
+            assert_eq!(result.error_code.as_deref(), Some(code));
+        }
     }
 
     fn pre_execution_reject_is_not_cached() {
