@@ -1,7 +1,12 @@
 import { Command, Option } from "commander";
 import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
-import { spawn, execSync } from "child_process";
+import { spawn, execFileSync, execSync } from "child_process";
+import {
+  generateDeviceIdentity,
+  parseDeviceIdentity,
+  type DeviceIdentity,
+} from "./device-identity.js";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import qrTerminal from "qrcode-terminal";
@@ -24,36 +29,20 @@ const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
 const IDENTITY_PATH = path.join(TOKEN_DIR, "device-identity.json");
 
-interface DeviceIdentity {
-  machineId: string;
-  hostname: string;
-  mac: string;
-}
-
 function ensureDeviceIdentity(): DeviceIdentity {
-  try {
-    const raw = fs.readFileSync(IDENTITY_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as DeviceIdentity;
-    if (parsed.machineId?.length === 32 && parsed.hostname && parsed.mac) {
-      return parsed;
+  if (fs.existsSync(IDENTITY_PATH)) {
+    try {
+      const parsed = parseDeviceIdentity(JSON.parse(fs.readFileSync(IDENTITY_PATH, "utf-8")));
+      if (parsed) return parsed;
+    } catch {
+      // invalid JSON falls through to fail-closed
     }
-  } catch {
-    // generate
+    console.error(
+      `Invalid device identity in ${IDENTITY_PATH}. Delete it and run wx up again.`,
+    );
+    process.exit(1);
   }
-  const machineId = randomBytes(16).toString("hex");
-  const prefixes = ["lenovo-pc", "honor-pc", "xiaomi-pc", "asus-pc", "dell-pc", "hp-pc", "thinkpad"];
-  const prefix = prefixes[parseInt(machineId.slice(0, 2), 16) % prefixes.length];
-  const num = (parseInt(machineId.slice(2, 6), 16) % 900) + 100;
-  const hostname = `${prefix}-${num}`;
-  const mac = [
-    "00",
-    "1b",
-    "21",
-    machineId.slice(6, 8),
-    machineId.slice(8, 10),
-    machineId.slice(10, 12),
-  ].join(":");
-  const identity: DeviceIdentity = { machineId, hostname, mac };
+  const identity = generateDeviceIdentity(randomBytes(16).toString("hex"));
   fs.mkdirSync(TOKEN_DIR, { recursive: true });
   fs.writeFileSync(IDENTITY_PATH, JSON.stringify(identity, null, 2) + "\n", { mode: 0o600 });
   return identity;
@@ -1165,7 +1154,7 @@ async function cmdUp(opts: { proxy?: string } = {}) {
   dockerArgs.push(image);
 
   try {
-    execSync(`docker ${dockerArgs.join(" ")}`, { stdio: "inherit" });
+    execFileSync("docker", dockerArgs, { stdio: "inherit" });
     console.log(`\nContainer started successfully!`);
     console.log(`API: http://localhost:${DEFAULT_PORT}`);
     printNoVncUrl();

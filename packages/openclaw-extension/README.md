@@ -34,16 +34,22 @@ services:
   agent-wechat:
     image: ghcr.io/thisnick/agent-wechat:latest
     container_name: agent-wechat
+    hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+    mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     security_opt:
       - seccomp=unconfined
     cap_add:
       - SYS_PTRACE
+      - NET_ADMIN
     ports:
       - "6174:6174"
     volumes:
       - agent-wechat-data:/data
       - agent-wechat-home:/home/wechat
       - ~/.config/agent-wechat/token:/data/auth-token:ro
+    environment:
+      - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     restart: unless-stopped
 
 volumes:
@@ -51,12 +57,13 @@ volumes:
   agent-wechat-home:
 ```
 
-Generate a token before starting:
+Generate a token and a persistent device identity before starting. Hostname and MAC must be applied at create time; a mismatch aborts the entrypoint before WeChat starts. From the agent-wechat repo:
 
 ```bash
 mkdir -p ~/.config/agent-wechat
 openssl rand -hex 32 > ~/.config/agent-wechat/token
 chmod 600 ~/.config/agent-wechat/token
+eval "$(./scripts/device-identity.sh)"
 docker compose up -d
 ```
 
