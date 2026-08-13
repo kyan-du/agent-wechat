@@ -52,8 +52,17 @@ else
   HN="${PREFIXES[$idx]}-${num}"
 fi
 printf '%s\n' "$HN" > "$HOST_FILE"
-if command -v hostname >/dev/null 2>&1; then
-  hostname "$HN" 2>/dev/null || true
+ACTUAL_HN="$(hostname 2>/dev/null || true)"
+if [ "$ACTUAL_HN" != "$HN" ]; then
+  if command -v hostname >/dev/null 2>&1; then
+    hostname "$HN" 2>/dev/null || true
+  fi
+  ACTUAL_HN="$(hostname 2>/dev/null || true)"
+fi
+if [ "$ACTUAL_HN" != "$HN" ]; then
+  echo "[identity] ERROR: hostname is '${ACTUAL_HN:-unknown}', want '$HN'." >&2
+  echo "[identity] Pass hostname/MAC at container create (wx up or scripts/device-identity.sh)." >&2
+  exit 1
 fi
 
 # os-release: WeChat Linux officially supports deepin. Deepin is Debian-based,

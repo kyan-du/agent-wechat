@@ -306,7 +306,7 @@ impl Usage {
     }
 }
 
-pub fn policy_allows_send(
+fn policy_allows_send(
     config: &OutboundConfig,
     usage: &mut Usage,
     chat_id: &str,
@@ -413,21 +413,6 @@ impl OutboundSender {
             return OutboundSendResponse::Rejected(OutboundError::read_only());
         }
 
-        {
-            let mut usage = self.usage.lock().expect("usage poisoned");
-            if let Err(error) = policy_allows_send(
-                &self.config,
-                &mut usage,
-                &params.chat_id,
-                now,
-                SystemTime::now(),
-                local_minute_of_day(),
-            ) {
-                cleanup_temp_files(&params);
-                return OutboundSendResponse::Rejected(error);
-            }
-        }
-
         if let Some(key) = idempotency_key.as_deref() {
             let mut store = self.idempotency.lock().expect("idempotency store poisoned");
             match store.start(key, now) {
@@ -442,6 +427,27 @@ impl OutboundSender {
                         self.config.retry_after(),
                     ));
                 }
+            }
+        }
+
+        {
+            let mut usage = self.usage.lock().expect("usage poisoned");
+            if let Err(error) = policy_allows_send(
+                &self.config,
+                &mut usage,
+                &params.chat_id,
+                now,
+                SystemTime::now(),
+                local_minute_of_day(),
+            ) {
+                if let Some(key) = idempotency_key.as_deref() {
+                    self.idempotency
+                        .lock()
+                        .expect("idempotency store poisoned")
+                        .remove(key);
+                }
+                cleanup_temp_files(&params);
+                return OutboundSendResponse::Rejected(error);
             }
         }
 
@@ -583,15 +589,17 @@ async fn worker_loop(
             tokio::time::sleep(delay).await;
         }
 
-        let now = Instant::now();
-        if control.is_read_only() {
-            reject_without_idempotency_cache(task, OutboundError::read_only(), &idempotency);
-            continue;
-        }
-        if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
-            continue;
-        }
+        let task = match admit_for_execute(
+            task,
+            &control,
+            config.task_ttl,
+            &config,
+            &usage,
+            &idempotency,
+        ) {
+            Some(task) => task,
+            None => continue,
+        };
 
         let extra = {
             let mut usage = usage.lock().expect("usage poisoned");
@@ -603,14 +611,32 @@ async fn worker_loop(
                 SystemTime::now(),
                 local_minute_of_day(),
             )
-            .unwrap_or(Duration::ZERO)
+        };
+        let extra = match extra {
+            Ok(wait) => wait,
+            Err(error) => {
+                reject_without_idempotency_cache(task, error, &idempotency);
+                continue;
+            }
         };
         if !extra.is_zero() {
             tokio::time::sleep(extra).await;
         }
 
+        let task = match admit_for_execute(
+            task,
+            &control,
+            config.task_ttl,
+            &config,
+            &usage,
+            &idempotency,
+        ) {
+            Some(task) => task,
+            None => continue,
+        };
+
         let result = execute_send(&task.params).await;
-        if result.success {
+        if result.success || result.error_code.as_deref() == Some("send_commit_uncertain") {
             usage.lock().expect("usage poisoned").record_success(
                 &task.params.chat_id,
                 Instant::now(),
@@ -618,6 +644,42 @@ async fn worker_loop(
             );
         }
         complete_task(task, result, &idempotency, Instant::now());
+    }
+}
+
+fn admit_for_execute(
+    task: OutboundTask,
+    control: &OutboundControl,
+    task_ttl: Duration,
+    config: &OutboundConfig,
+    usage: &Mutex<Usage>,
+    idempotency: &Arc<Mutex<IdempotencyStore>>,
+) -> Option<OutboundTask> {
+    if control.is_read_only() {
+        reject_without_idempotency_cache(task, OutboundError::read_only(), idempotency);
+        return None;
+    }
+    if task_expired(&task, Instant::now(), task_ttl) {
+        reject_without_idempotency_cache(task, OutboundError::expired(), idempotency);
+        return None;
+    }
+    let policy = {
+        let mut usage = usage.lock().expect("usage poisoned");
+        policy_allows_send(
+            config,
+            &mut usage,
+            &task.params.chat_id,
+            Instant::now(),
+            SystemTime::now(),
+            local_minute_of_day(),
+        )
+    };
+    match policy {
+        Ok(_) => Some(task),
+        Err(error) => {
+            reject_without_idempotency_cache(task, error, idempotency);
+            None
+        }
     }
 }
 
@@ -1283,6 +1345,90 @@ mod tests {
             }
             _ => panic!("expected cached uncertain result"),
         }
+    }
+
+    #[tokio::test]
+    async fn completed_replay_beats_quiet_hours_policy() {
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 24 * 60,
+            read_only: false,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+        sender.idempotency.lock().unwrap().complete(
+            "replay",
+            Instant::now(),
+            SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+            },
+        );
+        match sender.send(test_params("hello"), Some("replay".into())).await {
+            OutboundSendResponse::Result(result) => assert!(result.success),
+            OutboundSendResponse::Rejected(error) => {
+                panic!("replay must not be rejected as {}", error.code)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_quiet_hours_instead_of_sending() {
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 24 * 60,
+            read_only: false,
+        };
+        let control = Arc::new(OutboundControl::new(false));
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
+        let usage = Arc::new(Mutex::new(Usage::new()));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            Arc::clone(&idempotency),
+            usage,
+        ));
+        let (result_tx, result_rx) = oneshot::channel();
+        tx.try_send(OutboundTask {
+            params: test_params("quiet"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("quiet".into()),
+            result_tx,
+        })
+        .unwrap();
+        match result_rx.await.unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::QuietHours);
+            }
+            _ => panic!("queued quiet-hours task must be rejected, not sent"),
+        }
+        drop(tx);
+        worker.await.unwrap();
     }
 
     #[test]

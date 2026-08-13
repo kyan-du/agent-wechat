@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideCatchup, nextReconnectState, shouldFoldSegments, tickReconnect } from "./catchup.ts";
+import { decideCatchup, nextReconnectState, shouldFoldSegments, simulateReconnectPolls } from "./catchup.ts";
 
 const now = 1_700_000_000_000;
 
@@ -52,7 +52,7 @@ test("stale DM or mention still folds into one reply", () => {
   assert.equal(mention.action, "dispatch");
 });
 
-test("reconnect still folds after five chats; extras stay pending not live", () => {
+test("over-budget reconnect chats are held, not dispatched", () => {
   const d = decideCatchup({
     isReconnect: true,
     isGroup: false,
@@ -62,8 +62,8 @@ test("reconnect still folds after five chats; extras stay pending not live", () 
     catchupDispatched: 5,
     catchupBudget: 5,
   });
-  assert.equal(d.action, "dispatch");
-  assert.equal(d.reason, "catchup_fold");
+  assert.equal(d.action, "defer");
+  assert.equal(d.reason, "catchup_hold");
 });
 
 test("reconnect folds segments", () => {
@@ -101,36 +101,10 @@ test("reconnect ends after a drain so later traffic is live", () => {
   assert.equal(live.reason, "live");
 });
 
-test("seven-chat reconnect stays paced: one send per tick, no live burst", () => {
-  let remaining = 7;
-  let dispatched = 0;
-  let reconnect = true;
-  const perTick: number[] = [];
-  for (let tick = 0; tick < 20 && reconnect; tick++) {
-    const step = tickReconnect(remaining, dispatched);
-    perTick.push(step.dispatchedThisTick);
-    dispatched = step.dispatchedTotal;
-    remaining = step.deferred;
-    const next = nextReconnectState({
-      reconnect: true,
-      unreadCount: remaining + step.dispatchedThisTick,
-      deferred: remaining,
-      dispatched,
-    });
-    reconnect = next.reconnect;
-  }
-  assert.equal(dispatched, 7);
-  assert.deepEqual(perTick, [1, 1, 1, 1, 1, 1, 1]);
-  assert.equal(reconnect, false);
-  assert.equal(
-    decideCatchup({
-      isReconnect: false,
-      isGroup: false,
-      mentioned: false,
-      newestTimestampMs: now,
-      nowMs: now,
-      catchupDispatched: 0,
-    }).reason,
-    "live",
-  );
+test("seven-chat reconnect caps at five and holds the rest without a live burst", () => {
+  const run = simulateReconnectPolls(7, 5);
+  assert.deepEqual(run.ticks.slice(0, 5), [1, 1, 1, 1, 1]);
+  assert.ok(run.ticks.slice(5).every((n) => n === 0));
+  assert.equal(run.dispatched, 5);
+  assert.equal(run.reconnect, true);
 });

@@ -1,13 +1,18 @@
 # Sample docker-compose for standalone agent-wechat deployment.
-# Generate a token before starting:
+# Generate a token and a persistent device identity before starting:
 #   mkdir -p ~/.config/agent-wechat
 #   openssl rand -hex 32 > ~/.config/agent-wechat/token
 #   chmod 600 ~/.config/agent-wechat/token
+#   eval "$(./scripts/device-identity.sh)"
+# Hostname and MAC must be applied at create time; the container cannot
+# change the UTS hostname with only NET_ADMIN.
 
 services:
   agent-wechat:
     image: ghcr.io/thisnick/agent-wechat:latest
     container_name: agent-wechat
+    hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+    mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     security_opt:
       - seccomp=unconfined
     cap_add:
@@ -28,7 +33,8 @@ services:
       - AGENT_WECHAT_OUTBOUND_TASK_TTL_MS=${AGENT_WECHAT_OUTBOUND_TASK_TTL_MS:-60000}
       - AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS=${AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS:-600000}
       - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
-      - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:-}
+      - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
       - AGENT_WECHAT_SPOOF_OS=${AGENT_WECHAT_SPOOF_OS:-1}
       - TZ=${TZ:-Asia/Shanghai}
     restart: unless-stopped

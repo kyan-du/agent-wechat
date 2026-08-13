@@ -23,6 +23,7 @@ export interface CatchupDecision {
 
 export function decideCatchup(input: CatchupInput): CatchupDecision {
   const staleAfter = input.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  const budget = input.catchupBudget ?? DEFAULT_CATCHUP_BUDGET;
   const age = input.nowMs - input.newestTimestampMs;
 
   if (!input.isReconnect) {
@@ -33,6 +34,10 @@ export function decideCatchup(input: CatchupInput): CatchupDecision {
     return { action: "skip_stale", reason: "stale_group" };
   }
 
+  if (input.catchupDispatched >= budget) {
+    return { action: "defer", reason: "catchup_hold" };
+  }
+
   return { action: "dispatch", reason: "catchup_fold" };
 }
 
@@ -41,7 +46,10 @@ export function shouldFoldSegments(isReconnect: boolean): boolean {
   return isReconnect;
 }
 
-/** Stay in reconnect until every deferred chat has been paced out. Budget never flips remaining work to live. */
+/**
+ * Stay in reconnect while leftover backlog exists.
+ * Budget never flips remaining chats to live; they stay held (no auto-send).
+ */
 export function nextReconnectState(input: {
   reconnect: boolean;
   unreadCount: number;
@@ -61,18 +69,50 @@ export function nextReconnectState(input: {
   return { reconnect: true, dispatched: input.dispatched };
 }
 
-/** One paced reconnect tick: at most one dispatch, leftover stays deferred. */
-export function tickReconnect(chats: number, alreadyDispatched: number): {
-  dispatchedThisTick: number;
-  deferred: number;
-  dispatchedTotal: number;
-} {
-  if (chats <= 0) {
-    return { dispatchedThisTick: 0, deferred: 0, dispatchedTotal: alreadyDispatched };
+/** Same control flow as startWeChatMonitor: one allowDispatch slot per poll. */
+export function simulateReconnectPolls(
+  chatCount: number,
+  budget = DEFAULT_CATCHUP_BUDGET,
+  maxTicks = 20,
+): { ticks: number[]; reconnect: boolean; dispatched: number } {
+  let remaining = chatCount;
+  let reconnect = true;
+  let dispatched = 0;
+  const ticks: number[] = [];
+  for (let i = 0; i < maxTicks && reconnect && remaining > 0; i++) {
+    let dispatchedThisTick = 0;
+    let deferred = 0;
+    for (let c = 0; c < remaining; c++) {
+      const decision = decideCatchup({
+        isReconnect: true,
+        isGroup: false,
+        mentioned: false,
+        newestTimestampMs: Date.now(),
+        nowMs: Date.now(),
+        catchupDispatched: dispatched,
+        catchupBudget: budget,
+      });
+      const allow = dispatchedThisTick < 1;
+      if (decision.action === "dispatch" && allow) {
+        dispatchedThisTick += 1;
+        dispatched += 1;
+      } else {
+        deferred += 1;
+      }
+    }
+    remaining = deferred;
+    ticks.push(dispatchedThisTick);
+    const next = nextReconnectState({
+      reconnect: true,
+      unreadCount: remaining + dispatchedThisTick,
+      deferred,
+      dispatched,
+      budget,
+    });
+    reconnect = next.reconnect;
+    if (!next.reconnect) {
+      dispatched = 0;
+    }
   }
-  return {
-    dispatchedThisTick: 1,
-    deferred: chats - 1,
-    dispatchedTotal: alreadyDispatched + 1,
-  };
+  return { ticks, reconnect, dispatched };
 }

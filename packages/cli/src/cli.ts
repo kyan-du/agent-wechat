@@ -79,7 +79,18 @@ function printIdentityCheck() {
       `docker exec ${CONTAINER_NAME} sh -c 'head -c 8 /etc/machine-id 2>/dev/null || echo missing'`,
       { encoding: "utf-8" },
     ).trim();
-    console.log(`container dockerenv: ${dockerenv}  machine-id: ${mid}…`);
+    const actualHn = execSync(
+      `docker exec ${CONTAINER_NAME} hostname`,
+      { encoding: "utf-8" },
+    ).trim();
+    const actualMac = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'cat /sys/class/net/eth0/address 2>/dev/null || cat /sys/class/net/$(ls /sys/class/net | head -1)/address'`,
+      { encoding: "utf-8" },
+    ).trim();
+    console.log(`container dockerenv: ${dockerenv}  machine-id: ${mid}…  hostname: ${actualHn}  mac: ${actualMac}`);
+    if (actualHn !== identity.hostname || actualMac.toLowerCase() !== identity.mac.toLowerCase()) {
+      console.log("warning: live hostname/MAC do not match persisted identity; recreate with wx down && wx up.");
+    }
     if (dockerenv === "present") {
       console.log("warning: /.dockerenv still present — recreate the container (wx down && wx up).");
     }

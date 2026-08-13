@@ -69,37 +69,30 @@ pub async fn verify_active_chat(chat_id: &str) -> OpenChatResult {
     run_chat_select(&["--verify-only", chat_id]).await
 }
 
-/// Live identity from the a11y header + local session list. Unique display
-/// name mapped to exactly one username; anything else is not proof.
-pub fn confirm_display_name(
+/// Live identity from the a11y header + every contact that can own that name.
+/// A truncated session window is not sufficient: one Alice in the newest 200
+/// sessions is not proof if another Alice exists anywhere.
+pub fn confirm_opened_name(
     opened_name: Option<&str>,
     target: &str,
-    chats: &[crate::ia::types::Chat],
+    matching_usernames: &[String],
 ) -> Result<(), TargetConfirmationError> {
     let name = opened_name
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or(TargetConfirmationError::NotVerified)?;
-    let matches: Vec<_> = chats
-        .iter()
-        .filter(|chat| chat.name == name || chat.remark.as_deref() == Some(name))
-        .collect();
-    if matches.len() != 1 {
+    let _ = name;
+    if matching_usernames.len() != 1 {
         return Err(TargetConfirmationError::NotVerified);
     }
-    let chat = matches[0];
-    if chat.username != target && chat.id != target {
+    if matching_usernames[0] != target {
         return Err(TargetConfirmationError::IdentityMismatch);
     }
     Ok(())
 }
 
-pub fn identity_needs_frida(
-    opened_name: Option<&str>,
-    target: &str,
-    chats: &[crate::ia::types::Chat],
-) -> bool {
-    confirm_display_name(opened_name, target, chats).is_err()
+pub fn identity_needs_frida(opened_name: Option<&str>, target: &str, matching_usernames: &[String]) -> bool {
+    confirm_opened_name(opened_name, target, matching_usernames).is_err()
 }
 
 /// Open a chat in the WeChat UI using the chat-select tool.
@@ -195,47 +188,46 @@ mod tests {
         );
     }
 
-    fn chat(username: &str, name: &str) -> crate::ia::types::Chat {
-        crate::ia::types::Chat {
-            id: username.to_string(),
-            username: username.to_string(),
-            name: name.to_string(),
-            remark: None,
-            last_message_preview: None,
-            last_message_sender: None,
-            last_activity_at: None,
-            unread_count: 0,
-            is_group: false,
-            last_msg_local_id: None,
-        }
-    }
-
     #[test]
     fn unique_display_name_proves_target_without_frida() {
-        let chats = vec![chat("wxid_a", "Alice"), chat("wxid_b", "Bob")];
-        assert!(confirm_display_name(Some("Alice"), "wxid_a", &chats).is_ok());
-        assert!(!identity_needs_frida(Some("Alice"), "wxid_a", &chats));
+        let matches = vec!["wxid_a".to_string()];
+        assert!(confirm_opened_name(Some("Alice"), "wxid_a", &matches).is_ok());
+        assert!(!identity_needs_frida(Some("Alice"), "wxid_a", &matches));
     }
 
     #[test]
     fn unique_display_name_mismatch_fails_closed() {
-        let chats = vec![chat("wxid_a", "Alice"), chat("wxid_b", "Bob")];
+        let matches = vec!["wxid_b".to_string()];
         assert_eq!(
-            confirm_display_name(Some("Bob"), "wxid_a", &chats),
+            confirm_opened_name(Some("Bob"), "wxid_a", &matches),
             Err(TargetConfirmationError::IdentityMismatch)
         );
     }
 
     #[test]
     fn ambiguous_or_missing_name_is_not_proof() {
-        let mut twin = chat("wxid_c", "Alice");
-        twin.id = "wxid_c".into();
-        let chats = vec![chat("wxid_a", "Alice"), twin];
+        let matches = vec!["wxid_a".to_string(), "wxid_c".to_string()];
         assert_eq!(
-            confirm_display_name(Some("Alice"), "wxid_a", &chats),
+            confirm_opened_name(Some("Alice"), "wxid_a", &matches),
             Err(TargetConfirmationError::NotVerified)
         );
-        assert!(identity_needs_frida(Some("Alice"), "wxid_a", &chats));
-        assert!(identity_needs_frida(None, "wxid_a", &chats));
+        assert!(identity_needs_frida(Some("Alice"), "wxid_a", &matches));
+        assert!(identity_needs_frida(None, "wxid_a", &[]));
+    }
+
+    #[test]
+    fn duplicate_outside_session_window_is_not_unique() {
+        // Newest-200 session window would only see A. The live header is B,
+        // another Alice outside that window. Full contact match must fail closed.
+        let session_window_only = vec!["wxid_a".to_string()];
+        assert!(
+            confirm_opened_name(Some("Alice"), "wxid_a", &session_window_only).is_ok(),
+            "truncated window would wrongly prove A"
+        );
+        let all_contacts = vec!["wxid_a".to_string(), "wxid_b".to_string()];
+        assert_eq!(
+            confirm_opened_name(Some("Alice"), "wxid_a", &all_contacts),
+            Err(TargetConfirmationError::NotVerified)
+        );
     }
 }

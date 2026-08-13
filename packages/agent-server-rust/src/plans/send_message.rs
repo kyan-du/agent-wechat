@@ -4,12 +4,9 @@ use crate::ia::actions;
 use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
-use crate::tools::chat_select::{
-    confirm_display_name, confirm_target, open_chat, verify_active_chat, OpenChatResult,
-};
+use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
 use crate::sessions::manager::get_session;
 use crate::db::get_db;
-use crate::tools::wechat_chats::list_chats;
 use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
@@ -43,11 +40,11 @@ pub struct SendMessagePlanState {
 }
 
 fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResult> {
-    let chats = load_visible_chats()?;
-    confirm_display_name(
+    let matches = load_matching_usernames(state.main_window.opened_chat_name.as_deref())?;
+    crate::tools::chat_select::confirm_opened_name(
         state.main_window.opened_chat_name.as_deref(),
         chat_id,
-        &chats,
+        &matches,
     )
     .ok()?;
     Some(OpenChatResult {
@@ -60,7 +57,8 @@ fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResul
     })
 }
 
-fn load_visible_chats() -> Option<Vec<crate::ia::types::Chat>> {
+fn load_matching_usernames(opened_name: Option<&str>) -> Option<Vec<String>> {
+    let name = opened_name.map(str::trim).filter(|s| !s.is_empty())?;
     let session = get_session("default")?;
     let user = session.logged_in_user.as_ref()?;
     let keys = {
@@ -70,7 +68,9 @@ fn load_visible_chats() -> Option<Vec<crate::ia::types::Chat>> {
     if keys.is_empty() {
         return None;
     }
-    Some(list_chats(user, &keys, 200, 0))
+    Some(crate::tools::wechat_contacts::usernames_for_display_name(
+        user, &keys, name,
+    ))
 }
 
 fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<String> {

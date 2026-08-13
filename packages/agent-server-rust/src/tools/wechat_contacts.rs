@@ -38,6 +38,42 @@ fn is_system_account(username: &str) -> bool {
     SYSTEM_USERNAMES.contains(&username)
 }
 
+/// Every username whose nick_name or remark equals `display_name`.
+/// Unbounded: this is the uniqueness check for a11y identity, so a 200-row
+/// session window is not sufficient.
+pub fn usernames_for_display_name(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    display_name: &str,
+) -> Vec<String> {
+    let contact_key = match keys.get("contact.db") {
+        Some(k) => k,
+        None => return Vec::new(),
+    };
+    if display_name.is_empty() {
+        return Vec::new();
+    }
+    let contact_db = get_db_path(account_dir, "contact.db");
+    let escaped = display_name.replace('\'', "''");
+    let rows = query_wechat_db(
+        &contact_db,
+        contact_key,
+        &format!(
+            "SELECT username FROM contact
+             WHERE nick_name = '{escaped}' OR remark = '{escaped}'"
+        ),
+    );
+    rows.iter()
+        .filter_map(|row| {
+            let username = row.get("username")?.as_str()?;
+            if is_system_account(username) {
+                return None;
+            }
+            Some(username.to_string())
+        })
+        .collect()
+}
+
 /// List contacts from contact.db.
 /// Queries the contact table directly (not session.db), returning all stored contacts.
 pub fn list_contacts(

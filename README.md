@@ -146,7 +146,7 @@ pnpm build:image:amd64       # Build Docker image (Intel)
 
 These are experimental fingerprint and pacing changes. They are not a guarantee the account stays unrestricted. Do not trial them on a primary account.
 
-- One account, one persistent device identity (`machine-id` / hostname / MAC). `wx up` writes this once to `~/.config/agent-wechat/device-identity.json`.
+- One account, one persistent device identity (`machine-id` / hostname / MAC). `wx up` writes this once and passes hostname/MAC at create time. Compose: `eval "$(./scripts/device-identity.sh)"` before `docker compose up` (hostname/MAC cannot be changed from inside the container).
 - Prefer a stable residential exit in the same city as the phone. Do not rotate the proxy mid-session. Do not share one IP across accounts.
 - Sends go through the outbound queue: spacing, chat cooldown, hourly/daily budgets, quiet hours (00:30–07:30 local), and a reading delay when callers pass `inboundChars`. Reconnect folds missed messages and stays at one send per poll until the backlog drains.
 - A security/verification popup pauses outbound. Recover with `POST /api/status/outbound/resume` after you handle it yourself.
