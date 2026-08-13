@@ -4,7 +4,8 @@ pub mod login;
 pub mod logout;
 pub mod send_message;
 
-use crate::ia::types::{AppState, IdentifiedStates, SelectedAction, A11yNode};
+use crate::execution::actions::ActionExecutionResult;
+use crate::ia::types::{A11yNode, AppState, IdentifiedStates, SelectedAction};
 
 /// Plan trait — defines a goal-oriented sequence of actions.
 ///
@@ -35,4 +36,14 @@ pub trait Plan: Send + Sync {
         a11y: &A11yNode,
         session_id: &str,
     ) -> Option<SelectedAction>;
+
+    /// Observe low-level execution results. Return true to fail the plan on an
+    /// action error; existing plans retain their legacy retry behavior.
+    fn action_executed(
+        &self,
+        _plan_state: &mut Self::PlanState,
+        _result: &ActionExecutionResult,
+    ) -> bool {
+        false
+    }
 }

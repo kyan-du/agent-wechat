@@ -7,10 +7,11 @@ without requiring manual user interaction. Works on both aarch64 and x86_64.
 
 Usage:
     chat-select <username>          # Select a chat, output JSON result
+    chat-select --verify-only <username>  # Confirm current selection, no UI action
     chat-select --list              # List all sessions as JSON
 
 Output (JSON):
-    {"ok": true, "username": "filehelper", "index": 3}
+    {"ok": true, "username": "filehelper", "index": 3, "verified": true}
     {"ok": false, "error": "Chat not found in session list"}
     {"ok": true, "sessions": {"filehelper": 0, "wxid_xxx": 1, ...}}
 """
@@ -596,12 +597,13 @@ var hook = Interceptor.attach(addr, {{
 
 
 def main():
-    # Parse args: chat-select [--force] [--click-xy X Y] [--list] <username>
+    # Parse args: chat-select [--force] [--verify-only] [--click-xy X Y] <username>
     args = sys.argv[1:]
     if not args:
-        result_json(False, error="Usage: chat-select [--force] [--click-xy X Y] <username> | chat-select --list")
+        result_json(False, error="Usage: chat-select [--force|--verify-only] [--click-xy X Y] <username> | chat-select --list")
 
     force = False
+    verify_only = False
     click_xy = None
     positional = []
 
@@ -609,6 +611,9 @@ def main():
     while i < len(args):
         if args[i] == "--force":
             force = True
+            i += 1
+        elif args[i] == "--verify-only":
+            verify_only = True
             i += 1
         elif args[i] == "--click-xy":
             if i + 2 >= len(args):
@@ -620,7 +625,7 @@ def main():
             i += 1
 
     if not positional:
-        result_json(False, error="Usage: chat-select [--force] [--click-xy X Y] <username> | chat-select --list")
+        result_json(False, error="Usage: chat-select [--force|--verify-only] [--click-xy X Y] <username> | chat-select --list")
 
     pid = get_pid()
     if not pid:
@@ -654,6 +659,12 @@ def main():
     target_index = sessions[target]
     log(f"[chat-select] Target: {target} -> index {target_index}")
 
+    if verify_only:
+        if current_sel == target:
+            result_json(True, username=target, index=target_index, skipped=True, verified=True)
+        log("[chat-select] Current conversation does not match target (identities redacted)")
+        result_json(False, error="Target conversation is not active", verified=False)
+
     # Already-selected short-circuit: if the target chat is ALREADY the current
     # selection, the right-hand pane is already showing it — there is nothing
     # to do. This holds even when force=True: clicking the already-selected
@@ -664,7 +675,7 @@ def main():
     # no stale skip decision for force to override.
     if current_sel == target:
         log(f"[chat-select] Target already selected (current_sel={current_sel}), skipping (force={force})")
-        result_json(True, username=target, index=target_index, skipped=True)
+        result_json(True, username=target, index=target_index, skipped=True, verified=True)
 
     # Find click coordinates: use --click-xy if provided, else fall back to a11y
     click_coords = click_xy
@@ -677,10 +688,18 @@ def main():
     if not vector_base:
         result_json(False, error="Session vector base address not found")
     ok = select_by_index(pid, profile, target_index, click_coords, vector_base, vector_count)
-    if ok:
-        result_json(True, username=target, index=target_index)
-    else:
+    if not ok:
         result_json(False, error="Hook did not fire. Click may not have landed on a chat item.")
+
+    # The hook firing only proves that WeChat handled a selection call. Re-read
+    # the live current-session pointer and require an exact target match before
+    # allowing callers to type or send anything.
+    _, _, _, confirmed_sel = enumerate_sessions(pid, profile)
+    if confirmed_sel != target:
+        log("[chat-select] Target confirmation failed after selection (identities redacted)")
+        result_json(False, error="Target conversation could not be confirmed", verified=False)
+
+    result_json(True, username=target, index=target_index, skipped=False, verified=True)
 
 
 if __name__ == "__main__":

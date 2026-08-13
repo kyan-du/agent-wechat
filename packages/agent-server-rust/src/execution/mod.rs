@@ -243,7 +243,27 @@ where
 
         // 7. EXECUTE: run the action (emits fire inline via callback)
         if let Some(sel) = &selected {
-            actions::execute_action(&sel.action, sel.frame.as_ref(), &exec_options, &a11y, emit).await;
+            let action_result =
+                actions::execute_action(&sel.action, sel.frame.as_ref(), &exec_options, &a11y, emit)
+                    .await;
+            let fail_on_error = plan.action_executed(&mut plan_state, &action_result);
+            if let Err(error) = action_result {
+                tracing::warn!(
+                    "[exec] action failed ({}; commit_attempted={}): {}",
+                    error.diagnostic,
+                    error.commit_attempted,
+                    error.detail
+                );
+                if fail_on_error {
+                    return (
+                        ExecutionResult {
+                            success: false,
+                            error: Some(error.diagnostic.to_string()),
+                        },
+                        plan_state,
+                    );
+                }
+            }
         }
 
         // 8. GOAL CHECK (after action)
