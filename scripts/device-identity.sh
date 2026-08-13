@@ -12,8 +12,8 @@ DIR="${1:-${AGENT_WECHAT_IDENTITY_DIR:-$HOME/.config/agent-wechat}}"
 mkdir -p "$DIR"
 ENV_FILE="$DIR/device-identity.env"
 LOCK_FILE="$DIR/.device-identity.lock"
-LOCK_DIR="$DIR/.device-identity.lockdir"
-IDENTITY_LOCKDIR=""
+LOCK_PY=""
+LOCK_READY=""
 
 die() {
   echo "[identity] $*" >&2
@@ -51,6 +51,12 @@ parse_identity_file() {
   local line value
   local mid="" hn="" mac=""
   local seen_mid=0 seen_hn=0 seen_mac=0
+
+  if command -v python3 >/dev/null 2>&1; then
+    if python3 -c 'import sys; sys.exit(0 if b"\0" in open(sys.argv[1],"rb").read() else 1)' "$file"; then
+      die "NUL in $file"
+    fi
+  fi
 
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -126,36 +132,63 @@ derive_mac() {
 }
 
 release_lock() {
-  if [ -n "${IDENTITY_LOCKDIR:-}" ]; then
-    rm -rf "$IDENTITY_LOCKDIR" 2>/dev/null || true
-    IDENTITY_LOCKDIR=""
+  if [ -n "$LOCK_PY" ]; then
+    kill "$LOCK_PY" 2>/dev/null || true
+    wait "$LOCK_PY" 2>/dev/null || true
+    LOCK_PY=""
+  fi
+  if [ -n "$LOCK_READY" ]; then
+    rm -f "$LOCK_READY"
+    LOCK_READY=""
   fi
 }
+
+# Portable exclusive lock via fcntl. An orphaned lock file is just a
+# handle; the next helper acquires it. No PID-based rm of a shared path.
+acquire_fcntl_lock() {
+  command -v python3 >/dev/null 2>&1 || die "python3 is required for the portable identity lock"
+  LOCK_READY="$DIR/.device-identity.lock.ready.$$.$RANDOM"
+  rm -f "$LOCK_READY"
+  python3 -c '
+import fcntl, os, signal, sys, time
+
+def _exit(_signum, _frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _exit)
+signal.signal(signal.SIGINT, _exit)
+fh = open(sys.argv[1], "a+")
+fcntl.flock(fh, fcntl.LOCK_EX)
+ready = sys.argv[2]
+tmp = ready + ".tmp"
+with open(tmp, "w") as out:
+    out.write("ok\n")
+os.replace(tmp, ready)
+while True:
+    time.sleep(3600)
+' "$LOCK_FILE" "$LOCK_READY" &
+  LOCK_PY=$!
+  n=0
+  while [ ! -f "$LOCK_READY" ]; do
+    if ! kill -0 "$LOCK_PY" 2>/dev/null; then
+      die "identity lock helper exited before acquiring"
+    fi
+    n=$((n + 1))
+    if [ "$n" -ge 1000 ]; then
+      die "timeout waiting for identity lock helper"
+    fi
+    sleep 0.01
+  done
+  rm -f "$LOCK_READY"
+}
+
 trap release_lock EXIT
 
-if command -v flock >/dev/null 2>&1; then
+if [ "${AGENT_WECHAT_IDENTITY_LOCK:-}" != "file" ] && command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
   flock 9
 else
-  n=0
-  while true; do
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-      IDENTITY_LOCKDIR="$LOCK_DIR"
-      printf '%s\n' "$$" >"$LOCK_DIR/pid"
-      break
-    fi
-    oldpid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$oldpid" ] && [ "$oldpid" != "$$" ] && ! kill -0 "$oldpid" 2>/dev/null; then
-      echo "[identity] removing stale lock (pid $oldpid)" >&2
-      rm -rf "$LOCK_DIR"
-      continue
-    fi
-    n=$((n + 1))
-    if [ "$n" -ge 200 ]; then
-      die "timeout acquiring $LOCK_DIR (held by ${oldpid:-unknown})"
-    fi
-    sleep 0.05
-  done
+  acquire_fcntl_lock
 fi
 
 if [ -f "$ENV_FILE" ]; then

@@ -70,36 +70,86 @@ print("device-identity: eval exports (docker compose not available)")
 PY
 fi
 
+# Launch N first-run generators. Every process must succeed and emit the
+# persisted winner. Optionally seed a stale lock file first.
+run_contenders() {
+  local dir="$1"
+  local n="$2"
+  local outs="$dir/outs"
+  local i fail=0 got
+  rm -rf "$outs"
+  mkdir -p "$outs"
+  for i in $(seq 1 "$n"); do
+    (
+      unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+      if ! "$GEN" "$dir" >"$outs/$i" 2>"$outs/$i.err"; then
+        : >"$outs/$i.fail"
+      fi
+    ) &
+  done
+  wait
+  test -f "$dir/device-identity.env"
+  read_persisted "$dir/device-identity.env"
+  persisted="$FILE_MID $FILE_HN $FILE_MAC"
+  for i in $(seq 1 "$n"); do
+    if [ -f "$outs/$i.fail" ] || [ ! -s "$outs/$i" ]; then
+      echo "contender $i failed:" >&2
+      cat "$outs/$i.err" >&2 || true
+      fail=$((fail + 1))
+      continue
+    fi
+    got="$(
+      unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+      eval "$(cat "$outs/$i")"
+      printf '%s %s %s' "$AGENT_WECHAT_MACHINE_ID" "$AGENT_WECHAT_HOSTNAME" "$AGENT_WECHAT_MAC"
+    )"
+    if [ "$got" != "$persisted" ]; then
+      echo "contender $i emitted '$got' want '$persisted'" >&2
+      fail=$((fail + 1))
+    fi
+  done
+  test "$fail" -eq 0
+  unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+  eval "$("$GEN" "$dir")"
+  test "$AGENT_WECHAT_MACHINE_ID $AGENT_WECHAT_HOSTNAME $AGENT_WECHAT_MAC" = "$persisted"
+}
+
+dead_pid() {
+  (sleep 30) &
+  local pid=$!
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  printf '%s' "$pid"
+}
+
 # Concurrent first-run: every process must emit the single persisted winner.
 c="$(mktemp -d)"
-outs="$c/outs"
-mkdir -p "$outs"
 unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
-for i in $(seq 1 30); do
-  (
-    unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
-    "$GEN" "$c" >"$outs/$i"
-  ) &
-done
-wait
-test -f "$c/device-identity.env"
-read_persisted "$c/device-identity.env"
-persisted="$FILE_MID $FILE_HN $FILE_MAC"
-count=0
-for i in $(seq 1 30); do
-  got="$(
-    unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
-    eval "$(cat "$outs/$i")"
-    printf '%s %s %s' "$AGENT_WECHAT_MACHINE_ID" "$AGENT_WECHAT_HOSTNAME" "$AGENT_WECHAT_MAC"
-  )"
-  test "$got" = "$persisted"
-  count=$((count + 1))
-done
-test "$count" -eq 30
-unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
-eval "$("$GEN" "$c")"
-test "$AGENT_WECHAT_MACHINE_ID $AGENT_WECHAT_HOSTNAME $AGENT_WECHAT_MAC" = "$persisted"
+run_contenders "$c" 30
 echo "device-identity: 30 concurrent first-runs emit the persisted winner"
+
+# No-flock path: 5x100 first-runs, every caller succeeds.
+export AGENT_WECHAT_IDENTITY_LOCK=file
+round=1
+while [ "$round" -le 5 ]; do
+  d="$(mktemp -d)"
+  run_contenders "$d" 100
+  rm -rf "$d"
+  round=$((round + 1))
+done
+echo "device-identity: 5x100 file-lock first-runs all succeed"
+
+# Stale-lock recovery: dead-PID lock + 5x100 contenders, all succeed.
+round=1
+while [ "$round" -le 5 ]; do
+  d="$(mktemp -d)"
+  printf '%s.stale\n' "$(dead_pid)" >"$d/.device-identity.lock"
+  run_contenders "$d" 100
+  rm -rf "$d"
+  round=$((round + 1))
+done
+unset AGENT_WECHAT_IDENTITY_LOCK
+echo "device-identity: 5x100 stale file-lock recoveries all succeed"
 
 # Injection / malformed persisted files must be rejected and must not execute.
 marker="$evil/pwned"
@@ -156,6 +206,12 @@ if AGENT_WECHAT_HOSTNAME=$'foo\nbar' "$GEN" "$envdir" >/dev/null 2>"$envdir/err"
 fi
 test ! -e "$marker"
 test ! -f "$envdir/device-identity.env"
+
+python3 -c 'open("'"$envdir"'/device-identity.env","wb").write(b"AGENT_WECHAT_MACHINE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0\nAGENT_WECHAT_HOSTNAME=lenovo-pc-100\nAGENT_WECHAT_MAC=00:1b:21:00:00:01\n")'
+if "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
+  echo "embedded NUL should be rejected" >&2
+  exit 1
+fi
 
 echo "device-identity: malformed and injected values are rejected without executing"
 echo "device-identity: same dir stable, second dir differs"
