@@ -94,7 +94,7 @@ export function resolveWeChatAccount(
     pollIntervalMs: wechat.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     authPollIntervalMs:
       wechat.authPollIntervalMs ?? DEFAULT_AUTH_POLL_INTERVAL_MS,
-    catchUpMode: wechat.catchUpMode === "read-only" ? "read-only" : "latest",
+    catchUpMode: wechat.catchUpMode === "latest" ? "latest" : "read-only",
     catchUpMaxMessages: boundedInteger(
       wechat.catchUpMaxMessages,
       DEFAULT_CATCH_UP_MAX_MESSAGES,
