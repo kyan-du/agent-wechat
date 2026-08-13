@@ -148,6 +148,7 @@ pub struct OutboundStatus {
     pub task_ttl_ms: u128,
     pub idempotency_ttl_ms: u128,
     pub read_only: bool,
+    pub runtime_paused: bool,
     pub idempotency_entries: usize,
 }
 
@@ -211,7 +212,7 @@ struct OutboundTask {
     params: SendMessageParams,
     enqueued_at: Instant,
     idempotency_key: Option<String>,
-    result_tx: oneshot::Sender<SendResult>,
+    result_tx: oneshot::Sender<OutboundSendResponse>,
 }
 
 #[derive(Clone)]
@@ -287,7 +288,7 @@ impl OutboundSender {
 
         match self.tx.try_send(task) {
             Ok(()) => match result_rx.await {
-                Ok(result) => OutboundSendResponse::Result(result),
+                Ok(response) => response,
                 Err(_) => {
                     if let Some(key) = idempotency_key.as_deref() {
                         self.idempotency
@@ -299,11 +300,16 @@ impl OutboundSender {
                 }
             },
             Err(mpsc::error::TrySendError::Full(task)) => {
-                reject_without_idempotency_cache(task, queue_full_result(), &self.idempotency);
-                OutboundSendResponse::Rejected(OutboundError::queue_full(self.config.retry_after()))
+                let error = OutboundError::queue_full(self.config.retry_after());
+                reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
+                OutboundSendResponse::Rejected(error)
             }
             Err(mpsc::error::TrySendError::Closed(task)) => {
-                reject_without_idempotency_cache(task, unavailable_result(), &self.idempotency);
+                reject_without_idempotency_cache(
+                    task,
+                    OutboundError::unavailable(),
+                    &self.idempotency,
+                );
                 OutboundSendResponse::Rejected(OutboundError::unavailable())
             }
         }
@@ -319,12 +325,23 @@ impl OutboundSender {
             task_ttl_ms: self.config.task_ttl.as_millis(),
             idempotency_ttl_ms: self.config.idempotency_ttl.as_millis(),
             read_only: self.control.is_read_only(),
+            runtime_paused: self.control.is_runtime_paused(),
             idempotency_entries: self
                 .idempotency
                 .lock()
                 .expect("idempotency store poisoned")
                 .len(),
         }
+    }
+
+    pub fn pause(&self) -> OutboundStatus {
+        self.control.set_runtime_paused(true);
+        self.status()
+    }
+
+    pub fn resume(&self) -> OutboundStatus {
+        self.control.set_runtime_paused(false);
+        self.status()
     }
 }
 
@@ -339,13 +356,21 @@ impl OutboundControl {
         }
     }
 
-    #[cfg(test)]
-    fn set_read_only(&self, read_only: bool) {
+    fn set_runtime_paused(&self, read_only: bool) {
         self.read_only.store(read_only, Ordering::SeqCst);
     }
 
-    fn is_read_only(&self) -> bool {
+    #[cfg(test)]
+    fn set_read_only(&self, read_only: bool) {
+        self.set_runtime_paused(read_only);
+    }
+
+    fn is_runtime_paused(&self) -> bool {
         self.read_only.load(Ordering::SeqCst)
+    }
+
+    fn is_read_only(&self) -> bool {
+        self.is_runtime_paused()
             || env_bool("AGENT_WECHAT_OUTBOUND_DISABLED")
             || env_bool("AGENT_WECHAT_READ_ONLY")
     }
@@ -361,7 +386,7 @@ async fn worker_loop(
     while let Some(task) = rx.recv().await {
         let now = Instant::now();
         if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(task, expired_result(), &idempotency);
+            reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
             continue;
         }
 
@@ -372,11 +397,11 @@ async fn worker_loop(
 
         let now = Instant::now();
         if control.is_read_only() {
-            reject_without_idempotency_cache(task, read_only_result(), &idempotency);
+            reject_without_idempotency_cache(task, OutboundError::read_only(), &idempotency);
             continue;
         }
         if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(task, expired_result(), &idempotency);
+            reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
             continue;
         }
 
@@ -430,12 +455,12 @@ fn complete_task(
             .expect("idempotency store poisoned")
             .complete(key, now, result.clone());
     }
-    let _ = task.result_tx.send(result);
+    let _ = task.result_tx.send(OutboundSendResponse::Result(result));
 }
 
 fn reject_without_idempotency_cache(
     task: OutboundTask,
-    result: SendResult,
+    error: OutboundError,
     idempotency: &Arc<Mutex<IdempotencyStore>>,
 ) {
     cleanup_temp_files(&task.params);
@@ -445,7 +470,7 @@ fn reject_without_idempotency_cache(
             .expect("idempotency store poisoned")
             .remove(key);
     }
-    let _ = task.result_tx.send(result);
+    let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
 }
 
 pub fn cleanup_temp_files(params: &SendMessageParams) {
@@ -463,18 +488,6 @@ fn send_error(error: &str) -> SendResult {
         error_code: Some(error.to_string()),
         error: Some(error.to_string()),
     }
-}
-
-fn queue_full_result() -> SendResult {
-    send_error("QUEUE_FULL")
-}
-
-fn read_only_result() -> SendResult {
-    send_error("OUTBOUND_DISABLED")
-}
-
-fn expired_result() -> SendResult {
-    send_error("QUEUE_EXPIRED")
 }
 
 fn unavailable_result() -> SendResult {
@@ -775,11 +788,16 @@ mod tests {
         };
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
 
-        reject_without_idempotency_cache(task, expired_result(), &idempotency);
+        reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
 
         let result = result_rx.try_recv().unwrap();
-        assert!(!result.success);
-        assert_eq!(result.error.as_deref(), Some("QUEUE_EXPIRED"));
+        match result {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Expired);
+                assert_eq!(error.code, "QUEUE_EXPIRED");
+            }
+            _ => panic!("expected expired rejection"),
+        }
         assert!(!std::path::Path::new(&path).exists());
         assert!(matches!(
             idempotency
@@ -849,7 +867,12 @@ mod tests {
         })
         .unwrap();
         let first = first_rx.await.unwrap();
-        assert_eq!(first.error.as_deref(), Some("OUTBOUND_DISABLED"));
+        match first {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::ReadOnly);
+            }
+            _ => panic!("expected read-only rejection"),
+        }
 
         let (second_tx, second_rx) = oneshot::channel();
         control.set_read_only(false);
@@ -863,7 +886,12 @@ mod tests {
         control.set_read_only(true);
 
         let second = second_rx.await.unwrap();
-        assert_eq!(second.error.as_deref(), Some("OUTBOUND_DISABLED"));
+        match second {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::ReadOnly);
+            }
+            _ => panic!("expected read-only rejection"),
+        }
         assert!(matches!(
             idempotency
                 .lock()
@@ -905,7 +933,12 @@ mod tests {
         })
         .unwrap();
         let first = first_rx.await.unwrap();
-        assert_eq!(first.error.as_deref(), Some("OUTBOUND_DISABLED"));
+        match first {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::ReadOnly);
+            }
+            _ => panic!("expected read-only rejection"),
+        }
 
         let (second_tx, second_rx) = oneshot::channel();
         control.set_read_only(false);
@@ -918,7 +951,12 @@ mod tests {
         .unwrap();
 
         let second = second_rx.await.unwrap();
-        assert_eq!(second.error.as_deref(), Some("QUEUE_EXPIRED"));
+        match second {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Expired);
+            }
+            _ => panic!("expected expired rejection"),
+        }
         assert!(matches!(
             idempotency
                 .lock()
@@ -964,6 +1002,7 @@ mod tests {
         assert_eq!(status.task_ttl_ms, 30_000);
         assert_eq!(status.idempotency_ttl_ms, 60_000);
         assert!(status.read_only);
+        assert!(status.runtime_paused);
         assert_eq!(status.idempotency_entries, 1);
     }
 
