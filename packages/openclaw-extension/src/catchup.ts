@@ -23,7 +23,6 @@ export interface CatchupDecision {
 
 export function decideCatchup(input: CatchupInput): CatchupDecision {
   const staleAfter = input.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
-  const budget = input.catchupBudget ?? DEFAULT_CATCHUP_BUDGET;
   const age = input.nowMs - input.newestTimestampMs;
 
   if (!input.isReconnect) {
@@ -34,10 +33,6 @@ export function decideCatchup(input: CatchupInput): CatchupDecision {
     return { action: "skip_stale", reason: "stale_group" };
   }
 
-  if (input.catchupDispatched >= budget) {
-    return { action: "defer", reason: "catchup_budget" };
-  }
-
   return { action: "dispatch", reason: "catchup_fold" };
 }
 
@@ -46,7 +41,7 @@ export function shouldFoldSegments(isReconnect: boolean): boolean {
   return isReconnect;
 }
 
-/** End reconnect once the backlog is drained, or the catch-up budget is spent. */
+/** Stay in reconnect until every deferred chat has been paced out. Budget never flips remaining work to live. */
 export function nextReconnectState(input: {
   reconnect: boolean;
   unreadCount: number;
@@ -57,12 +52,27 @@ export function nextReconnectState(input: {
   if (!input.reconnect) {
     return { reconnect: false, dispatched: 0 };
   }
-  const budget = input.budget ?? DEFAULT_CATCHUP_BUDGET;
   if (input.unreadCount === 0 && input.deferred === 0) {
     return { reconnect: false, dispatched: 0 };
   }
-  if (input.deferred === 0 || input.dispatched >= budget) {
+  if (input.deferred === 0) {
     return { reconnect: false, dispatched: 0 };
   }
   return { reconnect: true, dispatched: input.dispatched };
+}
+
+/** One paced reconnect tick: at most one dispatch, leftover stays deferred. */
+export function tickReconnect(chats: number, alreadyDispatched: number): {
+  dispatchedThisTick: number;
+  deferred: number;
+  dispatchedTotal: number;
+} {
+  if (chats <= 0) {
+    return { dispatchedThisTick: 0, deferred: 0, dispatchedTotal: alreadyDispatched };
+  }
+  return {
+    dispatchedThisTick: 1,
+    deferred: chats - 1,
+    dispatchedTotal: alreadyDispatched + 1,
+  };
 }

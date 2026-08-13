@@ -4,9 +4,10 @@
 "@agent-wechat/shared": patch
 ---
 
-Lower the chance WeChat treats this official-client container as a bot.
+Experimental fingerprint and send-pacing changes. Not a guarantee of account safety.
 
-- Persistent per-instance device identity (machine-id, hostname, MAC); drop `/.dockerenv`
-- Human-paced outbound queue: reading/typing delay, chat cooldown, budgets, quiet hours, kill switch
-- Skip Frida on same-chat consecutive sends; security popups freeze outbound
-- Reconnect catch-up folds by chat instead of one reply per missed message
+- Per-volume machine-id; hostname derived inside the container; Compose does not ship a shared hostname/MAC
+- Outbound queue (from #4) plus chat cooldown, hourly/daily budgets, quiet hours, and inbound-length reading delay
+- Same-chat identity prefers live a11y header + local DB; Frida verify-only is fallback when that is ambiguous
+- Reconnect folds by chat and stays paced (one send per poll) until the backlog drains
+- Security popups pause outbound; resume via POST /api/status/outbound/resume

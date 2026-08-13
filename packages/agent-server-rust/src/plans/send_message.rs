@@ -4,7 +4,13 @@ use crate::ia::actions;
 use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
-use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
+use crate::tools::chat_select::{
+    confirm_display_name, confirm_target, open_chat, verify_active_chat, OpenChatResult,
+};
+use crate::sessions::manager::get_session;
+use crate::db::get_db;
+use crate::tools::wechat_chats::list_chats;
+use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
 
@@ -34,6 +40,37 @@ pub struct SendMessagePlanState {
     pub send_action_executed: bool,
     /// Stable diagnostic code returned when the plan fails closed.
     pub diagnostic_error: Option<String>,
+}
+
+fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResult> {
+    let chats = load_visible_chats()?;
+    confirm_display_name(
+        state.main_window.opened_chat_name.as_deref(),
+        chat_id,
+        &chats,
+    )
+    .ok()?;
+    Some(OpenChatResult {
+        ok: true,
+        username: Some(chat_id.to_string()),
+        index: None,
+        skipped: Some(true),
+        verified: Some(true),
+        error: None,
+    })
+}
+
+fn load_visible_chats() -> Option<Vec<crate::ia::types::Chat>> {
+    let session = get_session("default")?;
+    let user = session.logged_in_user.as_ref()?;
+    let keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, user)
+    };
+    if keys.is_empty() {
+        return None;
+    }
+    Some(list_chats(user, &keys, 200, 0))
 }
 
 fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<String> {
@@ -143,11 +180,9 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
-                    // Same-chat fast path: only skip the select hook when a
-                    // *live* verify-only check proves the target is active.
-                    // The /tmp cache file is never used as identity proof.
-                    let live = verify_active_chat(&params.chat_id).await;
-                    if target_confirmation_error(&live, &params.chat_id).is_none() {
+                    // Same-chat fast path: live a11y header + local DB only.
+                    // Never treat /tmp cache or Frida as the cheap path.
+                    if let Some(live) = confirm_from_a11y_db(state, &params.chat_id) {
                         plan_state.open_result = Some(live);
                         plan_state.phase = SendMessagePhase::Focusing;
                         continue;
@@ -242,15 +277,19 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
-                    // Re-scan immediately before the one action that can commit
-                    // the message. This closes the window where a popup or user
-                    // interaction changes conversations after the initial open.
-                    let live_target = verify_active_chat(&params.chat_id).await;
-                    if let Some(error) = target_confirmation_error(&live_target, &params.chat_id) {
-                        tracing::warn!("[send] pre-send target rescan failed: {error}");
-                        plan_state.diagnostic_error =
-                            Some("pre_send_target_confirmation_failed".to_string());
-                        return None;
+                    // Re-check immediately before the one action that can commit.
+                    // Prefer the same non-Frida live signal; Frida verify-only
+                    // only if a11y/DB cannot uniquely identify the open chat.
+                    if confirm_from_a11y_db(state, &params.chat_id).is_none() {
+                        let live_target = verify_active_chat(&params.chat_id).await;
+                        if let Some(error) =
+                            target_confirmation_error(&live_target, &params.chat_id)
+                        {
+                            tracing::warn!("[send] pre-send target rescan failed: {error}");
+                            plan_state.diagnostic_error =
+                                Some("pre_send_target_confirmation_failed".to_string());
+                            return None;
+                        }
                     }
 
                     if find_edit_and_send_button(a11y).is_none() {

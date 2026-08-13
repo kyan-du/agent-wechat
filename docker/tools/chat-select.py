@@ -276,8 +276,24 @@ def read_lines_until(proc, timeout, stop_on=None):
         proc._read_buf = buf
 
 
+ATTACH_COUNT_PATH = "/tmp/agent-wechat-frida-attach-count"
+
+
+def record_frida_attach():
+    try:
+        try:
+            n = int(open(ATTACH_COUNT_PATH, encoding="utf-8").read().strip() or "0")
+        except (OSError, ValueError):
+            n = 0
+        with open(ATTACH_COUNT_PATH, "w", encoding="utf-8") as fh:
+            fh.write(str(n + 1))
+    except OSError:
+        pass
+
+
 def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
     """Run a frida script, return output lines."""
+    record_frida_attach()
     proc = subprocess.Popen(
         [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8", "-q"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -301,6 +317,7 @@ def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
 
 def run_frida_bg(pid, script_path):
     """Start frida in background, wait for READY, return process."""
+    record_frida_attach()
     proc = subprocess.Popen(
         [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

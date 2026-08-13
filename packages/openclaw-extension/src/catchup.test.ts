@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.ts";
+import { decideCatchup, nextReconnectState, shouldFoldSegments, tickReconnect } from "./catchup.ts";
 
 const now = 1_700_000_000_000;
 
@@ -52,7 +52,7 @@ test("stale DM or mention still folds into one reply", () => {
   assert.equal(mention.action, "dispatch");
 });
 
-test("reconnect budget defers extra chats instead of dropping inbound", () => {
+test("reconnect still folds after five chats; extras stay pending not live", () => {
   const d = decideCatchup({
     isReconnect: true,
     isGroup: false,
@@ -62,7 +62,8 @@ test("reconnect budget defers extra chats instead of dropping inbound", () => {
     catchupDispatched: 5,
     catchupBudget: 5,
   });
-  assert.equal(d.action, "defer");
+  assert.equal(d.action, "dispatch");
+  assert.equal(d.reason, "catchup_fold");
 });
 
 test("reconnect folds segments", () => {
@@ -85,7 +86,7 @@ test("reconnect ends after a drain so later traffic is live", () => {
   );
   assert.deepEqual(
     nextReconnectState({ reconnect: true, unreadCount: 4, deferred: 4, dispatched: 5, budget: 5 }),
-    { reconnect: false, dispatched: 0 },
+    { reconnect: true, dispatched: 5 },
   );
   const after = nextReconnectState({ reconnect: false, unreadCount: 2, deferred: 0, dispatched: 0 });
   assert.equal(after.reconnect, false);
@@ -98,4 +99,38 @@ test("reconnect ends after a drain so later traffic is live", () => {
     catchupDispatched: after.dispatched,
   });
   assert.equal(live.reason, "live");
+});
+
+test("seven-chat reconnect stays paced: one send per tick, no live burst", () => {
+  let remaining = 7;
+  let dispatched = 0;
+  let reconnect = true;
+  const perTick: number[] = [];
+  for (let tick = 0; tick < 20 && reconnect; tick++) {
+    const step = tickReconnect(remaining, dispatched);
+    perTick.push(step.dispatchedThisTick);
+    dispatched = step.dispatchedTotal;
+    remaining = step.deferred;
+    const next = nextReconnectState({
+      reconnect: true,
+      unreadCount: remaining + step.dispatchedThisTick,
+      deferred: remaining,
+      dispatched,
+    });
+    reconnect = next.reconnect;
+  }
+  assert.equal(dispatched, 7);
+  assert.deepEqual(perTick, [1, 1, 1, 1, 1, 1, 1]);
+  assert.equal(reconnect, false);
+  assert.equal(
+    decideCatchup({
+      isReconnect: false,
+      isGroup: false,
+      mentioned: false,
+      newestTimestampMs: now,
+      nowMs: now,
+      catchupDispatched: 0,
+    }).reason,
+    "live",
+  );
 });

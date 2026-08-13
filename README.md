@@ -148,7 +148,7 @@ These are experimental fingerprint and pacing changes. They are not a guarantee 
 
 - One account, one persistent device identity (`machine-id` / hostname / MAC). `wx up` writes this once to `~/.config/agent-wechat/device-identity.json`.
 - Prefer a stable residential exit in the same city as the phone. Do not rotate the proxy mid-session. Do not share one IP across accounts.
-- Sends go through the outbound queue (spacing, optional reading/typing delay, quiet hours). Reconnect folds missed messages into one reply per chat, then returns to live traffic.
+- Sends go through the outbound queue: spacing, chat cooldown, hourly/daily budgets, quiet hours (00:30–07:30 local), and a reading delay when callers pass `inboundChars`. Reconnect folds missed messages and stays at one send per poll until the backlog drains.
 - A security/verification popup pauses outbound. Recover with `POST /api/status/outbound/resume` after you handle it yourself.
 
 See GitHub issue #7 for the remaining P2 fingerprint work.

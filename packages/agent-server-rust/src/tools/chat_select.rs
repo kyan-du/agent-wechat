@@ -69,13 +69,37 @@ pub async fn verify_active_chat(chat_id: &str) -> OpenChatResult {
     run_chat_select(&["--verify-only", chat_id]).await
 }
 
-/// A leftover cache file is never proof of the active conversation.
-pub fn cache_cannot_prove_target(
-    cached: Option<&str>,
-    live: &OpenChatResult,
+/// Live identity from the a11y header + local session list. Unique display
+/// name mapped to exactly one username; anything else is not proof.
+pub fn confirm_display_name(
+    opened_name: Option<&str>,
     target: &str,
+    chats: &[crate::ia::types::Chat],
+) -> Result<(), TargetConfirmationError> {
+    let name = opened_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(TargetConfirmationError::NotVerified)?;
+    let matches: Vec<_> = chats
+        .iter()
+        .filter(|chat| chat.name == name || chat.remark.as_deref() == Some(name))
+        .collect();
+    if matches.len() != 1 {
+        return Err(TargetConfirmationError::NotVerified);
+    }
+    let chat = matches[0];
+    if chat.username != target && chat.id != target {
+        return Err(TargetConfirmationError::IdentityMismatch);
+    }
+    Ok(())
+}
+
+pub fn identity_needs_frida(
+    opened_name: Option<&str>,
+    target: &str,
+    chats: &[crate::ia::types::Chat],
 ) -> bool {
-    cached == Some(target) && confirm_target(live, target).is_err()
+    confirm_display_name(opened_name, target, chats).is_err()
 }
 
 /// Open a chat in the WeChat UI using the chat-select tool.
@@ -171,18 +195,47 @@ mod tests {
         );
     }
 
+    fn chat(username: &str, name: &str) -> crate::ia::types::Chat {
+        crate::ia::types::Chat {
+            id: username.to_string(),
+            username: username.to_string(),
+            name: name.to_string(),
+            remark: None,
+            last_message_preview: None,
+            last_message_sender: None,
+            last_activity_at: None,
+            unread_count: 0,
+            is_group: false,
+            last_msg_local_id: None,
+        }
+    }
+
     #[test]
-    fn stale_cache_does_not_prove_target_after_ui_switch() {
-        // cache still says A, live UI is B: send(A) must not treat cache as verified.
-        assert!(cache_cannot_prove_target(
-            Some("A"),
-            &result(Some("B"), Some(true)),
-            "A",
-        ));
-        assert!(!cache_cannot_prove_target(
-            Some("A"),
-            &result(Some("A"), Some(true)),
-            "A",
-        ));
+    fn unique_display_name_proves_target_without_frida() {
+        let chats = vec![chat("wxid_a", "Alice"), chat("wxid_b", "Bob")];
+        assert!(confirm_display_name(Some("Alice"), "wxid_a", &chats).is_ok());
+        assert!(!identity_needs_frida(Some("Alice"), "wxid_a", &chats));
+    }
+
+    #[test]
+    fn unique_display_name_mismatch_fails_closed() {
+        let chats = vec![chat("wxid_a", "Alice"), chat("wxid_b", "Bob")];
+        assert_eq!(
+            confirm_display_name(Some("Bob"), "wxid_a", &chats),
+            Err(TargetConfirmationError::IdentityMismatch)
+        );
+    }
+
+    #[test]
+    fn ambiguous_or_missing_name_is_not_proof() {
+        let mut twin = chat("wxid_c", "Alice");
+        twin.id = "wxid_c".into();
+        let chats = vec![chat("wxid_a", "Alice"), twin];
+        assert_eq!(
+            confirm_display_name(Some("Alice"), "wxid_a", &chats),
+            Err(TargetConfirmationError::NotVerified)
+        );
+        assert!(identity_needs_frida(Some("Alice"), "wxid_a", &chats));
+        assert!(identity_needs_frida(None, "wxid_a", &chats));
     }
 }

@@ -741,9 +741,14 @@ async function dispatchSegment(
               media,
               caption: text || undefined,
               interPartDelayMs: liveAccount.mediaPartDelayMs,
+              inboundChars: lastMsg.rawBody.length,
             });
           } else if (text) {
-            const result = await client.sendMessage({ chatId, text });
+            const result = await client.sendMessage({
+              chatId,
+              text,
+              inboundChars: lastMsg.rawBody.length,
+            });
             if (!result.success) throw new Error(result.error ?? "Send failed");
           }
         },

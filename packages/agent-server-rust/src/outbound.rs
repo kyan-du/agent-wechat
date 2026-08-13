@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use chrono::Timelike;
 use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -31,6 +32,11 @@ const DEFAULT_JITTER_MS: u64 = 250;
 const DEFAULT_TASK_TTL_MS: u64 = 60_000;
 const DEFAULT_IDEMPOTENCY_TTL_MS: u64 = 600_000;
 const DEFAULT_RETRY_AFTER_SECONDS: u64 = 2;
+const DEFAULT_CHAT_COOLDOWN_MS: u64 = 3_000;
+const DEFAULT_HOURLY_BUDGET: u32 = 40;
+const DEFAULT_DAILY_BUDGET: u32 = 200;
+const DEFAULT_QUIET_START_MIN: u32 = 30;
+const DEFAULT_QUIET_END_MIN: u32 = 7 * 60 + 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundErrorKind {
@@ -39,6 +45,8 @@ pub enum OutboundErrorKind {
     DuplicateInProgress,
     Expired,
     Unavailable,
+    QuietHours,
+    Budget,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +102,24 @@ impl OutboundError {
             message: "Outbound send scheduler is unavailable".to_string(),
         }
     }
+
+    fn quiet_hours(retry_after: Duration) -> Self {
+        Self {
+            kind: OutboundErrorKind::QuietHours,
+            retry_after: Some(retry_after),
+            code: "QUIET_HOURS".to_string(),
+            message: "Quiet hours: outbound sends are deferred".to_string(),
+        }
+    }
+
+    fn budget(code: &str, retry_after: Duration) -> Self {
+        Self {
+            kind: OutboundErrorKind::Budget,
+            retry_after: Some(retry_after),
+            code: code.to_string(),
+            message: "Outbound send budget exhausted".to_string(),
+        }
+    }
 }
 
 pub enum OutboundSendResponse {
@@ -107,7 +133,10 @@ impl IntoResponse for OutboundSendResponse {
             OutboundSendResponse::Result(result) => (StatusCode::OK, Json(result)).into_response(),
             OutboundSendResponse::Rejected(error) => {
                 let status = match error.kind {
-                    OutboundErrorKind::QueueFull | OutboundErrorKind::DuplicateInProgress => {
+                    OutboundErrorKind::QueueFull
+                    | OutboundErrorKind::DuplicateInProgress
+                    | OutboundErrorKind::QuietHours
+                    | OutboundErrorKind::Budget => {
                         StatusCode::TOO_MANY_REQUESTS
                     }
                     OutboundErrorKind::ReadOnly => StatusCode::SERVICE_UNAVAILABLE,
@@ -159,6 +188,11 @@ pub struct OutboundConfig {
     pub jitter: Duration,
     pub task_ttl: Duration,
     pub idempotency_ttl: Duration,
+    pub chat_cooldown: Duration,
+    pub hourly_budget: u32,
+    pub daily_budget: u32,
+    pub quiet_start_min: u32,
+    pub quiet_end_min: u32,
     pub read_only: bool,
 }
 
@@ -181,6 +215,14 @@ impl OutboundConfig {
                 env_u64("AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS")
                     .unwrap_or(DEFAULT_IDEMPOTENCY_TTL_MS),
             ),
+            chat_cooldown: Duration::from_millis(
+                env_u64("AGENT_WECHAT_CHAT_COOLDOWN_MS").unwrap_or(DEFAULT_CHAT_COOLDOWN_MS),
+            ),
+            hourly_budget: env_u32("AGENT_WECHAT_HOURLY_BUDGET").unwrap_or(DEFAULT_HOURLY_BUDGET),
+            daily_budget: env_u32("AGENT_WECHAT_DAILY_BUDGET").unwrap_or(DEFAULT_DAILY_BUDGET),
+            quiet_start_min: env_u32("AGENT_WECHAT_QUIET_START_MIN")
+                .unwrap_or(DEFAULT_QUIET_START_MIN),
+            quiet_end_min: env_u32("AGENT_WECHAT_QUIET_END_MIN").unwrap_or(DEFAULT_QUIET_END_MIN),
             read_only: env_bool("AGENT_WECHAT_OUTBOUND_DISABLED")
                 || env_bool("AGENT_WECHAT_READ_ONLY"),
         }
@@ -193,6 +235,104 @@ impl OutboundConfig {
 
 fn env_u64(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.parse().ok()
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+pub fn in_quiet_hours(minute_of_day: u32, start: u32, end: u32) -> bool {
+    if start == end {
+        return false;
+    }
+    if start < end {
+        minute_of_day >= start && minute_of_day < end
+    } else {
+        minute_of_day >= start || minute_of_day < end
+    }
+}
+
+fn local_minute_of_day() -> u32 {
+    let local = chrono::Local::now();
+    (local.hour() * 60 + local.minute()) as u32
+}
+
+fn minutes_until(from: u32, target: u32) -> u32 {
+    if target >= from {
+        target - from
+    } else {
+        24 * 60 - from + target
+    }
+}
+
+struct Usage {
+    hour_key: u64,
+    day_key: u64,
+    hour_count: u32,
+    day_count: u32,
+    last_per_chat: HashMap<String, Instant>,
+}
+
+impl Usage {
+    fn new() -> Self {
+        Self {
+            hour_key: 0,
+            day_key: 0,
+            hour_count: 0,
+            day_count: 0,
+            last_per_chat: HashMap::new(),
+        }
+    }
+
+    fn roll(&mut self, now: SystemTime) {
+        let secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let hour = secs / 3600;
+        let day = secs / 86400;
+        if hour != self.hour_key {
+            self.hour_key = hour;
+            self.hour_count = 0;
+        }
+        if day != self.day_key {
+            self.day_key = day;
+            self.day_count = 0;
+        }
+    }
+
+    fn record_success(&mut self, chat_id: &str, now: Instant, wall: SystemTime) {
+        self.roll(wall);
+        self.hour_count = self.hour_count.saturating_add(1);
+        self.day_count = self.day_count.saturating_add(1);
+        self.last_per_chat.insert(chat_id.to_string(), now);
+    }
+}
+
+pub fn policy_allows_send(
+    config: &OutboundConfig,
+    usage: &mut Usage,
+    chat_id: &str,
+    now: Instant,
+    wall: SystemTime,
+    minute_of_day: u32,
+) -> Result<Duration, OutboundError> {
+    usage.roll(wall);
+    if in_quiet_hours(minute_of_day, config.quiet_start_min, config.quiet_end_min) {
+        let wait_min = minutes_until(minute_of_day, config.quiet_end_min);
+        return Err(OutboundError::quiet_hours(Duration::from_secs(
+            wait_min as u64 * 60,
+        )));
+    }
+    if usage.hour_count >= config.hourly_budget {
+        return Err(OutboundError::budget("HOURLY_BUDGET", Duration::from_secs(600)));
+    }
+    if usage.day_count >= config.daily_budget {
+        return Err(OutboundError::budget("DAILY_BUDGET", Duration::from_secs(3600)));
+    }
+    let extra = usage
+        .last_per_chat
+        .get(chat_id)
+        .map(|last| config.chat_cooldown.saturating_sub(now.saturating_duration_since(*last)))
+        .unwrap_or(Duration::ZERO);
+    Ok(extra)
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -229,6 +369,7 @@ pub struct OutboundSender {
     control: Arc<OutboundControl>,
     tx: mpsc::Sender<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
+    usage: Arc<Mutex<Usage>>,
 }
 
 static OUTBOUND_SENDER: OnceLock<OutboundSender> = OnceLock::new();
@@ -242,12 +383,14 @@ impl OutboundSender {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let control = Arc::new(OutboundControl::new(config.read_only));
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(config.idempotency_ttl)));
+        let usage = Arc::new(Mutex::new(Usage::new()));
         let worker_control = Arc::clone(&control);
         let worker_store = Arc::clone(&idempotency);
+        let worker_usage = Arc::clone(&usage);
         let worker_config = config.clone();
 
         tokio::spawn(async move {
-            worker_loop(worker_config, worker_control, rx, worker_store).await;
+            worker_loop(worker_config, worker_control, rx, worker_store, worker_usage).await;
         });
 
         Self {
@@ -255,6 +398,7 @@ impl OutboundSender {
             control,
             tx,
             idempotency,
+            usage,
         }
     }
 
@@ -267,6 +411,21 @@ impl OutboundSender {
         if self.control.is_read_only() {
             cleanup_temp_files(&params);
             return OutboundSendResponse::Rejected(OutboundError::read_only());
+        }
+
+        {
+            let mut usage = self.usage.lock().expect("usage poisoned");
+            if let Err(error) = policy_allows_send(
+                &self.config,
+                &mut usage,
+                &params.chat_id,
+                now,
+                SystemTime::now(),
+                local_minute_of_day(),
+            ) {
+                cleanup_temp_files(&params);
+                return OutboundSendResponse::Rejected(error);
+            }
         }
 
         if let Some(key) = idempotency_key.as_deref() {
@@ -394,6 +553,7 @@ async fn worker_loop(
     control: Arc<OutboundControl>,
     mut rx: mpsc::Receiver<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
+    usage: Arc<Mutex<Usage>>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
     while let Some(task) = rx.recv().await {
@@ -433,7 +593,30 @@ async fn worker_loop(
             continue;
         }
 
+        let extra = {
+            let mut usage = usage.lock().expect("usage poisoned");
+            policy_allows_send(
+                &config,
+                &mut usage,
+                &task.params.chat_id,
+                Instant::now(),
+                SystemTime::now(),
+                local_minute_of_day(),
+            )
+            .unwrap_or(Duration::ZERO)
+        };
+        if !extra.is_zero() {
+            tokio::time::sleep(extra).await;
+        }
+
         let result = execute_send(&task.params).await;
+        if result.success {
+            usage.lock().expect("usage poisoned").record_success(
+                &task.params.chat_id,
+                Instant::now(),
+                SystemTime::now(),
+            );
+        }
         complete_task(task, result, &idempotency, Instant::now());
     }
 }
@@ -757,6 +940,11 @@ mod tests {
             jitter: Duration::ZERO,
             task_ttl: Duration::from_secs(60),
             idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
             read_only: false,
         };
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
@@ -765,6 +953,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(false)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
         };
 
         let (result_tx, _result_rx) = oneshot::channel();
@@ -846,6 +1035,11 @@ mod tests {
             jitter: Duration::ZERO,
             task_ttl: Duration::from_secs(60),
             idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
             read_only: true,
         };
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
@@ -854,6 +1048,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
         };
 
         match sender
@@ -876,16 +1071,23 @@ mod tests {
             jitter: Duration::ZERO,
             task_ttl: Duration::from_secs(60),
             idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
             read_only: false,
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
+        let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
+            usage,
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -942,16 +1144,23 @@ mod tests {
             jitter: Duration::ZERO,
             task_ttl: Duration::from_millis(10),
             idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
             read_only: false,
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
+        let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
+            usage,
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -1007,6 +1216,11 @@ mod tests {
             jitter: Duration::from_millis(25),
             task_ttl: Duration::from_secs(30),
             idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
             read_only: true,
         };
         let (tx, _rx) = mpsc::channel(config.queue_capacity);
@@ -1015,6 +1229,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
         };
 
         sender
@@ -1071,6 +1286,24 @@ mod tests {
     }
 
     #[test]
+    fn quiet_hours_and_budgets_are_deterministic() {
+        let mut config = OutboundConfig::from_env();
+        config.quiet_start_min = 30;
+        config.quiet_end_min = 450;
+        config.hourly_budget = 2;
+        config.daily_budget = 2;
+        config.chat_cooldown = Duration::from_secs(5);
+        let mut usage = Usage::new();
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        assert!(in_quiet_hours(30, 30, 450));
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 30).is_err());
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 500).is_ok());
+        usage.hour_count = 2;
+        usage.hour_key = wall.duration_since(UNIX_EPOCH).unwrap().as_secs() / 3600;
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 500).is_err());
+    }
+
     fn pre_execution_reject_is_not_cached() {
         let now = Instant::now();
         let mut store = IdempotencyStore::new(Duration::from_secs(60));

@@ -8,8 +8,6 @@ services:
   agent-wechat:
     image: ghcr.io/thisnick/agent-wechat:latest
     container_name: agent-wechat
-    hostname: ${AGENT_WECHAT_HOSTNAME:-lenovo-pc-372}
-    mac_address: ${AGENT_WECHAT_MAC:-00:1b:21:37:24:10}
     security_opt:
       - seccomp=unconfined
     cap_add:
@@ -31,7 +29,6 @@ services:
       - AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS=${AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS:-600000}
       - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
       - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:-}
-      - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:-lenovo-pc-372}
       - AGENT_WECHAT_SPOOF_OS=${AGENT_WECHAT_SPOOF_OS:-1}
       - TZ=${TZ:-Asia/Shanghai}
     restart: unless-stopped
