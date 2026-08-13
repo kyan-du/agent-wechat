@@ -14,7 +14,7 @@ import {
   validMac,
   validMachineId,
 } from "./device-identity.ts";
-import { containerInspectMatchesIdentity, endpointMacs } from "./container-inspect.ts";
+import { configuredMacs, containerInspectMatchesIdentity, endpointMacs } from "./container-inspect.ts";
 
 test("generateDeviceIdentity produces a valid tuple", () => {
   const identity = generateDeviceIdentity(randomBytes(16).toString("hex"));
@@ -85,6 +85,39 @@ test("ensureDeviceIdentity recovers a committed env with an owned temp hard link
   assert.equal(fs.existsSync(tmp), false);
 });
 
+test("ensureDeviceIdentity tolerates a verified missing temp unlink winner", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const env = path.join(dir, "device-identity.env");
+  const seed = generateDeviceIdentity("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  fs.writeFileSync(path.join(dir, "device-identity.json"), JSON.stringify(seed));
+  const realUnlink = fs.unlinkSync;
+  let removedLinkedTemp = false;
+  const unlinkSpy = ((target: fs.PathLike) => {
+    const targetPath = String(target);
+    if (!removedLinkedTemp && path.basename(targetPath).startsWith("device-identity.env.")) {
+      const envStat = fs.statSync(env);
+      const tmpStat = fs.statSync(targetPath);
+      if (envStat.dev === tmpStat.dev && envStat.ino === tmpStat.ino) {
+        removedLinkedTemp = true;
+        realUnlink(target);
+        const enoent = new Error("ENOENT") as NodeJS.ErrnoException;
+        enoent.code = "ENOENT";
+        throw enoent;
+      }
+    }
+    return realUnlink(target);
+  }) as typeof fs.unlinkSync;
+  fs.unlinkSync = unlinkSpy;
+  try {
+    assert.deepEqual(ensureDeviceIdentity(dir), seed);
+  } finally {
+    fs.unlinkSync = realUnlink;
+  }
+  assert.equal(removedLinkedTemp, true);
+  assert.deepEqual(ensureDeviceIdentity(dir), seed);
+  assert.equal(fs.statSync(env).nlink, 1);
+});
+
 test("ensureDeviceIdentity rejects non-ascii persisted env bytes", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
   const payload = Buffer.from(
@@ -116,6 +149,7 @@ test("container inspect identity check reads Docker endpoint MACs", () => {
   const identity = generateDeviceIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
   const inspect = JSON.stringify([
     {
+      HostConfig: { MacAddress: identity.mac },
       Config: {
         Hostname: identity.hostname,
         Env: [
@@ -132,13 +166,20 @@ test("container inspect identity check reads Docker endpoint MACs", () => {
     },
   ]);
   assert.deepEqual(Array.from(endpointMacs(JSON.parse(inspect)[0])), [identity.mac]);
+  assert.deepEqual(Array.from(configuredMacs(JSON.parse(inspect)[0])), [identity.mac]);
   assert.equal(containerInspectMatchesIdentity(inspect, identity), true);
-  const wrong = inspect.replace(identity.mac, "00:1b:21:00:00:02");
-  assert.equal(containerInspectMatchesIdentity(wrong, identity), false);
+  const wrongLiveMac = JSON.stringify([
+    {
+      ...JSON.parse(inspect)[0],
+      NetworkSettings: { Networks: { bridge: { MacAddress: "00:1b:21:00:00:02" } } },
+    },
+  ]);
+  assert.equal(containerInspectMatchesIdentity(wrongLiveMac, identity), false);
   const missing = JSON.stringify([{ Config: JSON.parse(inspect)[0].Config, NetworkSettings: { Networks: { bridge: {} } } }]);
   assert.equal(containerInspectMatchesIdentity(missing, identity), false);
   const ambiguous = JSON.stringify([
     {
+      HostConfig: { MacAddress: identity.mac },
       Config: JSON.parse(inspect)[0].Config,
       NetworkSettings: {
         Networks: {
@@ -151,6 +192,74 @@ test("container inspect identity check reads Docker endpoint MACs", () => {
   assert.equal(containerInspectMatchesIdentity(ambiguous, identity), false);
   assert.throws(() => containerInspectMatchesIdentity("NOT_JSON", identity));
   assert.throws(() => containerInspectMatchesIdentity("[]", identity));
+});
+
+test("container inspect identity check accepts Docker stopped state using configured MAC", () => {
+  const identity = generateDeviceIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  const inspect = JSON.stringify([
+    {
+      HostConfig: { MacAddress: identity.mac },
+      Config: {
+        Hostname: identity.hostname,
+        Env: [
+          `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+          `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+          `AGENT_WECHAT_MAC=${identity.mac}`,
+        ],
+      },
+      NetworkSettings: {
+        Networks: {
+          bridge: { MacAddress: "" },
+        },
+      },
+    },
+  ]);
+  assert.equal(containerInspectMatchesIdentity(inspect, identity), true);
+});
+
+test("container inspect identity check rejects duplicate or missing identity env", () => {
+  const identity = generateDeviceIdentity("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  const base = {
+    HostConfig: { MacAddress: identity.mac },
+    Config: {
+      Hostname: identity.hostname,
+      Env: [
+        `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+        `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+        `AGENT_WECHAT_MAC=${identity.mac}`,
+      ],
+    },
+    NetworkSettings: { Networks: { bridge: { MacAddress: identity.mac } } },
+  };
+  const duplicate = JSON.stringify([
+    {
+      ...base,
+      Config: {
+        ...base.Config,
+        Env: [
+          `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+          "AGENT_WECHAT_MACHINE_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+          `AGENT_WECHAT_MAC=${identity.mac}`,
+        ],
+      },
+    },
+  ]);
+  assert.throws(() => containerInspectMatchesIdentity(duplicate, identity), /duplicate AGENT_WECHAT_MACHINE_ID/);
+
+  const missingHostEnv = JSON.stringify([
+    {
+      ...base,
+      Config: {
+        ...base.Config,
+        Env: [
+          `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+          `AGENT_WECHAT_MAC=${identity.mac}`,
+        ],
+      },
+    },
+  ]);
+  assert.equal(containerInspectMatchesIdentity(missingHostEnv, identity), false);
 });
 
 test("cmdUp validates identity before docker start", () => {
@@ -166,6 +275,17 @@ test("cmdUp validates identity before docker start", () => {
   assert.ok(startAt >= 0);
   assert.ok(identityAt < inspectAt);
   assert.ok(inspectAt < startAt);
+});
+
+test("cmdUp treats inspect failure after known container ID as fatal", () => {
+  const src = fs.readFileSync(fileURLToPath(new URL("./cli.ts", import.meta.url)), "utf-8");
+  assert.match(src, /const existingId = execSync\(`docker ps -aq/);
+  assert.doesNotMatch(src, /status === 1[\s\S]*ContainerNotFoundError/);
+  const catchAt = src.indexOf("} catch (error) {", src.indexOf("async function cmdUp"));
+  const imageInspectAt = src.indexOf("docker image inspect", src.indexOf("async function cmdUp"));
+  const catchBody = src.slice(catchAt, imageInspectAt);
+  assert.match(catchBody, /if \(!\(error instanceof ContainerNotFoundError\)\)/);
+  assert.match(catchBody, /throw error/);
 });
 
 test("ensureDeviceIdentity ignores inherited env when creating a second dir", () => {

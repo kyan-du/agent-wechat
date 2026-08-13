@@ -28,7 +28,6 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
-class ExistingContainerInspectionError extends Error {}
 class ContainerNotFoundError extends Error {}
 
 function failExistingContainerInspection(message: string): never {
@@ -40,9 +39,7 @@ function dockerInspectContainer(): string {
   try {
     return execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" });
   } catch (error) {
-    const status = (error as { status?: number }).status;
-    if (status === 1) throw new ContainerNotFoundError(`${CONTAINER_NAME} not found`);
-    throw new ExistingContainerInspectionError(`Cannot inspect ${CONTAINER_NAME}`);
+    throw new Error(`Cannot inspect ${CONTAINER_NAME}`, { cause: error });
   }
 }
 

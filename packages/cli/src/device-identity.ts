@@ -184,7 +184,20 @@ function exclusivePublish(envFile: string, identity: DeviceIdentity): boolean {
     fs.unlinkSync(tmp);
     return false;
   }
-  fs.unlinkSync(tmp);
+  const publishedStat = fs.statSync(envFile);
+  try {
+    fs.unlinkSync(tmp);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const currentStat = fs.statSync(envFile);
+    if (currentStat.dev !== publishedStat.dev || currentStat.ino !== publishedStat.ino) {
+      throw new Error(`${ENV_NAME} changed while removing temp link`);
+    }
+    const winner = parseEnvFile(envFile);
+    if (!sameIdentity(winner, identity)) {
+      throw new Error(`conflicting ${ENV_NAME} published while removing temp link`);
+    }
+  }
   fs.chmodSync(envFile, 0o600);
   return true;
 }
