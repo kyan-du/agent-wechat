@@ -11,6 +11,13 @@ export GTK_MODULES=${GTK_MODULES:-gail:atk-bridge}
 export WECHAT_HOME=${WECHAT_HOME:-/home/wechat}
 
 # ============================================
+# Persistent device identity (before WeChat starts)
+# ============================================
+if [ -x /opt/identity.sh ]; then
+  /opt/identity.sh || echo "[identity] warning: identity script failed" >&2
+fi
+
+# ============================================
 # X11 setup
 # ============================================
 if [ "$(id -u)" -eq 0 ]; then

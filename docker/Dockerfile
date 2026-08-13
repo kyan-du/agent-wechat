@@ -158,7 +158,8 @@ ENV AGENT_PORT=6174
 # Entrypoint
 # ============================================
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY identity.sh /opt/identity.sh
+RUN chmod +x /entrypoint.sh /opt/identity.sh
 
 EXPOSE 6174 1234
 

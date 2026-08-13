@@ -199,6 +199,14 @@ fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.parse().ok()
 }
 
+/// Reading + typing delay. Only applied when production min_spacing is large
+/// enough that unit tests with 0–30ms spacing stay fast.
+pub fn human_pre_send_delay_ms(outbound_chars: usize, inbound_chars: usize) -> u64 {
+    let reading = ((200 + 40 * inbound_chars) as u64).clamp(800, 8_000);
+    let typing = ((80 * outbound_chars.max(1)) as u64).clamp(600, 12_000);
+    (reading + typing).min(20_000)
+}
+
 fn env_bool(name: &str) -> bool {
     matches!(
         std::env::var(name)
@@ -334,6 +342,11 @@ impl OutboundSender {
         }
     }
 
+    pub fn trip_kill_switch(&self, reason: &str) -> OutboundStatus {
+        tracing::warn!("[outbound] kill switch: {reason}");
+        self.pause()
+    }
+
     pub fn pause(&self) -> OutboundStatus {
         self.control.set_runtime_paused(true);
         self.status()
@@ -391,6 +404,21 @@ async fn worker_loop(
         }
 
         let delay = policy.next_delay(now, &mut SystemJitter);
+        let human = if config.min_spacing >= Duration::from_millis(500) {
+            let outbound_chars = task
+                .params
+                .message
+                .as_ref()
+                .map(|s| s.chars().count())
+                .unwrap_or(8);
+            Duration::from_millis(human_pre_send_delay_ms(
+                outbound_chars,
+                task.params.inbound_chars.unwrap_or(0),
+            ))
+        } else {
+            Duration::ZERO
+        };
+        let delay = delay.max(human);
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
@@ -782,6 +810,7 @@ mod tests {
                 image_path: Some(path.clone()),
                 image_mime: None,
                 file_path: None,
+                inbound_chars: None,
             },
             enqueued_at: Instant::now() - Duration::from_secs(10),
             idempotency_key: Some("expired".to_string()),
@@ -1014,6 +1043,42 @@ mod tests {
             image_path: None,
             image_mime: None,
             file_path: None,
+            inbound_chars: None,
         }
+    }
+
+    #[test]
+    fn uncertain_terminal_result_is_cached_and_not_retried() {
+        let now = Instant::now();
+        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
+        store.complete(
+            "k",
+            now,
+            SendResult {
+                success: false,
+                error_code: Some("send_commit_uncertain".into()),
+                error: Some("send_commit_uncertain".into()),
+            },
+        );
+        match store.start("k", now + Duration::from_millis(1)) {
+            IdempotencyStart::Completed(result) => {
+                assert!(!result.success);
+                assert_eq!(result.error_code.as_deref(), Some("send_commit_uncertain"));
+            }
+            _ => panic!("expected cached uncertain result"),
+        }
+    }
+
+    #[test]
+    fn pre_execution_reject_is_not_cached() {
+        let now = Instant::now();
+        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        store.start("k", now);
+        store.remove("k");
+        assert!(matches!(
+            store.start("k", now + Duration::from_millis(1)),
+            IdempotencyStart::Inserted
+        ));
     }
 }

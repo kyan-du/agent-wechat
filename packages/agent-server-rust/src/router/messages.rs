@@ -218,6 +218,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                         image_path,
                         image_mime,
                         file_path,
+                        inbound_chars: None,
                     });
                     return OutboundSendResponse::Result(SendResult {
                         success: false,
@@ -233,6 +234,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                     image_path,
                     image_mime,
                     file_path,
+                    inbound_chars: None,
                 });
                 return OutboundSendResponse::Result(SendResult {
                     success: false,
@@ -249,6 +251,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         image_path,
         image_mime,
         file_path,
+        inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
     outbound_sender().send(params, input.idempotency_key).await
 }

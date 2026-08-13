@@ -22,6 +22,75 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
+const IDENTITY_PATH = path.join(TOKEN_DIR, "device-identity.json");
+
+interface DeviceIdentity {
+  machineId: string;
+  hostname: string;
+  mac: string;
+}
+
+function ensureDeviceIdentity(): DeviceIdentity {
+  try {
+    const raw = fs.readFileSync(IDENTITY_PATH, "utf-8");
+    const parsed = JSON.parse(raw) as DeviceIdentity;
+    if (parsed.machineId?.length === 32 && parsed.hostname && parsed.mac) {
+      return parsed;
+    }
+  } catch {
+    // generate
+  }
+  const machineId = randomBytes(16).toString("hex");
+  const prefixes = ["lenovo-pc", "honor-pc", "xiaomi-pc", "asus-pc", "dell-pc", "hp-pc", "thinkpad"];
+  const prefix = prefixes[parseInt(machineId.slice(0, 2), 16) % prefixes.length];
+  const num = (parseInt(machineId.slice(2, 6), 16) % 900) + 100;
+  const hostname = `${prefix}-${num}`;
+  const mac = [
+    "00",
+    "1b",
+    "21",
+    machineId.slice(6, 8),
+    machineId.slice(8, 10),
+    machineId.slice(10, 12),
+  ].join(":");
+  const identity: DeviceIdentity = { machineId, hostname, mac };
+  fs.mkdirSync(TOKEN_DIR, { recursive: true });
+  fs.writeFileSync(IDENTITY_PATH, JSON.stringify(identity, null, 2) + "\n", { mode: 0o600 });
+  return identity;
+}
+
+function looksLikeDatacenterHint(text: string): boolean {
+  return /aliyun|tencent|amazonaws|googleusercontent|azure|digitalocean|linode|vultr|cloudflare/i.test(
+    text,
+  );
+}
+
+function printIdentityCheck() {
+  const identity = ensureDeviceIdentity();
+  console.log(
+    `device: ${identity.machineId.slice(0, 8)}…  hostname: ${identity.hostname}  mac: ${identity.mac}`,
+  );
+  try {
+    const dockerenv = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'if [ -e /.dockerenv ]; then echo present; else echo absent; fi'`,
+      { encoding: "utf-8" },
+    ).trim();
+    const mid = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'head -c 8 /etc/machine-id 2>/dev/null || echo missing'`,
+      { encoding: "utf-8" },
+    ).trim();
+    console.log(`container dockerenv: ${dockerenv}  machine-id: ${mid}…`);
+    if (dockerenv === "present") {
+      console.log("warning: /.dockerenv still present — recreate the container (wx down && wx up).");
+    }
+  } catch {
+    // container may still be starting
+  }
+  if (looksLikeDatacenterHint(os.hostname()) || process.env.PROXY?.match(/amazonaws|aliyun/i)) {
+    console.log("warning: host/proxy looks like a cloud datacenter. Use a residential exit.");
+  }
+  console.log("do not test Frida/identity changes on a primary account.");
+}
 
 function ensureToken(): string {
   try {
@@ -1016,12 +1085,14 @@ async function cmdUp(opts: { proxy?: string } = {}) {
         console.log(`Container ${CONTAINER_NAME} is already running.`);
         console.log(`API: http://localhost:${DEFAULT_PORT}`);
         printNoVncUrl();
+        printIdentityCheck();
         return;
       }
       console.log(`Starting existing container ${CONTAINER_NAME}...`);
       execSync(`docker start ${CONTAINER_NAME}`, { stdio: "inherit" });
       console.log(`API: http://localhost:${DEFAULT_PORT}`);
       printNoVncUrl();
+      printIdentityCheck();
       return;
     }
   } catch {
@@ -1057,11 +1128,14 @@ async function cmdUp(opts: { proxy?: string } = {}) {
   // Ensure auth token exists
   const token = ensureToken();
 
+  const identity = ensureDeviceIdentity();
   console.log(`Starting container ${CONTAINER_NAME} from ${image}...`);
 
   const dockerArgs = [
     "run", "-d",
     "--name", CONTAINER_NAME,
+    "--hostname", identity.hostname,
+    "--mac-address", identity.mac,
     "--security-opt", "seccomp=unconfined",
     "--cap-add=SYS_PTRACE",
     "--cap-add=NET_ADMIN",
@@ -1069,6 +1143,8 @@ async function cmdUp(opts: { proxy?: string } = {}) {
     "-v", `${CONTAINER_NAME}-data:/data`,
     "-v", `${CONTAINER_NAME}-wechat-home:/home/wechat`,
     "-v", `${TOKEN_PATH}:/data/auth-token:ro`,
+    "-e", `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+    "-e", `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
   ];
 
   if (opts.proxy) {
@@ -1089,6 +1165,7 @@ async function cmdUp(opts: { proxy?: string } = {}) {
         const response = await fetch(`http://localhost:${DEFAULT_PORT}/health`);
         if (response.ok) {
           console.log("Server is ready!");
+          printIdentityCheck();
           return;
         }
       } catch {

@@ -1,6 +1,52 @@
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 
+/// Security / risk-control popup. Identified first so we freeze outbound
+/// instead of clicking OK.
+struct PopupSecurityState;
+
+impl IAState for PopupSecurityState {
+    fn fsm(&self) -> &str { "popup" }
+    fn id(&self) -> &str { "popup_security" }
+
+    fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
+        if has_settings_frame(args.a11y) {
+            return Ok(IdentifyResult { identified: false, frame: None });
+        }
+        let text = collect_popup_text(args.a11y);
+        Ok(IdentifyResult {
+            identified: crate::risk::is_security_text(&text),
+            frame: None,
+        })
+    }
+
+    fn reduce(&self, args: &ReduceArgs) -> AppState {
+        let mut state = args.prev.clone();
+        state.popup = Some(PopupState {
+            popup_type: PopupType::Error,
+            message: Some(collect_popup_text(args.a11y)),
+        });
+        state
+    }
+}
+
+fn collect_popup_text(a11y: &A11yNode) -> String {
+    let mut parts = Vec::new();
+    collect_names(a11y, &mut parts);
+    parts.join(" ")
+}
+
+fn collect_names(node: &A11yNode, out: &mut Vec<String>) {
+    if matches!(node.role.as_str(), "static" | "label" | "heading") && !node.name.is_empty() {
+        out.push(node.name.clone());
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_names(child, out);
+        }
+    }
+}
+
 /// Error popup.
 struct PopupErrorState;
 
@@ -83,5 +129,9 @@ impl IAState for PopupConfirmState {
 }
 
 pub static POPUP_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync::LazyLock::new(|| {
-    vec![Box::new(PopupErrorState), Box::new(PopupConfirmState)]
+    vec![
+        Box::new(PopupSecurityState),
+        Box::new(PopupErrorState),
+        Box::new(PopupConfirmState),
+    ]
 });

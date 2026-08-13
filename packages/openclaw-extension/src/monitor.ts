@@ -14,6 +14,7 @@ import {
   resolveWeChatPolicyContext,
   type WeChatPolicyContext,
 } from "./access-control.js";
+import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -114,6 +115,8 @@ export async function startWeChatMonitor(
   const GROUP_HISTORY_LIMIT = 50;
   let lastAuthCheck = 0;
   let prevStatus: AuthStatus["status"] | undefined = undefined;
+  let reconnectCatchup = true;
+  let catchupDispatched = 0;
 
   // Report initial status as running
   setStatus({
@@ -145,6 +148,8 @@ export async function startWeChatMonitor(
 
           // Notify agent proactively on meaningful auth transitions
           if (prevStatus === "logged_in" && !isLinked) {
+            reconnectCatchup = true;
+            catchupDispatched = 0;
             const msg = auth.status === "app_not_running"
               ? "[WeChat] Application stopped. It will restart automatically — credentials may be cached, so you can try reconnecting using the wechat_login tool."
               : "[WeChat] Session ended. You can try reconnecting using the wechat_login tool — if credentials are cached, login may complete automatically.";
@@ -207,20 +212,34 @@ export async function startWeChatMonitor(
         );
       }
 
+      let deferredThisTick = 0;
+      let dispatchedThisTick = 0;
       if (unreadChats.length > 0) {
         for (const chat of unreadChats) {
           if (abortSignal.aborted) break;
-          await processUnreadChat(
+          const result = await processUnreadChat(
             client,
             chat,
             lastSeenId,
             account,
             cfg,
             log,
-            undefined,
+            reconnectCatchup ? true : undefined,
             groupHistory,
             GROUP_HISTORY_LIMIT,
+            {
+              isReconnect: reconnectCatchup,
+              catchupDispatched,
+              allowDispatch: !reconnectCatchup || dispatchedThisTick < 1,
+            },
           );
+          if (result === "dispatched") {
+            catchupDispatched += 1;
+            dispatchedThisTick += 1;
+          }
+          if (result === "deferred") {
+            deferredThisTick += 1;
+          }
         }
       }
 
@@ -237,7 +256,40 @@ export async function startWeChatMonitor(
         log?.info?.(
           `[wechat:${account.accountId}] Catch-up: ${chatId} lastMsgLocalId=${chat.lastMsgLocalId} > lastSeenId=${prevSeen}`,
         );
-        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT);
+        const result = await processUnreadChat(
+          client,
+          chat,
+          lastSeenId,
+          account,
+          cfg,
+          log,
+          true,
+          groupHistory,
+          GROUP_HISTORY_LIMIT,
+          {
+            isReconnect: reconnectCatchup,
+            catchupDispatched,
+            allowDispatch: !reconnectCatchup || dispatchedThisTick < 1,
+          },
+        );
+        if (result === "dispatched") {
+          catchupDispatched += 1;
+          dispatchedThisTick += 1;
+        }
+        if (result === "deferred") {
+          deferredThisTick += 1;
+        }
+      }
+
+      const next = nextReconnectState({
+        reconnect: reconnectCatchup,
+        unreadCount: unreadChats.length,
+        deferred: deferredThisTick,
+        dispatched: catchupDispatched,
+      });
+      reconnectCatchup = next.reconnect;
+      if (!next.reconnect) {
+        catchupDispatched = 0;
       }
     } catch (err) {
       log?.error?.(
@@ -744,6 +796,12 @@ function bufferGroupHistory(
   }
 }
 
+type CatchupOpts = {
+  isReconnect: boolean;
+  catchupDispatched: number;
+  allowDispatch: boolean;
+};
+
 async function processUnreadChat(
   client: WeChatClient,
   chat: Chat,
@@ -754,7 +812,8 @@ async function processUnreadChat(
   skipOpen?: boolean,
   groupHistory?: Map<string, ProcessedMessage[]>,
   groupHistoryLimit?: number,
-): Promise<void> {
+  catchup?: CatchupOpts,
+): Promise<"dispatched" | "skipped" | "deferred"> {
   const core = getWeChatRuntime();
   // Re-resolve account from hot-reloaded config so policy changes take effect
   const liveAccount =
@@ -801,14 +860,14 @@ async function processUnreadChat(
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to list messages for ${chatId}: ${err}`,
     );
-    return;
+    return "skipped";
   }
 
   log?.info?.(
     `[wechat:${liveAccount.accountId}] ${chatId}: fetched ${messages.length} msgs, firstPoll=${firstPoll}, prevLastSeen=${prevLastSeen}, unreadCount=${chat.unreadCount}`,
   );
 
-  if (messages.length === 0) return;
+  if (messages.length === 0) return "skipped";
 
   // On first poll, only process the last `unreadCount` messages
   // and seed lastSeenId from the rest
@@ -827,7 +886,7 @@ async function processUnreadChat(
       // No unreads — just seed lastSeenId, don't process anything
       const maxId = messages[messages.length - 1].localId;
       lastSeenId.set(chatId, maxId);
-      return;
+      return "skipped";
     }
   } else {
     newMessages = messages.filter((m) => m.localId > prevLastSeen);
@@ -835,7 +894,7 @@ async function processUnreadChat(
       // Don't update lastSeenId — if session.db reports a newer message
       // (via lastMsgLocalId) that hasn't appeared in message_N.db yet,
       // the catch-up loop will re-fire on the next poll.
-      return;
+      return "skipped";
     }
     newMessages.sort((a, b) => a.localId - b.localId);
   }
@@ -860,7 +919,7 @@ async function processUnreadChat(
       log?.info?.(
         `[wechat:${liveAccount.accountId}] Recovery read-only: advanced ${chatId} to ${observedCursor} without dispatching ${newMessages.length} msg(s)`,
       );
-      return;
+      return "skipped";
     }
 
     newMessages = selection.messages;
@@ -869,7 +928,7 @@ async function processUnreadChat(
       log?.info?.(
         `[wechat:${liveAccount.accountId}] Recovery skipped ${selection.skipped} stale msg(s) in ${chatId}`,
       );
-      return;
+      return "skipped";
     }
     if (selection.skipped > 0) {
       log?.info?.(
@@ -912,7 +971,7 @@ async function processUnreadChat(
         log?.info?.(`[wechat:${liveAccount.accountId}] Buffered ${processed.length} msg(s) for group history in ${chatId}`);
         const maxId = Math.max(...newMessages.map((m) => m.localId));
         lastSeenId.set(chatId, maxId);
-        return;
+        return "skipped";
       }
 
       if (hasMention) {
@@ -955,13 +1014,46 @@ async function processUnreadChat(
     }
   }
 
-  // Split into segments at media boundaries and dispatch each
   if (processed.length > 0) {
+    const newestTs = processed[processed.length - 1]?.timestamp ?? Date.now();
+    const mentioned = processed.some((pm) => pm.isMentioned);
+    const decision = decideCatchup({
+      isReconnect: catchup?.isReconnect ?? false,
+      isGroup,
+      mentioned,
+      newestTimestampMs: newestTs,
+      nowMs: Date.now(),
+      catchupDispatched: catchup?.catchupDispatched ?? 0,
+    });
+    if (catchup && !catchup.allowDispatch && decision.action === "dispatch") {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Deferring catch-up reply for ${chatId} (one chat per tick)`,
+      );
+      return "deferred";
+    }
+    if (decision.action === "defer") {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Catch-up budget reached; keeping ${chatId} for later`,
+      );
+      return "deferred";
+    }
+    if (decision.action === "skip_stale") {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] Skipping stale group chatter in ${chatId}`,
+      );
+      const maxId = Math.max(...newMessages.map((m) => m.localId));
+      lastSeenId.set(chatId, maxId);
+      return "skipped";
+    }
+
+    const fold = shouldFoldSegments(catchup?.isReconnect ?? false) && !hasControlCommandInWindow;
     const segments = hasControlCommandInWindow
       ? processed.map((pm) => [pm])
-      : buildSegments(processed);
+      : fold
+        ? [processed]
+        : buildSegments(processed);
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] ${chatId}: ${processed.length} dispatchable msg(s) in ${segments.length} segment(s)`,
+      `[wechat:${liveAccount.accountId}] ${chatId}: ${processed.length} dispatchable msg(s) in ${segments.length} segment(s) (${decision.reason})`,
     );
     let allDispatched = true;
     for (let i = 0; i < segments.length; i++) {
@@ -986,9 +1078,12 @@ async function processUnreadChat(
     if (clearBufferedHistory && allDispatched && groupHistory) {
       groupHistory.set(chatId, []);
     }
+    const maxId = Math.max(...newMessages.map((m) => m.localId));
+    lastSeenId.set(chatId, maxId);
+    return allDispatched ? "dispatched" : "skipped";
   }
 
-  // Update lastSeenId (track all messages including self-sent/filtered)
   const maxId = Math.max(...newMessages.map((m) => m.localId));
   lastSeenId.set(chatId, maxId);
+  return "skipped";
 }

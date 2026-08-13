@@ -142,6 +142,17 @@ pnpm build:image:arm64       # Build Docker image (Apple Silicon)
 pnpm build:image:amd64       # Build Docker image (Intel)
 ```
 
+## Runtime constraints (experimental)
+
+These are experimental fingerprint and pacing changes. They are not a guarantee the account stays unrestricted. Do not trial them on a primary account.
+
+- One account, one persistent device identity (`machine-id` / hostname / MAC). `wx up` writes this once to `~/.config/agent-wechat/device-identity.json`.
+- Prefer a stable residential exit in the same city as the phone. Do not rotate the proxy mid-session. Do not share one IP across accounts.
+- Sends go through the outbound queue (spacing, optional reading/typing delay, quiet hours). Reconnect folds missed messages into one reply per chat, then returns to live traffic.
+- A security/verification popup pauses outbound. Recover with `POST /api/status/outbound/resume` after you handle it yourself.
+
+See GitHub issue #7 for the remaining P2 fingerprint work.
+
 See [CLAUDE.md](./CLAUDE.md) for full technical documentation.
 
 ## Ports

@@ -533,6 +533,9 @@ pub struct SendParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file: Option<FileData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub inbound_chars: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

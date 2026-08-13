@@ -8,12 +8,14 @@ use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, O
 
 pub struct SendMessagePlan;
 
+#[derive(Clone)]
 pub struct SendMessageParams {
     pub chat_id: String,
     pub message: Option<String>,
     pub image_path: Option<String>,
     pub image_mime: Option<String>,
     pub file_path: Option<String>,
+    pub inbound_chars: Option<usize>,
 }
 
 pub enum SendMessagePhase {
@@ -111,9 +113,15 @@ impl Plan for SendMessagePlan {
     ) -> Option<SelectedAction> {
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
-        // Dismiss popups, then restart target selection. The conversation may
-        // have changed while the popup was in front, so never resume from stale
-        // Focusing/Inputting state.
+        // Security popups freeze outbound; do not click them away.
+        if let Some(popup) = &state.popup {
+            if crate::risk::is_security_popup(popup) {
+                crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+                return None;
+            }
+        }
+        // Dismiss other popups, then restart target selection. The conversation
+        // may have changed while the popup was in front.
         if state.popup.is_some() && identified.popup.is_some() {
             if reset_after_popup(plan_state).is_err() {
                 return None;
@@ -135,14 +143,19 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
+                    // Same-chat fast path: only skip the select hook when a
+                    // *live* verify-only check proves the target is active.
+                    // The /tmp cache file is never used as identity proof.
+                    let live = verify_active_chat(&params.chat_id).await;
+                    if target_confirmation_error(&live, &params.chat_id).is_none() {
+                        plan_state.open_result = Some(live);
+                        plan_state.phase = SendMessagePhase::Focusing;
+                        continue;
+                    }
+
                     let chat_list_item = query_selector(a11y, r#"list[name="Chats"] > list-item"#);
                     let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| {
-                            (
-                                (b.x + b.width / 2.0).round(),
-                                (b.y + b.height / 2.0).round(),
-                            )
-                        })
+                        item.bounds.as_ref().map(|b| crate::ia::actions::jittered_point(b))
                     });
 
                     // Always select, then require chat-select's live session
@@ -203,7 +216,7 @@ impl Plan for SendMessagePlan {
 
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
-                            action: actions::click_bounds(bounds),
+                            action: actions::click_bounds_jitter(bounds),
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -249,11 +262,13 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
+                    let beat = 400 + (actions::next_jitter() % 500) as u64;
+
                     if let Some(fp) = &params.file_path {
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
                                 Action::PasteFile { path: fp.clone() },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
@@ -272,7 +287,7 @@ impl Plan for SendMessagePlan {
                                     path: ip.clone(),
                                     mime: params.image_mime.clone(),
                                 },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
@@ -284,6 +299,7 @@ impl Plan for SendMessagePlan {
                         });
                     }
 
+                    // Text: outbound queue already waited "typing time".
                     if let Some(msg) = &params.message {
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
@@ -294,7 +310,7 @@ impl Plan for SendMessagePlan {
                                     text: msg.clone(),
                                     selector: None,
                                 },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },

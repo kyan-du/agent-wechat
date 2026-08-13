@@ -6,6 +6,7 @@ mod effects;
 mod execution;
 mod ia;
 mod outbound;
+mod risk;
 mod plans;
 mod router;
 mod sessions;
@@ -52,6 +53,9 @@ async fn main() {
     // Start background health monitor
     sessions::health_monitor::spawn_health_monitor();
     tracing::info!("WeChat health monitor started");
+
+    let _ = outbound::outbound_sender();
+    tracing::info!("Outbound send scheduler started");
 
     // Build router
     let app = router::build_router();

@@ -1,6 +1,19 @@
 use super::exec::{exec_command, ExecOptions};
 use serde::{Deserialize, Serialize};
 
+const CURRENT_CHAT_PATH: &str = "/tmp/agent-wechat-current-chat";
+
+pub fn cached_current_chat() -> Option<String> {
+    std::fs::read_to_string(CURRENT_CHAT_PATH)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn remember_current_chat(chat_id: &str) {
+    let _ = std::fs::write(CURRENT_CHAT_PATH, chat_id);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenChatResult {
     pub ok: bool,
@@ -56,6 +69,15 @@ pub async fn verify_active_chat(chat_id: &str) -> OpenChatResult {
     run_chat_select(&["--verify-only", chat_id]).await
 }
 
+/// A leftover cache file is never proof of the active conversation.
+pub fn cache_cannot_prove_target(
+    cached: Option<&str>,
+    live: &OpenChatResult,
+    target: &str,
+) -> bool {
+    cached == Some(target) && confirm_target(live, target).is_err()
+}
+
 /// Open a chat in the WeChat UI using the chat-select tool.
 ///
 /// Args format: chat-select [--force] [--click-xy X Y] <username>
@@ -79,11 +101,20 @@ pub async fn open_chat(chat_id: &str, force: bool, click_xy: Option<(f64, f64)>)
     run_chat_select(&args_ref).await
 }
 
+fn positional_chat_id<'a>(args: &[&'a str]) -> Option<&'a str> {
+    args.iter().rev().copied().find(|arg| !arg.starts_with('-'))
+}
+
 async fn run_chat_select(args: &[&str]) -> OpenChatResult {
     let result = exec_command("chat-select", args, &ExecOptions::default()).await;
 
     // Result JSON is on stdout regardless of exit code.
     if let Ok(parsed) = serde_json::from_str::<OpenChatResult>(&result.stdout) {
+        if parsed.ok {
+            if let Some(chat_id) = parsed.username.as_deref().or_else(|| positional_chat_id(args)) {
+                remember_current_chat(chat_id);
+            }
+        }
         return parsed;
     }
 
@@ -138,5 +169,20 @@ mod tests {
             confirm_target(&result(Some("other"), Some(true)), "target"),
             Err(TargetConfirmationError::IdentityMismatch)
         );
+    }
+
+    #[test]
+    fn stale_cache_does_not_prove_target_after_ui_switch() {
+        // cache still says A, live UI is B: send(A) must not treat cache as verified.
+        assert!(cache_cannot_prove_target(
+            Some("A"),
+            &result(Some("B"), Some(true)),
+            "A",
+        ));
+        assert!(!cache_cannot_prove_target(
+            Some("A"),
+            &result(Some("A"), Some(true)),
+            "A",
+        ));
     }
 }

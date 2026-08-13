@@ -85,6 +85,32 @@ pub fn click_bounds(bounds: &Bounds) -> Action {
     )
 }
 
+/// Click inside the node instead of the exact center every time.
+pub fn click_bounds_jitter(bounds: &Bounds) -> Action {
+    let (x, y) = jittered_point(bounds);
+    click_at(x, y)
+}
+
+pub fn jittered_point(bounds: &Bounds) -> (f64, f64) {
+    let jx = (next_jitter() % 7) as f64 - 3.0;
+    let jy = (next_jitter() % 5) as f64 - 2.0;
+    let x = (bounds.x + bounds.width / 2.0 + jx)
+        .clamp(bounds.x + 2.0, bounds.x + bounds.width.max(3.0) - 1.0)
+        .round();
+    let y = (bounds.y + bounds.height / 2.0 + jy)
+        .clamp(bounds.y + 2.0, bounds.y + bounds.height.max(3.0) - 1.0)
+        .round();
+    (x, y)
+}
+
+pub fn next_jitter() -> u32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| (d.subsec_nanos() ^ (d.as_secs() as u32).wrapping_mul(0x9E37)) as u32)
+        .unwrap_or(3)
+}
+
 pub fn click_selector(selector: &str) -> Action {
     Action::ClickSelector {
         selector: selector.to_string(),

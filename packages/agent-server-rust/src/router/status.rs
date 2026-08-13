@@ -35,7 +35,8 @@ pub async fn get_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "container": "running",
         "loginState": { "status": login_status },
-        "version": "0.1.0"
+        "version": "0.1.0",
+        "outbound": crate::outbound::outbound_sender().status(),
     }))
 }
 
