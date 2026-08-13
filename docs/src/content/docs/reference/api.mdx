@@ -29,6 +29,20 @@ Authorization: Bearer <token>
 | `POST` | `/api/messages/send` | Send a message (text, image, or file) |
 | `GET` | `/api/messages/:chatId/media/:localId` | Download a media attachment |
 
+`POST /api/messages/send` is processed through the server-side outbound safety queue. The request body accepts text, image, or file payloads and an optional `idempotencyKey` string. Reusing the same `idempotencyKey` while the first request is pending returns `429 Too Many Requests`; reusing it after completion returns the cached result for a short TTL so clients can retry safely after uncertain network outcomes without creating a second send.
+
+If the outbound queue is full, the server returns `429 Too Many Requests` with a `Retry-After` header and a JSON body such as:
+
+```json
+{
+  "success": false,
+  "errorCode": "QUEUE_FULL",
+  "error": "Outbound send queue is full"
+}
+```
+
+If outbound sending is disabled by read-only mode, the endpoint returns `503 Service Unavailable` with `errorCode: "OUTBOUND_DISABLED"`.
+
 ### Auth
 
 | Method | Path | Description |

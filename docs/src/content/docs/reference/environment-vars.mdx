@@ -16,6 +16,13 @@ description: All environment variables used by agent-wechat.
 |----------|---------|-------------|
 | `AGENT_DB_PATH` | `/data/agent.db` | Path to the agent SQLite database |
 | `PROXY` | — | Transparent proxy address (format: `user:pass@host:port` or `socks5://...`) |
+| `AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY` | `20` | Maximum queued outbound send requests before `/api/messages/send` returns `429` |
+| `AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS` | `1500` | Minimum spacing between outbound send starts |
+| `AGENT_WECHAT_OUTBOUND_JITTER_MS` | `250` | Extra random delay added for burst smoothing only |
+| `AGENT_WECHAT_OUTBOUND_TASK_TTL_MS` | `60000` | Maximum time an outbound task may sit in the queue before expiring |
+| `AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS` | `600000` | How long completed `idempotencyKey` results are replayed |
+| `AGENT_WECHAT_OUTBOUND_DISABLED` | `false` | Emergency kill switch for all outbound sends |
+| `AGENT_WECHAT_READ_ONLY` | `false` | Read-only mode alias that disables outbound sends |
 | `DISPLAY` | `:99` | X11 display (set automatically by the container entrypoint) |
 | `DBUS_SESSION_BUS_ADDRESS` | — | D-Bus session bus address (set automatically) |
 

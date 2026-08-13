@@ -21,6 +21,14 @@ services:
       - ~/.config/agent-wechat/token:/data/auth-token:ro
     environment:
       - PROXY=${PROXY:-}
+      # Outbound send safety defaults. Jitter smooths bursts; it is not intended
+      # to mimic humans or bypass platform safeguards.
+      - AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY=${AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY:-20}
+      - AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS=${AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS:-1500}
+      - AGENT_WECHAT_OUTBOUND_JITTER_MS=${AGENT_WECHAT_OUTBOUND_JITTER_MS:-250}
+      - AGENT_WECHAT_OUTBOUND_TASK_TTL_MS=${AGENT_WECHAT_OUTBOUND_TASK_TTL_MS:-60000}
+      - AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS=${AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS:-600000}
+      - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
     restart: unless-stopped
 
 volumes:

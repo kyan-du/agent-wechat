@@ -121,6 +121,10 @@ services:
       - ~/.config/agent-wechat/token:/data/auth-token:ro
     environment:
       - PROXY=${PROXY:-}    # optional: user:pass@host:port
+      - AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY=${AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY:-20}
+      - AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS=${AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS:-1500}
+      - AGENT_WECHAT_OUTBOUND_JITTER_MS=${AGENT_WECHAT_OUTBOUND_JITTER_MS:-250}
+      - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
     restart: unless-stopped
 
 volumes:
