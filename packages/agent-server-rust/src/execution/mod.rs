@@ -181,6 +181,16 @@ where
             context.state.popup = None;
         }
 
+        if let Some(popup) = &context.state.popup {
+            if crate::risk::is_security_popup(popup) {
+                crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+                tracing::warn!(
+                    "[exec] security popup — outbound frozen: {:?}",
+                    popup.message.as_deref()
+                );
+            }
+        }
+
         if let Some(ref cc) = identified.contact_card {
             if let Some(state_impl) = find_state_by_id(&cc.state_id) {
                 let current = context.state.clone();

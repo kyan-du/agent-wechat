@@ -22,6 +22,8 @@ export type WeChatConfig = {
   catchUpMode?: "read-only" | "latest";
   catchUpMaxMessages?: number;
   catchUpMaxAgeMs?: number;
+  /** Auto-replies allowed in one reconnect window. Raise to continue held chats. */
+  catchUpChatBudget?: number;
   mediaPartDelayMs?: number;
 };
 
@@ -40,6 +42,7 @@ export type ResolvedWeChatAccount = {
   catchUpMode: "read-only" | "latest";
   catchUpMaxMessages: number;
   catchUpMaxAgeMs: number;
+  catchUpChatBudget: number;
   mediaPartDelayMs: number;
 };
 
@@ -66,6 +69,7 @@ export const DEFAULT_POLL_INTERVAL_MS = 1000;
 export const DEFAULT_AUTH_POLL_INTERVAL_MS = 30_000;
 export const DEFAULT_CATCH_UP_MAX_MESSAGES = 10;
 export const DEFAULT_CATCH_UP_MAX_AGE_MS = 5 * 60_000;
+export const DEFAULT_CATCH_UP_CHAT_BUDGET = 5;
 export const DEFAULT_MEDIA_PART_DELAY_MS = 750;
 export const DEFAULT_ACCOUNT_ID = "default";
 
@@ -100,6 +104,11 @@ export function resolveWeChatAccount(
       wechat.catchUpMaxAgeMs,
       DEFAULT_CATCH_UP_MAX_AGE_MS,
       1000,
+    ),
+    catchUpChatBudget: boundedInteger(
+      wechat.catchUpChatBudget,
+      DEFAULT_CATCH_UP_CHAT_BUDGET,
+      1,
     ),
     mediaPartDelayMs: boundedInteger(
       wechat.mediaPartDelayMs,

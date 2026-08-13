@@ -1,5 +1,7 @@
 import { build } from "esbuild";
-import { readFileSync } from "fs";
+import { copyFileSync, readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 
@@ -20,3 +22,9 @@ await build({
   },
   external: ["qrcode-terminal"],
 });
+
+const here = dirname(fileURLToPath(import.meta.url));
+copyFileSync(
+  join(here, "../../scripts/device_identity.py"),
+  join(here, "dist/device_identity.py"),
+);

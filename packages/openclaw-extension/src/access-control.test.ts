@@ -28,6 +28,7 @@ function baseAccount(overrides: Partial<ResolvedWeChatAccount> = {}): ResolvedWe
     catchUpMode: "read-only",
     catchUpMaxMessages: 10,
     catchUpMaxAgeMs: 300000,
+    catchUpChatBudget: 5,
     mediaPartDelayMs: 750,
     ...overrides,
   };

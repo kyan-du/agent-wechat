@@ -123,6 +123,7 @@ export interface SendResult {
   messageId?: string;
   errorCode?: string;
   error?: string;
+  commitAttempted?: boolean;
 }
 
 export interface GetMediaParams {

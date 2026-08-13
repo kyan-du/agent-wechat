@@ -180,6 +180,7 @@ export const listMessagesParamsSchema = z.object({
 
 export const sendParamsSchema = z.object({
   chatId: z.string().min(1),
+  idempotencyKey: z.string().min(1).optional(),
   text: z.string().optional(),
   image: z.object({
     data: z.string(),
@@ -189,12 +190,14 @@ export const sendParamsSchema = z.object({
     data: z.string(),
     filename: z.string(),
   }).optional(),
+  inboundChars: z.number().int().nonnegative().optional(),
 });
 
 export const sendResultSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
   error: z.string().optional(),
+  commitAttempted: z.boolean().optional(),
 });
 
 export const getMediaParamsSchema = z.object({

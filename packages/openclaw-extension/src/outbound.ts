@@ -22,6 +22,7 @@ export async function sendLogicalMediaTask(opts: {
   media: MediaPart[];
   caption?: string;
   requestId?: string;
+  inboundChars?: number;
   interPartDelayMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<string> {
@@ -41,6 +42,7 @@ export async function sendLogicalMediaTask(opts: {
       idempotencyKey: `${requestId}:${index}`,
       partIndex: index,
       partCount: parts.length,
+      inboundChars: opts.inboundChars,
     });
     if (!result.success) {
       throw new Error(result.error ?? `Logical send part ${index + 1} failed`);

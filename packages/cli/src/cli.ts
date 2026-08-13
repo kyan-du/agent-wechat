@@ -1,7 +1,13 @@
 import { Command, Option } from "commander";
 import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
-import { spawn, execSync } from "child_process";
+import { spawn, execFileSync, execSync } from "child_process";
+import {
+  buildDockerRunArgs,
+  ensureDeviceIdentity as loadDeviceIdentity,
+  type DeviceIdentity,
+} from "./device-identity.js";
+import { bindExistingContainer, parseExactlyOneDockerId } from "./container-inspect.js";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import qrTerminal from "qrcode-terminal";
@@ -10,7 +16,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 declare const PKG_VERSION: string;
-const VERSION = PKG_VERSION;
+const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
 const CONTAINER_NAME = "agent-wechat";
 const GHCR_IMAGE = "ghcr.io/thisnick/agent-wechat";
 const DEFAULT_PORT = 6174;
@@ -22,6 +28,76 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
+
+function failExistingContainer(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
+function inspectExistingContainer(id: string): { ok: true; raw: string } | { ok: false } {
+  try {
+    return {
+      ok: true,
+      raw: execFileSync("docker", ["inspect", id], { encoding: "utf-8" }),
+    };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function ensureDeviceIdentity(): DeviceIdentity {
+  try {
+    return loadDeviceIdentity(TOKEN_DIR);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`Invalid device identity in ${TOKEN_DIR}. ${detail}`);
+    process.exit(1);
+  }
+}
+
+function looksLikeDatacenterHint(text: string): boolean {
+  return /aliyun|tencent|amazonaws|googleusercontent|azure|digitalocean|linode|vultr|cloudflare/i.test(
+    text,
+  );
+}
+
+function printIdentityCheck() {
+  const identity = ensureDeviceIdentity();
+  console.log(
+    `device: ${identity.machineId.slice(0, 8)}…  hostname: ${identity.hostname}  mac: ${identity.mac}`,
+  );
+  try {
+    const dockerenv = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'if [ -e /.dockerenv ]; then echo present; else echo absent; fi'`,
+      { encoding: "utf-8" },
+    ).trim();
+    const mid = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'head -c 8 /etc/machine-id 2>/dev/null || echo missing'`,
+      { encoding: "utf-8" },
+    ).trim();
+    const actualHn = execSync(
+      `docker exec ${CONTAINER_NAME} hostname`,
+      { encoding: "utf-8" },
+    ).trim();
+    const actualMac = execSync(
+      `docker exec ${CONTAINER_NAME} sh -c 'cat /sys/class/net/eth0/address 2>/dev/null || cat /sys/class/net/$(ls /sys/class/net | head -1)/address'`,
+      { encoding: "utf-8" },
+    ).trim();
+    console.log(`container dockerenv: ${dockerenv}  machine-id: ${mid}…  hostname: ${actualHn}  mac: ${actualMac}`);
+    if (actualHn !== identity.hostname || actualMac.toLowerCase() !== identity.mac.toLowerCase()) {
+      console.log("warning: live hostname/MAC do not match persisted identity; recreate with wx down && wx up.");
+    }
+    if (dockerenv === "present") {
+      console.log("warning: /.dockerenv still present — recreate the container (wx down && wx up).");
+    }
+  } catch {
+    // container may still be starting
+  }
+  if (looksLikeDatacenterHint(os.hostname()) || process.env.PROXY?.match(/amazonaws|aliyun/i)) {
+    console.log("warning: host/proxy looks like a cloud datacenter. Use a residential exit.");
+  }
+  console.log("do not test Frida/identity changes on a primary account.");
+}
 
 function ensureToken(): string {
   try {
@@ -1005,27 +1081,49 @@ async function cmdUpdate() {
 // ============================================
 
 async function cmdUp(opts: { proxy?: string } = {}) {
+  const identity = ensureDeviceIdentity();
   let image = getImageTag();
 
-  // Check if container already exists
-  try {
-    const existingId = execSync(`docker ps -aq -f "name=^${CONTAINER_NAME}$"`, { encoding: "utf-8" }).trim();
-    if (existingId) {
-      const running = execSync(`docker ps -q -f "name=^${CONTAINER_NAME}$"`, { encoding: "utf-8" }).trim();
-      if (running) {
-        console.log(`Container ${CONTAINER_NAME} is already running.`);
-        console.log(`API: http://localhost:${DEFAULT_PORT}`);
-        printNoVncUrl();
-        return;
-      }
-      console.log(`Starting existing container ${CONTAINER_NAME}...`);
-      execSync(`docker start ${CONTAINER_NAME}`, { stdio: "inherit" });
-      console.log(`API: http://localhost:${DEFAULT_PORT}`);
-      printNoVncUrl();
-      return;
+  const existingRaw = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
+    encoding: "utf-8",
+  });
+  if (existingRaw.trim()) {
+    let boundId: string;
+    try {
+      boundId = parseExactlyOneDockerId(existingRaw);
+    } catch {
+      failExistingContainer(
+        `Ambiguous or invalid ${CONTAINER_NAME} container ID from docker ps. Run: wx down && wx up`,
+      );
     }
-  } catch {
-    // No container found, continue to create
+    const runningRaw = execFileSync("docker", ["ps", "-q", "-f", `name=^${CONTAINER_NAME}$`], {
+      encoding: "utf-8",
+    });
+    const inspected = inspectExistingContainer(boundId);
+    const decision = bindExistingContainer({
+      psAllRaw: existingRaw,
+      psRunningRaw: runningRaw,
+      inspectOk: inspected.ok,
+      inspectRaw: inspected.ok ? inspected.raw : undefined,
+      identity,
+    });
+    if (decision.action === "fail") {
+      failExistingContainer(
+        decision.reason === "inspect-failed"
+          ? `Cannot inspect existing ${CONTAINER_NAME}; not creating a second container. Run: wx down && wx up`
+          : `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
+      );
+    }
+    if (decision.start) {
+      console.log(`Starting existing container ${decision.id}...`);
+      execFileSync("docker", ["start", decision.id], { stdio: "inherit" });
+    } else {
+      console.log(`Container ${decision.id} is already running.`);
+    }
+    console.log(`API: http://localhost:${DEFAULT_PORT}`);
+    printNoVncUrl();
+    printIdentityCheck();
+    return;
   }
 
   // Check if image exists locally, pull if not
@@ -1059,26 +1157,16 @@ async function cmdUp(opts: { proxy?: string } = {}) {
 
   console.log(`Starting container ${CONTAINER_NAME} from ${image}...`);
 
-  const dockerArgs = [
-    "run", "-d",
-    "--name", CONTAINER_NAME,
-    "--security-opt", "seccomp=unconfined",
-    "--cap-add=SYS_PTRACE",
-    "--cap-add=NET_ADMIN",
-    "-p", `${DEFAULT_PORT}:${DEFAULT_PORT}`,
-    "-v", `${CONTAINER_NAME}-data:/data`,
-    "-v", `${CONTAINER_NAME}-wechat-home:/home/wechat`,
-    "-v", `${TOKEN_PATH}:/data/auth-token:ro`,
-  ];
-
-  if (opts.proxy) {
-    dockerArgs.push("-e", `PROXY=${opts.proxy}`);
-  }
-
-  dockerArgs.push(image);
+  const dockerArgs = buildDockerRunArgs(identity, {
+    image,
+    containerName: CONTAINER_NAME,
+    tokenPath: TOKEN_PATH,
+    port: DEFAULT_PORT,
+    proxy: opts.proxy,
+  });
 
   try {
-    execSync(`docker ${dockerArgs.join(" ")}`, { stdio: "inherit" });
+    execFileSync("docker", dockerArgs, { stdio: "inherit" });
     console.log(`\nContainer started successfully!`);
     console.log(`API: http://localhost:${DEFAULT_PORT}`);
     printNoVncUrl();
@@ -1089,6 +1177,7 @@ async function cmdUp(opts: { proxy?: string } = {}) {
         const response = await fetch(`http://localhost:${DEFAULT_PORT}/health`);
         if (response.ok) {
           console.log("Server is ready!");
+          printIdentityCheck();
           return;
         }
       } catch {
@@ -1130,8 +1219,10 @@ async function cmdLogs() {
   }
 }
 
-// Parse and run
-program.parseAsync(process.argv).catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+// Parse and run when invoked as the CLI, but allow tests to import helpers.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  program.parseAsync(process.argv).catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}

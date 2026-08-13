@@ -149,6 +149,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
             success: false,
             error_code: Some("INVALID_REQUEST".to_string()),
             error: Some("No text, image, or file provided".to_string()),
+            commit_attempted: false,
         });
     }
 
@@ -218,11 +219,13 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                         image_path,
                         image_mime,
                         file_path,
+                        inbound_chars: None,
                     });
                     return OutboundSendResponse::Result(SendResult {
                         success: false,
                         error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
                         error: Some(format!("Failed to write temp file: {e}")),
+                        commit_attempted: false,
                     });
                 }
             },
@@ -233,11 +236,13 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                     image_path,
                     image_mime,
                     file_path,
+                    inbound_chars: None,
                 });
                 return OutboundSendResponse::Result(SendResult {
                     success: false,
                     error_code: Some("FILE_BASE64_DECODE_FAILED".to_string()),
                     error: Some(format!("Failed to decode base64 file data: {e}")),
+                    commit_attempted: false,
                 });
             }
         }
@@ -249,6 +254,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         image_path,
         image_mime,
         file_path,
+        inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
     outbound_sender().send(params, input.idempotency_key).await
 }

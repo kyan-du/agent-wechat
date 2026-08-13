@@ -2,4 +2,4 @@
 import type { FileData } from "./FileData.js";
 import type { ImageData } from "./ImageData.js";
 
-export type SendParams = { chatId: string, idempotencyKey?: string, text?: string, image?: ImageData, file?: FileData, };
+export type SendParams = { chatId: string, idempotencyKey?: string, text?: string, image?: ImageData, file?: FileData, inboundChars?: number, };

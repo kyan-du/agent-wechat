@@ -5,15 +5,20 @@ use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
+use crate::sessions::manager::get_session;
+use crate::db::get_db;
+use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
 
+#[derive(Clone)]
 pub struct SendMessageParams {
     pub chat_id: String,
     pub message: Option<String>,
     pub image_path: Option<String>,
     pub image_mime: Option<String>,
     pub file_path: Option<String>,
+    pub inbound_chars: Option<usize>,
 }
 
 pub enum SendMessagePhase {
@@ -32,6 +37,40 @@ pub struct SendMessagePlanState {
     pub send_action_executed: bool,
     /// Stable diagnostic code returned when the plan fails closed.
     pub diagnostic_error: Option<String>,
+}
+
+fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResult> {
+    let matches = load_matching_usernames(state.main_window.opened_chat_name.as_deref())?;
+    crate::tools::chat_select::confirm_opened_name(
+        state.main_window.opened_chat_name.as_deref(),
+        chat_id,
+        &matches,
+    )
+    .ok()?;
+    Some(OpenChatResult {
+        ok: true,
+        username: Some(chat_id.to_string()),
+        index: None,
+        skipped: Some(true),
+        verified: Some(true),
+        error: None,
+    })
+}
+
+fn load_matching_usernames(opened_name: Option<&str>) -> Option<Vec<String>> {
+    let name = opened_name.map(str::trim).filter(|s| !s.is_empty())?;
+    let session = get_session("default")?;
+    let user = session.logged_in_user.as_ref()?;
+    let keys = {
+        let db = get_db();
+        get_stored_keys(&db, &session.id, user)
+    };
+    if keys.is_empty() {
+        return None;
+    }
+    Some(crate::tools::wechat_contacts::usernames_for_display_name(
+        user, &keys, name,
+    ))
 }
 
 fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<String> {
@@ -111,9 +150,15 @@ impl Plan for SendMessagePlan {
     ) -> Option<SelectedAction> {
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
-        // Dismiss popups, then restart target selection. The conversation may
-        // have changed while the popup was in front, so never resume from stale
-        // Focusing/Inputting state.
+        // Security popups freeze outbound; do not click them away.
+        if let Some(popup) = &state.popup {
+            if crate::risk::is_security_popup(popup) {
+                crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+                return None;
+            }
+        }
+        // Dismiss other popups, then restart target selection. The conversation
+        // may have changed while the popup was in front.
         if state.popup.is_some() && identified.popup.is_some() {
             if reset_after_popup(plan_state).is_err() {
                 return None;
@@ -135,14 +180,17 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
+                    // Same-chat fast path: live a11y header + local DB only.
+                    // Never treat /tmp cache or Frida as the cheap path.
+                    if let Some(live) = confirm_from_a11y_db(state, &params.chat_id) {
+                        plan_state.open_result = Some(live);
+                        plan_state.phase = SendMessagePhase::Focusing;
+                        continue;
+                    }
+
                     let chat_list_item = query_selector(a11y, r#"list[name="Chats"] > list-item"#);
                     let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| {
-                            (
-                                (b.x + b.width / 2.0).round(),
-                                (b.y + b.height / 2.0).round(),
-                            )
-                        })
+                        item.bounds.as_ref().map(|b| crate::ia::actions::jittered_point(b))
                     });
 
                     // Always select, then require chat-select's live session
@@ -203,7 +251,7 @@ impl Plan for SendMessagePlan {
 
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
-                            action: actions::click_bounds(bounds),
+                            action: actions::click_bounds_jitter(bounds),
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -229,15 +277,19 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
-                    // Re-scan immediately before the one action that can commit
-                    // the message. This closes the window where a popup or user
-                    // interaction changes conversations after the initial open.
-                    let live_target = verify_active_chat(&params.chat_id).await;
-                    if let Some(error) = target_confirmation_error(&live_target, &params.chat_id) {
-                        tracing::warn!("[send] pre-send target rescan failed: {error}");
-                        plan_state.diagnostic_error =
-                            Some("pre_send_target_confirmation_failed".to_string());
-                        return None;
+                    // Re-check immediately before the one action that can commit.
+                    // Prefer the same non-Frida live signal; Frida verify-only
+                    // only if a11y/DB cannot uniquely identify the open chat.
+                    if confirm_from_a11y_db(state, &params.chat_id).is_none() {
+                        let live_target = verify_active_chat(&params.chat_id).await;
+                        if let Some(error) =
+                            target_confirmation_error(&live_target, &params.chat_id)
+                        {
+                            tracing::warn!("[send] pre-send target rescan failed: {error}");
+                            plan_state.diagnostic_error =
+                                Some("pre_send_target_confirmation_failed".to_string());
+                            return None;
+                        }
                     }
 
                     if find_edit_and_send_button(a11y).is_none() {
@@ -249,11 +301,13 @@ impl Plan for SendMessagePlan {
                         return None;
                     }
 
+                    let beat = 400 + (actions::next_jitter() % 500) as u64;
+
                     if let Some(fp) = &params.file_path {
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
                                 Action::PasteFile { path: fp.clone() },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
@@ -272,7 +326,7 @@ impl Plan for SendMessagePlan {
                                     path: ip.clone(),
                                     mime: params.image_mime.clone(),
                                 },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
@@ -284,6 +338,7 @@ impl Plan for SendMessagePlan {
                         });
                     }
 
+                    // Text: outbound queue already waited "typing time".
                     if let Some(msg) = &params.message {
                         return Some(SelectedAction {
                             action: actions::sequence(vec![
@@ -294,7 +349,7 @@ impl Plan for SendMessagePlan {
                                     text: msg.clone(),
                                     selector: None,
                                 },
-                                Action::Wait { ms: 100 },
+                                Action::Wait { ms: beat },
                                 Action::CommitKey {
                                     combo: "Return".to_string(),
                                 },
@@ -455,5 +510,25 @@ mod tests {
             state.diagnostic_error.as_deref(),
             Some("send_commit_uncertain")
         );
+    }
+
+    #[test]
+    fn confirmation_diagnostics_after_successful_return_keep_commit_armed() {
+        let mut state = SendMessagePlan.initial_plan_state();
+        record_action_result(&mut state, &Ok(true));
+        assert!(state.send_action_executed);
+        assert!(matches!(state.phase, SendMessagePhase::Confirming));
+
+        state.diagnostic_error = Some("composer_missing_during_confirmation".into());
+        assert!(state.send_action_executed);
+        assert_eq!(
+            reset_after_popup(&mut state),
+            Err("popup_after_send_action")
+        );
+        assert_eq!(
+            state.diagnostic_error.as_deref(),
+            Some("popup_after_send_action")
+        );
+        assert!(state.send_action_executed);
     }
 }
