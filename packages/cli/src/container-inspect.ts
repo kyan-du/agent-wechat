@@ -19,6 +19,7 @@ export function endpointMacs(info: {
 
 export function configuredMacs(info: {
   HostConfig?: { MacAddress?: string };
+  Config?: { MacAddress?: string };
   NetworkSettings?: {
     Networks?: Record<string, { MacAddress?: string } | undefined>;
   };
@@ -28,20 +29,21 @@ export function configuredMacs(info: {
     if (typeof value === "string" && value.trim()) macs.add(value.toLowerCase());
   };
   add(info.HostConfig?.MacAddress);
+  add(info.Config?.MacAddress);
   for (const network of Object.values(info.NetworkSettings?.Networks ?? {})) {
     add(network?.MacAddress);
   }
   return [...macs];
 }
 
-function requiredEnv(env: string[], key: string): string | null {
-  let found: string | null = null;
-  for (const entry of env) {
-    if (!entry.startsWith(`${key}=`)) continue;
-    if (found !== null) throw new Error(`duplicate ${key} in container inspect env`);
-    found = entry.slice(key.length + 1);
-  }
-  return found;
+export function uniqueInspectEnv(env: unknown, key: string): string {
+  if (!Array.isArray(env)) throw new Error("unexpected inspect env shape");
+  const values = env
+    .filter((entry): entry is string => typeof entry === "string" && entry.startsWith(`${key}=`))
+    .map((entry) => entry.slice(key.length + 1));
+  if (values.length === 0) throw new Error(`missing ${key}`);
+  if (values.length > 1) throw new Error(`duplicate ${key}`);
+  return values[0];
 }
 
 export function containerInspectMatchesIdentity(raw: string, identity: DeviceIdentity): boolean {
@@ -51,28 +53,49 @@ export function containerInspectMatchesIdentity(raw: string, identity: DeviceIde
   }
   const info = parsed[0] as {
     HostConfig?: { MacAddress?: string };
-    Config?: { Hostname?: string; Env?: string[] };
+    Config?: { Hostname?: string; Env?: string[]; MacAddress?: string };
     NetworkSettings?: {
       MacAddress?: string;
       Networks?: Record<string, { MacAddress?: string } | undefined>;
     };
   };
   const env = info.Config?.Env ?? [];
-  if (!Array.isArray(env)) throw new Error("unexpected inspect env shape");
+  const machineId = uniqueInspectEnv(env, "AGENT_WECHAT_MACHINE_ID");
+  const envHost = uniqueInspectEnv(env, "AGENT_WECHAT_HOSTNAME");
+  const envMac = uniqueInspectEnv(env, "AGENT_WECHAT_MAC");
   const hostname = info.Config?.Hostname;
-  const machineId = requiredEnv(env, "AGENT_WECHAT_MACHINE_ID");
-  const envHost = requiredEnv(env, "AGENT_WECHAT_HOSTNAME");
-  const envMac = requiredEnv(env, "AGENT_WECHAT_MAC");
-  const durableMacs = configuredMacs(info);
   const liveMacs = endpointMacs(info);
-  const durableMacOk = durableMacs.length === 1 && durableMacs[0] === identity.mac;
-  const liveMacOk = liveMacs.length === 0 || (liveMacs.length === 1 && liveMacs[0] === identity.mac);
+  const durableMacs = configuredMacs(info);
+  if (liveMacs.some((mac) => mac !== identity.mac)) return false;
+  if (durableMacs.some((mac) => mac !== identity.mac)) return false;
   return (
     hostname === identity.hostname &&
     machineId === identity.machineId &&
     envHost === identity.hostname &&
-    envMac === identity.mac &&
-    durableMacOk &&
-    liveMacOk
+    envMac === identity.mac
   );
+}
+
+export type ExistingContainerDecision =
+  | { action: "use-existing"; start: boolean }
+  | { action: "fail"; reason: "inspect-failed" | "identity-mismatch" };
+
+/** Once docker ps returned an ID, inspect errors are never "absent". */
+export function decideExistingContainer(input: {
+  running: boolean;
+  inspectOk: boolean;
+  inspectRaw?: string;
+  identity: DeviceIdentity;
+}): ExistingContainerDecision {
+  if (!input.inspectOk || input.inspectRaw === undefined) {
+    return { action: "fail", reason: "inspect-failed" };
+  }
+  try {
+    if (!containerInspectMatchesIdentity(input.inspectRaw, input.identity)) {
+      return { action: "fail", reason: "identity-mismatch" };
+    }
+  } catch {
+    return { action: "fail", reason: "identity-mismatch" };
+  }
+  return { action: "use-existing", start: !input.running };
 }

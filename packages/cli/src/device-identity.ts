@@ -168,7 +168,11 @@ function parseJsonFile(target: string): DeviceIdentity {
   return parsed;
 }
 
-function exclusivePublish(envFile: string, identity: DeviceIdentity): boolean {
+export function exclusivePublish(
+  envFile: string,
+  identity: DeviceIdentity,
+  opts?: { afterLink?: (tmp: string) => void },
+): boolean {
   requireAbsentOrRegular(envFile);
   const tmp = envFile + `.${process.pid}.${randomBytes(4).toString("hex")}`;
   const payload = [
@@ -181,9 +185,14 @@ function exclusivePublish(envFile: string, identity: DeviceIdentity): boolean {
   try {
     fs.linkSync(tmp, envFile);
   } catch {
-    fs.unlinkSync(tmp);
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // another publisher already removed the losing temp
+    }
     return false;
   }
+  opts?.afterLink?.(tmp);
   const publishedStat = fs.statSync(envFile);
   try {
     fs.unlinkSync(tmp);

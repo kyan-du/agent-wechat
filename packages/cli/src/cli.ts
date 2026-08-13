@@ -7,7 +7,7 @@ import {
   ensureDeviceIdentity as loadDeviceIdentity,
   type DeviceIdentity,
 } from "./device-identity.js";
-import { containerInspectMatchesIdentity } from "./container-inspect.js";
+import { decideExistingContainer } from "./container-inspect.js";
 import { randomBytes } from "crypto";
 import fs from "fs";
 import qrTerminal from "qrcode-terminal";
@@ -28,40 +28,21 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
-class ContainerNotFoundError extends Error {}
 
-function failExistingContainerInspection(message: string): never {
+function failExistingContainer(message: string): never {
   console.error(message);
   process.exit(1);
 }
 
-function dockerInspectContainer(): string {
+function inspectExistingContainer(): { ok: true; raw: string } | { ok: false } {
   try {
-    return execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" });
-  } catch (error) {
-    throw new Error(`Cannot inspect ${CONTAINER_NAME}`, { cause: error });
-  }
-}
-
-function assertExistingContainerMatches(identity: DeviceIdentity): void {
-  let raw: string;
-  try {
-    raw = dockerInspectContainer();
-  } catch (error) {
-    if (error instanceof ContainerNotFoundError) throw error;
-    failExistingContainerInspection(`Cannot inspect ${CONTAINER_NAME}; recreate with wx down && wx up.`);
-  }
-  try {
-    if (containerInspectMatchesIdentity(raw, identity)) return;
+    return {
+      ok: true,
+      raw: execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" }),
+    };
   } catch {
-    failExistingContainerInspection(
-      `Cannot verify existing ${CONTAINER_NAME} container identity. Run: wx down && wx up`,
-    );
+    return { ok: false };
   }
-  console.error(
-    `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
-  );
-  process.exit(1);
 }
 
 function ensureDeviceIdentity(): DeviceIdentity {
@@ -1103,31 +1084,37 @@ async function cmdUp(opts: { proxy?: string } = {}) {
   const identity = ensureDeviceIdentity();
   let image = getImageTag();
 
-  // Check if container already exists
-  try {
-    const existingId = execSync(`docker ps -aq -f "name=^${CONTAINER_NAME}$"`, { encoding: "utf-8" }).trim();
-    if (existingId) {
-      const running = execSync(`docker ps -q -f "name=^${CONTAINER_NAME}$"`, { encoding: "utf-8" }).trim();
-      if (running) {
-        console.log(`Container ${CONTAINER_NAME} is already running.`);
-        console.log(`API: http://localhost:${DEFAULT_PORT}`);
-        printNoVncUrl();
-        printIdentityCheck();
-        return;
-      }
-      assertExistingContainerMatches(identity);
+  const existingId = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
+    encoding: "utf-8",
+  }).trim();
+  if (existingId) {
+    const running = execFileSync("docker", ["ps", "-q", "-f", `name=^${CONTAINER_NAME}$`], {
+      encoding: "utf-8",
+    }).trim();
+    const inspected = inspectExistingContainer();
+    const decision = decideExistingContainer({
+      running: Boolean(running),
+      inspectOk: inspected.ok,
+      inspectRaw: inspected.ok ? inspected.raw : undefined,
+      identity,
+    });
+    if (decision.action === "fail") {
+      failExistingContainer(
+        decision.reason === "inspect-failed"
+          ? `Cannot inspect existing ${CONTAINER_NAME}; not creating a second container. Run: wx down && wx up`
+          : `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
+      );
+    }
+    if (decision.start) {
       console.log(`Starting existing container ${CONTAINER_NAME}...`);
       execFileSync("docker", ["start", CONTAINER_NAME], { stdio: "inherit" });
-      console.log(`API: http://localhost:${DEFAULT_PORT}`);
-      printNoVncUrl();
-      printIdentityCheck();
-      return;
+    } else {
+      console.log(`Container ${CONTAINER_NAME} is already running.`);
     }
-  } catch (error) {
-    if (!(error instanceof ContainerNotFoundError)) {
-      throw error;
-    }
-    // No container found, continue to create
+    console.log(`API: http://localhost:${DEFAULT_PORT}`);
+    printNoVncUrl();
+    printIdentityCheck();
+    return;
   }
 
   // Check if image exists locally, pull if not

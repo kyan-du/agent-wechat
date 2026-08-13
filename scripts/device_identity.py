@@ -151,7 +151,13 @@ def derive_mac(mid: str) -> str:
     return f"00:1b:21:{mid[6:8]}:{mid[8:10]}:{mid[10:12]}"
 
 
-def exclusive_publish(env_file: str, mid: str, hn: str, mac: str) -> bool:
+def exclusive_publish(
+    env_file: str,
+    mid: str,
+    hn: str,
+    mac: str,
+    after_link: Optional[Callable[[str], None]] = None,
+) -> bool:
     directory = os.path.dirname(env_file)
     require_absent_or_regular(env_file)
     fd, tmp = tempfile.mkstemp(prefix="device-identity.env.", dir=directory)
@@ -169,9 +175,19 @@ def exclusive_publish(env_file: str, mid: str, hn: str, mac: str) -> bool:
     try:
         os.link(tmp, env_file)
     except FileExistsError:
-        os.unlink(tmp)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
         return False
-    os.unlink(tmp)
+    if after_link is not None:
+        after_link(tmp)
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        winner = parse_env_identity(env_file)
+        if winner != (mid, hn, mac):
+            raise
     os.chmod(env_file, 0o600)
     return True
 

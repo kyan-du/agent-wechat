@@ -406,6 +406,22 @@ fi
 test "$(cat "$victim")" = "keep"
 grep -Fq symlink "$sdir/err"
 
+rdir="$(mktemp -d)"
+python3 - <<PY
+import os, sys
+sys.path.insert(0, "$ROOT/scripts")
+import device_identity as d
+env = os.path.join("$rdir", "device-identity.env")
+mid, hn, mac = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "lenovo-pc-100", "00:1b:21:aa:aa:aa"
+
+def after(tmp):
+    os.unlink(tmp)
+
+assert d.exclusive_publish(env, mid, hn, mac, after_link=after)
+assert d.parse_env_identity(env) == (mid, hn, mac)
+PY
+
 echo "device-identity: JSON import, conflict, CLI reuse, and symlink rejection"
 echo "device-identity: publish crash remnants recover"
+echo "device-identity: python publish survives remnant cleanup of its temp link"
 echo "device-identity: same dir stable, second dir differs"
