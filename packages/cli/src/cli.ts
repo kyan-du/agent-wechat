@@ -27,6 +27,41 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
+function assertExistingContainerMatches(identity: DeviceIdentity): void {
+  let raw: string;
+  try {
+    raw = execFileSync("docker", ["inspect", CONTAINER_NAME], { encoding: "utf-8" });
+  } catch {
+    console.error(`Cannot inspect ${CONTAINER_NAME}; recreate with wx down && wx up.`);
+    process.exit(1);
+  }
+  const info = JSON.parse(raw)[0] as {
+    Config?: { Hostname?: string; Env?: string[] };
+    NetworkSettings?: { MacAddress?: string };
+  };
+  const env = info.Config?.Env ?? [];
+  const value = (key: string) =>
+    env.find((entry) => entry.startsWith(`${key}=`))?.slice(key.length + 1);
+  const hostname = info.Config?.Hostname;
+  const mac = (info.NetworkSettings?.MacAddress || "").toLowerCase();
+  const machineId = value("AGENT_WECHAT_MACHINE_ID");
+  const envHost = value("AGENT_WECHAT_HOSTNAME");
+  const envMac = value("AGENT_WECHAT_MAC");
+  const macOk = !mac || mac === identity.mac;
+  if (
+    hostname !== identity.hostname ||
+    machineId !== identity.machineId ||
+    (envHost && envHost !== identity.hostname) ||
+    (envMac && envMac !== identity.mac) ||
+    !macOk
+  ) {
+    console.error(
+      `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
+    );
+    process.exit(1);
+  }
+}
+
 function ensureDeviceIdentity(): DeviceIdentity {
   try {
     return loadDeviceIdentity(TOKEN_DIR);
@@ -1078,8 +1113,9 @@ async function cmdUp(opts: { proxy?: string } = {}) {
         printIdentityCheck();
         return;
       }
+      assertExistingContainerMatches(identity);
       console.log(`Starting existing container ${CONTAINER_NAME}...`);
-      execSync(`docker start ${CONTAINER_NAME}`, { stdio: "inherit" });
+      execFileSync("docker", ["start", CONTAINER_NAME], { stdio: "inherit" });
       console.log(`API: http://localhost:${DEFAULT_PORT}`);
       printNoVncUrl();
       printIdentityCheck();

@@ -49,10 +49,10 @@ MID="$AGENT_WECHAT_MACHINE_ID"
 HN="$AGENT_WECHAT_HOSTNAME"
 MAC="$AGENT_WECHAT_MAC"
 
-if [ -s "$ID_FILE" ]; then
-  EXISTING="$(tr -dc 'a-f0-9' < "$ID_FILE" | head -c 32)"
-  if [ "$EXISTING" != "$MID" ]; then
-    die "persisted machine-id '${EXISTING}' does not match requested '$MID'"
+if [ -e "$ID_FILE" ]; then
+  EXISTING="$(cat "$ID_FILE")"
+  if [ "$EXISTING" != "$MID" ] && [ "$EXISTING" != "${MID}"$'\n' ]; then
+    die "persisted machine-id is not an exact match for '$MID'"
   fi
 fi
 

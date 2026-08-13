@@ -48,7 +48,16 @@ if run_id "$work/ok" >/dev/null 2>"$work/conflict.err"; then
   exit 1
 fi
 test "$(cat "$work/ok/data/machine-id")" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-grep -Fq "does not match requested" "$work/conflict.err"
+grep -Fq "exact match" "$work/conflict.err"
+
+# Trailing garbage after 32 hex is not normalized away.
+printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-TRAILING\n' >"$work/ok/data/machine-id"
+if run_id "$work/ok" >/dev/null 2>"$work/trail.err"; then
+  echo "trailing machine-id garbage should fail" >&2
+  exit 1
+fi
+test "$(cat "$work/ok/data/machine-id")" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-TRAILING"
+grep -Fq "exact match" "$work/trail.err"
 
 # MAC mismatch
 FAKE_MAC="ae:c5:03:99:62:9f"

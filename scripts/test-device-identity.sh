@@ -45,6 +45,17 @@ test "$AGENT_WECHAT_MACHINE_ID" = "$id1"
 test "$AGENT_WECHAT_HOSTNAME" = "$hn1"
 test "$AGENT_WECHAT_MAC" = "$mac1"
 
+# Documented sequential eval must not clone instance A into a new directory.
+seq_b="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "$seq_b"' EXIT
+eval "$("$GEN" "$seq_b")"
+read_persisted "$a/device-identity.env"
+id_a="$FILE_MID $FILE_HN $FILE_MAC"
+read_persisted "$seq_b/device-identity.env"
+id_b="$FILE_MID $FILE_HN $FILE_MAC"
+test "$id_a" != "$id_b"
+echo "device-identity: sequential eval does not clone into a second directory"
+
 unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
 eval "$("$GEN" "$b")"
 test "$AGENT_WECHAT_MACHINE_ID" != "$id1"
@@ -280,28 +291,33 @@ printf 'AGENT_WECHAT_MACHINE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nAGENT_WECHAT_H
   exit 1
 }
 
-# Environment overrides are validated the same way and never executed.
+# Inherited exports are ignored unless AGENT_WECHAT_IDENTITY_FROM_ENV=1.
 envdir="$(mktemp -d)"
 trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "$envdir"' EXIT
-if AGENT_WECHAT_HOSTNAME="valid; touch $marker" "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
+AGENT_WECHAT_HOSTNAME="valid; touch $marker" "$GEN" "$envdir" >/dev/null
+test ! -e "$marker"
+test -f "$envdir/device-identity.env"
+
+if AGENT_WECHAT_IDENTITY_FROM_ENV=1 AGENT_WECHAT_HOSTNAME="valid; touch $marker" \
+  "$GEN" "$(mktemp -d)" >/dev/null 2>"$envdir/err"; then
   echo "semicolon hostname override should be rejected" >&2
   exit 1
 fi
 test ! -e "$marker"
-test ! -f "$envdir/device-identity.env"
 
-if AGENT_WECHAT_MACHINE_ID='$(touch '"$marker"')' "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
+if AGENT_WECHAT_IDENTITY_FROM_ENV=1 AGENT_WECHAT_MACHINE_ID='$(touch '"$marker"')' \
+  "$GEN" "$(mktemp -d)" >/dev/null 2>"$envdir/err"; then
   echo "command-substitution machine-id override should be rejected" >&2
   exit 1
 fi
 test ! -e "$marker"
 
-if AGENT_WECHAT_HOSTNAME=$'foo\nbar' "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
+if AGENT_WECHAT_IDENTITY_FROM_ENV=1 AGENT_WECHAT_HOSTNAME=$'foo\nbar' \
+  "$GEN" "$(mktemp -d)" >/dev/null 2>"$envdir/err"; then
   echo "newline hostname override should be rejected" >&2
   exit 1
 fi
 test ! -e "$marker"
-test ! -f "$envdir/device-identity.env"
 
 python3 -c 'open("'"$envdir"'/device-identity.env","wb").write(b"AGENT_WECHAT_MACHINE_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0\nAGENT_WECHAT_HOSTNAME=lenovo-pc-100\nAGENT_WECHAT_MAC=00:1b:21:00:00:01\n")'
 if "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then

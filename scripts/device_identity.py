@@ -65,6 +65,8 @@ def path_kind(path: str) -> str:
         return "symlink"
     if stat.S_ISREG(info.st_mode):
         return "file"
+    if stat.S_ISDIR(info.st_mode):
+        return "dir"
     return "other"
 
 
@@ -148,7 +150,7 @@ def derive_mac(mid: str) -> str:
     return f"00:1b:21:{mid[6:8]}:{mid[8:10]}:{mid[10:12]}"
 
 
-def write_identity_atomic(env_file: str, mid: str, hn: str, mac: str) -> None:
+def exclusive_publish(env_file: str, mid: str, hn: str, mac: str) -> bool:
     directory = os.path.dirname(env_file)
     require_absent_or_regular(env_file)
     fd, tmp = tempfile.mkstemp(prefix="device-identity.env.", dir=directory)
@@ -163,8 +165,31 @@ def write_identity_atomic(env_file: str, mid: str, hn: str, mac: str) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-    os.replace(tmp, env_file)
+    try:
+        os.link(tmp, env_file)
+    except FileExistsError:
+        os.unlink(tmp)
+        return False
+    os.unlink(tmp)
     os.chmod(env_file, 0o600)
+    return True
+
+
+def harden_regular(path: str) -> None:
+    require_absent_or_regular(path)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if info.st_nlink != 1:
+            die(f"{path} has unexpected link count {info.st_nlink}")
+        if info.st_uid != os.getuid() and os.getuid() != 0:
+            die(f"{path} is not owned by the current user")
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
 
 
 def acquire_lock(lock_path: str) -> int:
@@ -187,12 +212,24 @@ def acquire_lock(lock_path: str) -> int:
     return fd
 
 
-def load_or_create(ident_dir: str) -> tuple[str, str, str]:
-    os.makedirs(ident_dir, exist_ok=True)
+def prepare_ident_dir(ident_dir: str) -> None:
+    kind = path_kind(ident_dir)
+    if kind == "symlink":
+        die(f"{ident_dir} is a symlink")
+    if kind == "file":
+        die(f"{ident_dir} is not a directory")
+    if kind == "absent":
+        os.makedirs(ident_dir, mode=0o700, exist_ok=True)
+    elif kind != "dir":
+        die(f"{ident_dir} is not a directory")
     try:
         os.chmod(ident_dir, 0o700)
     except OSError:
         pass
+
+
+def load_or_create(ident_dir: str) -> tuple[str, str, str]:
+    prepare_ident_dir(ident_dir)
     env_file = os.path.join(ident_dir, ENV_NAME)
     json_file = os.path.join(ident_dir, JSON_NAME)
     require_absent_or_regular(env_file)
@@ -203,26 +240,33 @@ def load_or_create(ident_dir: str) -> tuple[str, str, str]:
     if env_id and json_id and env_id != json_id:
         die(f"conflicting {ENV_NAME} and {JSON_NAME} in {ident_dir}")
     if env_id:
+        harden_regular(env_file)
         return env_id
     if json_id:
-        write_identity_atomic(env_file, *json_id)
-        return parse_env_identity(env_file)
+        if exclusive_publish(env_file, *json_id):
+            return parse_env_identity(env_file)
+        env_id = parse_env_identity(env_file)
+        if env_id != json_id:
+            die(f"conflicting {ENV_NAME} and {JSON_NAME} in {ident_dir}")
+        return env_id
 
-    mid = validate_override(
-        "AGENT_WECHAT_MACHINE_ID",
-        os.environ.get("AGENT_WECHAT_MACHINE_ID"),
-        valid_machine_id,
-    )
-    hn = validate_override(
-        "AGENT_WECHAT_HOSTNAME",
-        os.environ.get("AGENT_WECHAT_HOSTNAME"),
-        valid_hostname,
-    )
-    mac = validate_override(
-        "AGENT_WECHAT_MAC",
-        os.environ.get("AGENT_WECHAT_MAC"),
-        valid_mac,
-    )
+    mid = hn = mac = None
+    if os.environ.get("AGENT_WECHAT_IDENTITY_FROM_ENV") == "1":
+        mid = validate_override(
+            "AGENT_WECHAT_MACHINE_ID",
+            os.environ.get("AGENT_WECHAT_MACHINE_ID"),
+            valid_machine_id,
+        )
+        hn = validate_override(
+            "AGENT_WECHAT_HOSTNAME",
+            os.environ.get("AGENT_WECHAT_HOSTNAME"),
+            valid_hostname,
+        )
+        mac = validate_override(
+            "AGENT_WECHAT_MAC",
+            os.environ.get("AGENT_WECHAT_MAC"),
+            valid_mac,
+        )
     if mid is None:
         mid = uuid.uuid4().hex
     if not valid_machine_id(mid):
@@ -235,7 +279,8 @@ def load_or_create(ident_dir: str) -> tuple[str, str, str]:
         die("generated hostname is invalid")
     if not valid_mac(mac):
         die("generated MAC is invalid")
-    write_identity_atomic(env_file, mid, hn, mac)
+    if exclusive_publish(env_file, mid, hn, mac):
+        return parse_env_identity(env_file)
     return parse_env_identity(env_file)
 
 
@@ -246,11 +291,7 @@ def main() -> None:
         else os.environ.get("AGENT_WECHAT_IDENTITY_DIR")
         or os.path.join(os.path.expanduser("~"), ".config", "agent-wechat")
     )
-    os.makedirs(ident_dir, exist_ok=True)
-    try:
-        os.chmod(ident_dir, 0o700)
-    except OSError:
-        pass
+    prepare_ident_dir(ident_dir)
     lock_path = os.path.join(ident_dir, LOCK_NAME)
     lock_fd = acquire_lock(lock_path)
     try:

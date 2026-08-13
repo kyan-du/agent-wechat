@@ -84,10 +84,24 @@ test("cmdUp validates identity before docker start", () => {
   assert.ok(start >= 0);
   const body = src.slice(start);
   const identityAt = body.indexOf("ensureDeviceIdentity()");
-  const startAt = body.indexOf("docker start");
+  const inspectAt = body.indexOf("assertExistingContainerMatches");
+  const startAt = body.indexOf('["start"');
   assert.ok(identityAt >= 0);
+  assert.ok(inspectAt >= 0);
   assert.ok(startAt >= 0);
-  assert.ok(identityAt < startAt);
+  assert.ok(identityAt < inspectAt);
+  assert.ok(inspectAt < startAt);
+});
+
+test("ensureDeviceIdentity ignores inherited env when creating a second dir", () => {
+  const a = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const b = fs.mkdtempSync(path.join(os.tmpdir(), "wx-id-"));
+  const first = ensureDeviceIdentity(a);
+  process.env.AGENT_WECHAT_MACHINE_ID = first.machineId;
+  process.env.AGENT_WECHAT_HOSTNAME = first.hostname;
+  process.env.AGENT_WECHAT_MAC = first.mac;
+  const second = ensureDeviceIdentity(b);
+  assert.notEqual(second.machineId, first.machineId);
 });
 
 test("ensureDeviceIdentity refuses a dangling identity symlink", () => {
