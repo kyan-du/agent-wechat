@@ -9,12 +9,12 @@ use axum::{
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use base64::Engine;
 use crate::context::create_context;
 use crate::db::get_db;
 use crate::execution::run_execution_loop;
 use crate::ia::types::*;
 use crate::ia::{find_state_by_id, identify_states};
+use crate::outbound::outbound_sender;
 use crate::plans::login::{LoginParams, LoginPlan};
 use crate::plans::logout::{LogoutParams, LogoutPlan};
 use crate::sessions::manager::get_session;
@@ -22,13 +22,14 @@ use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::qr::{decode_qr_from_base64, to_data_url};
 use crate::tools::screenshot::capture_screenshot;
+use base64::Engine;
 
 pub async fn get_status() -> Json<serde_json::Value> {
     let session = get_session("default");
     let login_status = session
         .as_ref()
         .and_then(|s| s.logged_in_user.as_ref())
-        .map(|u| "logged_in".to_string())
+        .map(|_| "logged_in".to_string())
         .unwrap_or_else(|| "logged_out".to_string());
 
     Json(serde_json::json!({
@@ -36,6 +37,18 @@ pub async fn get_status() -> Json<serde_json::Value> {
         "loginState": { "status": login_status },
         "version": "0.1.0"
     }))
+}
+
+pub async fn outbound_status() -> Json<crate::outbound::OutboundStatus> {
+    Json(outbound_sender().status())
+}
+
+pub async fn pause_outbound() -> Json<crate::outbound::OutboundStatus> {
+    Json(outbound_sender().pause())
+}
+
+pub async fn resume_outbound() -> Json<crate::outbound::OutboundStatus> {
+    Json(outbound_sender().resume())
 }
 
 /// Check auth status via one FSM observation cycle.
@@ -77,9 +90,7 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         }
     };
 
-    let screenshot = capture_screenshot(&exec_options)
-        .await
-        .unwrap_or_default();
+    let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
     let identified = identify_states(&a11y, &screenshot);
 
     // Load persisted state and apply reduce
@@ -286,7 +297,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
         let emit = move |event: SubscriptionEvent| {
             let _ = tx.send(event);
         };
-        run_execution_loop(&plan, &login_params, &mut context, &emit, cancel_for_exec).await.0
+        run_execution_loop(&plan, &login_params, &mut context, &emit, cancel_for_exec)
+            .await
+            .0
     });
 
     // Main loop: bridge events to WebSocket, handle timeout + disconnect
@@ -342,7 +355,9 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
     let exec_result = exec_handle.await.ok();
     if !client_disconnected && !sent_terminal {
         let fallback = match exec_result {
-            Some(result) if result.success => LoginSubscriptionEvent::LoginSuccess { user_id: None },
+            Some(result) if result.success => {
+                LoginSubscriptionEvent::LoginSuccess { user_id: None }
+            }
             Some(result) => {
                 let message = result.error.unwrap_or_else(|| "Login failed".to_string());
                 if message.starts_with("Unknown state for")

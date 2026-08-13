@@ -3,16 +3,14 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
 
-use crate::context::create_context;
 use crate::db::get_db;
-use crate::execution::run_execution_loop;
-use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
-use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
+use crate::ia::types::{MediaResult, Message, SendParams, SendResult};
+use crate::outbound::{cleanup_temp_files, outbound_sender, OutboundSendResponse};
+use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
+use crate::tools::wechat_keys::{extract_keys_async, get_image_keys, get_stored_keys, store_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
 
@@ -66,7 +64,12 @@ pub async fn list_messages(
         }
     }
 
-    if !keys.keys().any(|k| k.starts_with("message_") && k.ends_with(".db") && !k.contains("fts") && !k.contains("resource")) {
+    if !keys.keys().any(|k| {
+        k.starts_with("message_")
+            && k.ends_with(".db")
+            && !k.contains("fts")
+            && !k.contains("resource")
+    }) {
         return Json(Vec::new());
     }
 
@@ -140,50 +143,12 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
     ))
 }
 
-#[derive(Deserialize)]
-pub struct SendParams {
-    #[serde(rename = "chatId")]
-    chat_id: String,
-    text: Option<String>,
-    image: Option<ImageInput>,
-    file: Option<FileInput>,
-}
-
-#[derive(Deserialize)]
-pub struct ImageInput {
-    data: String,
-    #[serde(rename = "mimeType")]
-    mime_type: String,
-}
-
-#[derive(Deserialize)]
-pub struct FileInput {
-    data: String,
-    filename: String,
-}
-
-pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
+pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse {
     if input.text.is_none() && input.image.is_none() && input.file.is_none() {
-        return Json(SendResult {
+        return OutboundSendResponse::Result(SendResult {
             success: false,
+            error_code: Some("INVALID_REQUEST".to_string()),
             error: Some("No text, image, or file provided".to_string()),
-        });
-    }
-
-    let session = match get_session("default") {
-        Some(s) => s,
-        None => {
-            return Json(SendResult {
-                success: false,
-                error: Some("No session available".to_string()),
-            })
-        }
-    };
-
-    if session.logged_in_user.is_none() {
-        return Json(SendResult {
-            success: false,
-            error: Some("NOT_LOGGED_IN".to_string()),
         });
     }
 
@@ -196,9 +161,17 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
             "image/gif" => ".gif",
             _ => ".png",
         };
-        let path = format!("/tmp/send_image_{}{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext);
-        if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+        let path = format!(
+            "/tmp/send_image_{}{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            ext
+        );
+        if let Ok(bytes) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)
+        {
             if std::fs::write(&path, &bytes).is_ok() {
                 image_mime = Some(img.mime_type.clone());
                 image_path = Some(path);
@@ -214,63 +187,68 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         // path stays portable across locales.  The dot is preserved so that
         // file extensions survive (e.g. "遗憾.pdf" → "__.pdf"); the mangled
         // stem is acceptable since this is a transient temp path.
-        let safe_name: String = f.filename.chars().map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        }).collect();
-        let path = format!("/tmp/send_file_{}_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), safe_name);
+        let safe_name: String = f
+            .filename
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = format!(
+            "/tmp/send_file_{}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            safe_name
+        );
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(_) => { file_path = Some(path); }
+                Ok(_) => {
+                    file_path = Some(path);
+                }
                 Err(e) => {
-                    return Json(SendResult {
+                    cleanup_temp_files(&SendMessageParams {
+                        chat_id: input.chat_id,
+                        message: input.text,
+                        image_path,
+                        image_mime,
+                        file_path,
+                    });
+                    return OutboundSendResponse::Result(SendResult {
                         success: false,
+                        error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
                         error: Some(format!("Failed to write temp file: {e}")),
                     });
                 }
             },
             Err(e) => {
-                return Json(SendResult {
+                cleanup_temp_files(&SendMessageParams {
+                    chat_id: input.chat_id,
+                    message: input.text,
+                    image_path,
+                    image_mime,
+                    file_path,
+                });
+                return OutboundSendResponse::Result(SendResult {
                     success: false,
+                    error_code: Some("FILE_BASE64_DECODE_FAILED".to_string()),
                     error: Some(format!("Failed to decode base64 file data: {e}")),
                 });
             }
         }
     }
 
-    let mut context = {
-        let db = get_db();
-        create_context(session, &db)
-    };
-
-    let plan = SendMessagePlan;
     let params = SendMessageParams {
         chat_id: input.chat_id,
         message: input.text,
-        image_path: image_path.clone(),
+        image_path,
         image_mime,
-        file_path: file_path.clone(),
+        file_path,
     };
-    let cancel = CancellationToken::new();
-    let noop_emit = |_: SubscriptionEvent| {};
-
-    let (result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
-
-    // Clean up temp files
-    if let Some(p) = &image_path {
-        let _ = std::fs::remove_file(p);
-    }
-    if let Some(p) = &file_path {
-        let _ = std::fs::remove_file(p);
-    }
-
-    Json(SendResult {
-        success: result.success,
-        error: plan_state.diagnostic_error.or(result.error),
-    })
+    outbound_sender().send(params, input.idempotency_key).await
 }

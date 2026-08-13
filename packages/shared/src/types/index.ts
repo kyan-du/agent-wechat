@@ -121,6 +121,7 @@ export interface ListMessagesParams {
 export interface SendResult {
   success: boolean;
   messageId?: string;
+  errorCode?: string;
   error?: string;
 }
 

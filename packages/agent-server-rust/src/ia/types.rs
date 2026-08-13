@@ -523,6 +523,9 @@ pub struct SendParams {
     pub chat_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub idempotency_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -548,9 +551,13 @@ pub struct FileData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SendResult {
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
