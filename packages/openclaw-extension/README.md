@@ -50,6 +50,7 @@ services:
     environment:
       - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
       - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_MAC=${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     restart: unless-stopped
 
 volumes:

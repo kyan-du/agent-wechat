@@ -3,8 +3,8 @@ import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
 import { spawn, execFileSync, execSync } from "child_process";
 import {
-  generateDeviceIdentity,
-  parseDeviceIdentity,
+  buildDockerRunArgs,
+  ensureDeviceIdentity as loadDeviceIdentity,
   type DeviceIdentity,
 } from "./device-identity.js";
 import { randomBytes } from "crypto";
@@ -27,25 +27,14 @@ const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
 // Auth token paths
 const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
 const TOKEN_PATH = path.join(TOKEN_DIR, "token");
-const IDENTITY_PATH = path.join(TOKEN_DIR, "device-identity.json");
-
 function ensureDeviceIdentity(): DeviceIdentity {
-  if (fs.existsSync(IDENTITY_PATH)) {
-    try {
-      const parsed = parseDeviceIdentity(JSON.parse(fs.readFileSync(IDENTITY_PATH, "utf-8")));
-      if (parsed) return parsed;
-    } catch {
-      // invalid JSON falls through to fail-closed
-    }
-    console.error(
-      `Invalid device identity in ${IDENTITY_PATH}. Delete it and run wx up again.`,
-    );
+  try {
+    return loadDeviceIdentity(TOKEN_DIR);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error(`Invalid device identity in ${TOKEN_DIR}. ${detail}`);
     process.exit(1);
   }
-  const identity = generateDeviceIdentity(randomBytes(16).toString("hex"));
-  fs.mkdirSync(TOKEN_DIR, { recursive: true });
-  fs.writeFileSync(IDENTITY_PATH, JSON.stringify(identity, null, 2) + "\n", { mode: 0o600 });
-  return identity;
 }
 
 function looksLikeDatacenterHint(text: string): boolean {
@@ -1074,6 +1063,7 @@ async function cmdUpdate() {
 // ============================================
 
 async function cmdUp(opts: { proxy?: string } = {}) {
+  const identity = ensureDeviceIdentity();
   let image = getImageTag();
 
   // Check if container already exists
@@ -1128,30 +1118,15 @@ async function cmdUp(opts: { proxy?: string } = {}) {
   // Ensure auth token exists
   const token = ensureToken();
 
-  const identity = ensureDeviceIdentity();
   console.log(`Starting container ${CONTAINER_NAME} from ${image}...`);
 
-  const dockerArgs = [
-    "run", "-d",
-    "--name", CONTAINER_NAME,
-    "--hostname", identity.hostname,
-    "--mac-address", identity.mac,
-    "--security-opt", "seccomp=unconfined",
-    "--cap-add=SYS_PTRACE",
-    "--cap-add=NET_ADMIN",
-    "-p", `${DEFAULT_PORT}:${DEFAULT_PORT}`,
-    "-v", `${CONTAINER_NAME}-data:/data`,
-    "-v", `${CONTAINER_NAME}-wechat-home:/home/wechat`,
-    "-v", `${TOKEN_PATH}:/data/auth-token:ro`,
-    "-e", `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
-    "-e", `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
-  ];
-
-  if (opts.proxy) {
-    dockerArgs.push("-e", `PROXY=${opts.proxy}`);
-  }
-
-  dockerArgs.push(image);
+  const dockerArgs = buildDockerRunArgs(identity, {
+    image,
+    containerName: CONTAINER_NAME,
+    tokenPath: TOKEN_PATH,
+    port: DEFAULT_PORT,
+    proxy: opts.proxy,
+  });
 
   try {
     execFileSync("docker", dockerArgs, { stdio: "inherit" });

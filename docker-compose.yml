@@ -37,6 +37,7 @@ services:
       - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
       - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
       - AGENT_WECHAT_HOSTNAME=${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
+      - AGENT_WECHAT_MAC=${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
       - AGENT_WECHAT_SPOOF_OS=${AGENT_WECHAT_SPOOF_OS:-1}
       - TZ=${TZ:-Asia/Shanghai}
     restart: unless-stopped

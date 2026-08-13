@@ -1,4 +1,9 @@
-/** Same machine-id / hostname / MAC rules as scripts/device-identity.sh. */
+/** Same machine-id / hostname / MAC rules as scripts/device_identity.py. */
+
+import { execFileSync } from "child_process";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 export type DeviceIdentity = {
   machineId: string;
@@ -54,4 +59,98 @@ export function generateDeviceIdentity(machineId: string): DeviceIdentity {
     throw new Error("generated device identity failed validation");
   }
   return identity;
+}
+
+export function resolveIdentityGenerator(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.join(here, "device_identity.py"),
+    path.join(here, "../scripts/device_identity.py"),
+    path.join(here, "../../../scripts/device_identity.py"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error("device_identity.py not found");
+}
+
+function unquote(value: string): string {
+  if (value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/'\\''/g, "'");
+  }
+  if (value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\(.)/g, "$1");
+  }
+  return value;
+}
+
+export function parseIdentityExports(output: string): DeviceIdentity | null {
+  const env: Record<string, string> = {};
+  for (const line of output.split("\n")) {
+    const match = /^export ([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+    if (!match) continue;
+    env[match[1]] = unquote(match[2]);
+  }
+  return parseDeviceIdentity({
+    machineId: env.AGENT_WECHAT_MACHINE_ID,
+    hostname: env.AGENT_WECHAT_HOSTNAME,
+    mac: env.AGENT_WECHAT_MAC,
+  });
+}
+
+/** Serialized first-run via the canonical Python generator (fcntl + env file). */
+export function ensureDeviceIdentity(dir: string): DeviceIdentity {
+  const out = execFileSync("python3", [resolveIdentityGenerator(), dir], {
+    encoding: "utf-8",
+  });
+  const identity = parseIdentityExports(out);
+  if (!identity) {
+    throw new Error("identity generator returned an invalid tuple");
+  }
+  return identity;
+}
+
+export function buildDockerRunArgs(
+  identity: DeviceIdentity,
+  opts: {
+    image: string;
+    containerName: string;
+    tokenPath: string;
+    port: number;
+    proxy?: string;
+  },
+): string[] {
+  const args = [
+    "run",
+    "-d",
+    "--name",
+    opts.containerName,
+    "--hostname",
+    identity.hostname,
+    "--mac-address",
+    identity.mac,
+    "--security-opt",
+    "seccomp=unconfined",
+    "--cap-add=SYS_PTRACE",
+    "--cap-add=NET_ADMIN",
+    "-p",
+    `${opts.port}:${opts.port}`,
+    "-v",
+    `${opts.containerName}-data:/data`,
+    "-v",
+    `${opts.containerName}-wechat-home:/home/wechat`,
+    "-v",
+    `${opts.tokenPath}:/data/auth-token:ro`,
+    "-e",
+    `AGENT_WECHAT_MACHINE_ID=${identity.machineId}`,
+    "-e",
+    `AGENT_WECHAT_HOSTNAME=${identity.hostname}`,
+    "-e",
+    `AGENT_WECHAT_MAC=${identity.mac}`,
+  ];
+  if (opts.proxy) {
+    args.push("-e", `PROXY=${opts.proxy}`);
+  }
+  args.push(opts.image);
+  return args;
 }

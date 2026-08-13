@@ -310,4 +310,67 @@ if "$GEN" "$envdir" >/dev/null 2>"$envdir/err"; then
 fi
 
 echo "device-identity: malformed and injected values are rejected without executing"
+
+# CLI JSON is imported into the canonical env file; conflicting files fail.
+xdir="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "${envdir:-}" "$kdir" "$kdir2" "$xdir"' EXIT
+python3 - <<PY
+import json
+from pathlib import Path
+p = Path("$xdir") / "device-identity.json"
+p.write_text(json.dumps({
+    "machineId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "hostname": "honor-pc-222",
+    "mac": "00:1b:21:bb:bb:bb",
+}) + "\n")
+PY
+unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+eval "$("$GEN" "$xdir")"
+test "$AGENT_WECHAT_MACHINE_ID" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+test "$AGENT_WECHAT_HOSTNAME" = "honor-pc-222"
+test "$AGENT_WECHAT_MAC" = "00:1b:21:bb:bb:bb"
+read_persisted "$xdir/device-identity.env"
+test "$FILE_MID" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+ydir="$(mktemp -d)"
+printf 'AGENT_WECHAT_MACHINE_ID=cccccccccccccccccccccccccccccccc\nAGENT_WECHAT_HOSTNAME=asus-pc-333\nAGENT_WECHAT_MAC=00:1b:21:cc:cc:cc\n' >"$ydir/device-identity.env"
+python3 - <<PY
+import json
+from pathlib import Path
+p = Path("$ydir") / "device-identity.json"
+p.write_text(json.dumps({
+    "machineId": "dddddddddddddddddddddddddddddddd",
+    "hostname": "dell-pc-444",
+    "mac": "00:1b:21:dd:dd:dd",
+}) + "\n")
+PY
+if "$GEN" "$ydir" >/dev/null 2>"$ydir/err"; then
+  echo "conflicting json/env should fail" >&2
+  exit 1
+fi
+grep -Fq conflicting "$ydir/err"
+
+# Compose -> CLI: env winner is reused by the CLI helper.
+zdir="$(mktemp -d)"
+unset AGENT_WECHAT_MACHINE_ID AGENT_WECHAT_HOSTNAME AGENT_WECHAT_MAC
+eval "$("$GEN" "$zdir")"
+cli_out="$(
+  cd "$ROOT/packages/cli"
+  node --experimental-strip-types -e 'import { ensureDeviceIdentity } from "./src/device-identity.ts"; const id = ensureDeviceIdentity(process.argv[1]); process.stdout.write(`${id.machineId} ${id.hostname} ${id.mac}`);' "$zdir"
+)"
+test "$cli_out" = "$AGENT_WECHAT_MACHINE_ID $AGENT_WECHAT_HOSTNAME $AGENT_WECHAT_MAC"
+
+# Symlink identity path is rejected and does not write through the target.
+sdir="$(mktemp -d)"
+victim="$sdir/victim.env"
+printf 'keep\n' >"$victim"
+ln -s "$victim" "$sdir/device-identity.env"
+if "$GEN" "$sdir" >/dev/null 2>"$sdir/err"; then
+  echo "symlink env should be rejected" >&2
+  exit 1
+fi
+test "$(cat "$victim")" = "keep"
+grep -Fq symlink "$sdir/err"
+
+echo "device-identity: JSON import, conflict, CLI reuse, and symlink rejection"
 echo "device-identity: same dir stable, second dir differs"
