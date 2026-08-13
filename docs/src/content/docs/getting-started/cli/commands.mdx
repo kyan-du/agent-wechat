@@ -1,0 +1,61 @@
+---
+title: CLI Commands
+description: Full reference for the wx command-line tool.
+---
+
+## Container
+
+| Command | Description |
+|---------|-------------|
+| `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container (auto-pulls image) |
+| `wx down` | Stop and remove the container |
+| `wx logs` | Tail container logs |
+| `wx status` | Show container up/down status and login status |
+
+## Auth
+
+| Command | Description |
+|---------|-------------|
+| `wx auth login` | Log in to WeChat (shows QR code in terminal) |
+| `wx auth logout` | Log out of WeChat |
+| `wx auth status` | Check login status |
+| `wx auth token` | Show current auth token |
+| `wx auth token --regenerate` | Generate a new auth token |
+
+Login options:
+- `--timeout <seconds>` — login timeout (default: 300)
+- `--new` — switch to a new account instead of reusing the existing session
+
+## Chats
+
+| Command | Description |
+|---------|-------------|
+| `wx chats list` | List chats from WeChat |
+| `wx chats get <chatId>` | Get details for a specific chat |
+| `wx chats find <name>` | Search chats by display name |
+| `wx chats open <chatId>` | Open a chat in the WeChat UI |
+
+Options: `--limit <n>`, `--offset <n>`, `--json`
+
+## Messages
+
+| Command | Description |
+|---------|-------------|
+| `wx messages list <chatId>` | List messages in a chat |
+| `wx messages send <chatId>` | Send a message |
+| `wx messages media <chatId> <localId>` | Download a media attachment |
+
+Send options:
+- `--text "message"` — send text
+- `--image photo.jpg` — send an image
+- `--file document.pdf` — send a file
+
+Media options:
+- `--output <path>` — save to a specific file path
+
+## Debug
+
+| Command | Description |
+|---------|-------------|
+| `wx screenshot [file]` | Save a screenshot (default: `screenshot.png`) |
+| `wx a11y` | Dump the accessibility tree (`--format json\|aria`) |

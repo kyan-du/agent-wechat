@@ -1,0 +1,67 @@
+---
+title: REST API
+description: API endpoint reference for agent-wechat.
+---
+
+The agent-wechat server exposes a REST API on port `6174`. All requests require a `Bearer` token in the `Authorization` header.
+
+## Authentication
+
+```
+Authorization: Bearer <token>
+```
+
+## Endpoints
+
+### Chats
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/chats` | List chats (with unread counts) |
+| `GET` | `/api/chats/:id` | Get a specific chat |
+| `POST` | `/api/chats/:id/open` | Open a chat in the WeChat UI |
+
+### Messages
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/messages/:chatId` | List messages in a chat |
+| `POST` | `/api/messages/send` | Send a message (text, image, or file) |
+| `GET` | `/api/messages/:chatId/media/:localId` | Download a media attachment |
+
+### Auth
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/auth/status` | Check login status |
+| `POST` | `/api/auth/logout` | Log out of WeChat |
+| `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |
+
+### Contacts
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/contacts` | List all contacts |
+
+### Sessions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/sessions` | List sessions |
+| `POST` | `/api/sessions` | Create a session |
+| `POST` | `/api/sessions/:id/start` | Start a session |
+| `POST` | `/api/sessions/:id/stop` | Stop a session |
+| `DELETE` | `/api/sessions/:id` | Delete a session |
+
+### Debug
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/screenshot` | Take a screenshot |
+| `GET` | `/api/a11y` | Dump the accessibility tree |
+
+### VNC
+
+| Path | Description |
+|------|-------------|
+| `/vnc/` | Browser-based VNC viewer (noVNC) |

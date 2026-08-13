@@ -1,0 +1,44 @@
+---
+title: CLI Installation
+description: Install the wx command-line tool.
+---
+
+The `wx` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
+
+## Install
+
+```bash
+npm install -g @agent-wechat/cli
+```
+
+This installs the `wx` command globally.
+
+## Prerequisites
+
+- **Node.js >= 22**
+- **Docker** installed and running
+
+## Verify installation
+
+```bash
+wx --version
+```
+
+## Configuration
+
+The CLI reads configuration from:
+
+| Source | Description |
+|--------|-------------|
+| `AGENT_WECHAT_URL` | Server URL (default: `http://localhost:6174`) |
+| `AGENT_WECHAT_TOKEN` | Auth token (overrides token file) |
+| `~/.config/agent-wechat/token` | Auto-generated auth token (created on first `wx up`) |
+
+The auth token is generated automatically on first run and shared with the container via a read-only volume mount.
+
+## Global options
+
+| Option | Description |
+|--------|-------------|
+| `-V, --version` | Show version |
+| `-h, --help` | Show help |

@@ -1,0 +1,38 @@
+---
+title: What is agent-wechat?
+description: A programmable WeChat interface for AI agents and automation.
+---
+
+**agent-wechat** is a programmable WeChat interface. It runs the WeChat desktop application inside a Docker container and exposes a REST + WebSocket API for controlling it — send and receive messages, list chats, download media, and more.
+
+## What you can do
+
+- **Read** chats, messages, and media (images, voice, files)
+- **Send** text messages, images, and files
+- **Login** via QR code displayed in your terminal or through your AI agent
+- **Monitor** for new messages in real-time
+
+## How you can use it
+
+There are several ways to interact with agent-wechat:
+
+| Method | Best for |
+|--------|----------|
+| [CLI (`wx` command)](/getting-started/cli/installation) | Quick local use, scripting, debugging |
+| [OpenClaw plugin](/integrations/openclaw/setup) | Adding WeChat as a channel in [OpenClaw](https://openclaw.ai) |
+| [Wechaty puppet](/integrations/wechaty/puppet-setup) | Using existing Wechaty bots with WeChat |
+| [REST API directly](/reference/api) | Custom integrations |
+
+## Requirements
+
+- **Docker** (Colima on macOS, or Docker Desktop)
+- **Node.js >= 22** (for the CLI)
+- **Not compatible with serverless environments** — the container requires `ptrace` capabilities (see [Hosting Requirements](/hosting/requirements))
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| [`@agent-wechat/cli`](https://www.npmjs.com/package/@agent-wechat/cli) | CLI for managing the container and interacting with WeChat |
+| [`@agent-wechat/wechat`](https://www.npmjs.com/package/@agent-wechat/wechat) | OpenClaw plugin for AI agent integration |
+| [`@agent-wechat/wechaty-puppet`](https://www.npmjs.com/package/@agent-wechat/wechaty-puppet) | Wechaty puppet implementation |

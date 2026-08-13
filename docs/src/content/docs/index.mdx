@@ -1,0 +1,36 @@
+---
+title: agent-wechat
+description: A programmable WeChat interface for AI agents and automation.
+template: splash
+hero:
+  tagline: Control WeChat from your AI agent, CLI, or custom code. Send and receive messages, list chats, download media — all via API.
+  actions:
+    - text: Get Started
+      link: /agent-wechat/getting-started/quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/thisnick/agent-wechat
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Quick Start" icon="rocket">
+    Get agent-wechat running in under 5 minutes with the CLI.
+    [Get started →](/getting-started/quickstart/)
+  </Card>
+  <Card title="OpenClaw Integration" icon="puzzle">
+    Add WeChat as a channel in your OpenClaw AI agent.
+    [Set up OpenClaw →](/integrations/openclaw/setup/)
+  </Card>
+  <Card title="CLI Reference" icon="terminal">
+    Full reference for the `wx` command-line tool.
+    [View commands →](/getting-started/cli/commands/)
+  </Card>
+  <Card title="Architecture" icon="setting">
+    How agent-wechat works under the hood.
+    [Learn more →](/how-it-works/architecture/)
+  </Card>
+</CardGrid>

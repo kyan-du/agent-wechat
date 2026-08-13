@@ -1,0 +1,72 @@
+---
+title: Data & Storage
+description: Where data is stored and how to access it.
+---
+
+## Docker volumes
+
+agent-wechat uses two persistent Docker volumes:
+
+| Volume | Container path | Contents |
+|--------|---------------|----------|
+| `agent-wechat-data` | `/data` | Agent database (`agent.db`), auth token |
+| `agent-wechat-home` | `/home/wechat` | WeChat user data, databases, media files |
+
+## What's stored where
+
+### `/data` — Agent data
+
+- `agent.db` — SQLite database used by the agent server. Stores persisted app state, session info, and internal tracking data.
+- `auth-token` — Read-only mount of your host token file.
+
+### `/home/wechat` — WeChat data
+
+This is the WeChat user's home directory. After logging in, it contains:
+
+- **SQLite databases** — WeChat stores contacts, messages, and sessions in encrypted SQLite databases (SQLCipher). The agent server reads these directly for fast message retrieval.
+- **Media files** — Images, voice messages, videos, and other attachments received through WeChat.
+- **Configuration** — WeChat's own configuration and cache files.
+
+## Getting data out of the container
+
+### Via the API
+
+The recommended way to access data:
+
+```bash
+# List chats
+wx chats list --json
+
+# Get messages
+wx messages list <chatId> --json
+
+# Download media
+wx messages media <chatId> <localId> --output photo.jpg
+```
+
+### Via Docker volume inspection
+
+To access the raw files:
+
+```bash
+# Find the volume mount point
+docker volume inspect agent-wechat-data
+
+# Copy files from the container
+docker cp agent-wechat:/data/agent.db ./agent.db
+docker cp agent-wechat:/home/wechat/ ./wechat-data/
+```
+
+### Via the VNC viewer
+
+Open `http://localhost:6174/vnc/` to visually inspect the WeChat UI state.
+
+## Disk space
+
+WeChat accumulates data over time — messages, media, and cache files. Monitor your volume sizes:
+
+```bash
+docker system df -v | grep agent-wechat
+```
+
+If you run out of disk space, see [Troubleshooting — Disk Space](/reference/troubleshooting#disk-space).

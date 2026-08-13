@@ -1,5 +1,47 @@
 # @agent-wechat/cli
 
+## 0.11.15
+
+## 0.11.14
+
+## 0.11.13
+
+## 0.11.12
+
+## 0.11.11
+
+## 0.11.10
+
+## 0.11.9
+
+## 0.11.8
+
+## 0.11.7
+
+## 0.11.6
+
+## 0.11.5
+
+### Patch Changes
+
+- [#118](https://github.com/thisnick/agent-wechat/pull/118) [`fe27f34`](https://github.com/thisnick/agent-wechat/commit/fe27f344a8dc7746ebcf2ea5bf2bd5e886e2dd4e) Thanks [@thisnick](https://github.com/thisnick)! - Replace x86_64 NativeFunction lookup with pure memory hashmap walk in chat-select to prevent crashes
+
+## 0.11.4
+
+### Patch Changes
+
+- [#116](https://github.com/thisnick/agent-wechat/pull/116) [`42c80f6`](https://github.com/thisnick/agent-wechat/commit/42c80f6d050d0210402f0a9fa00bf107cadd6db1) Thanks [@thisnick](https://github.com/thisnick)! - Move WeChat restart logic from entrypoint bash loop into agent-server health monitor
+
+## 0.11.3
+
+### Patch Changes
+
+- [#113](https://github.com/thisnick/agent-wechat/pull/113) [`55544aa`](https://github.com/thisnick/agent-wechat/commit/55544aa6320b9bed170fd6a614bde7f32ffe3c99) Thanks [@thisnick](https://github.com/thisnick)! - Fix verify_key to use immutable=1 to avoid acquiring locks on WeChat databases
+
+- [`8f7c6c2`](https://github.com/thisnick/agent-wechat/commit/8f7c6c2abbc14895b584a04ea7f4edc9cf7a39eb) Thanks [@thisnick](https://github.com/thisnick)! - Log WeChat crash/recovery in health monitor instead of silently ignoring process disappearance
+
+- [#111](https://github.com/thisnick/agent-wechat/pull/111) [`587994b`](https://github.com/thisnick/agent-wechat/commit/587994b98dc7bb7c272e133ad621989ca9513602) Thanks [@thisnick](https://github.com/thisnick)! - Add lazy key extraction to chat and contact query handlers so keys are extracted on demand when missing
+
 ## 0.11.2
 
 ### Patch Changes

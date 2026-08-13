@@ -1,0 +1,31 @@
+---
+title: Environment Variables
+description: All environment variables used by agent-wechat.
+---
+
+## Client-side (CLI, OpenClaw, Wechaty)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_WECHAT_URL` | `http://localhost:6174` | Server URL |
+| `AGENT_WECHAT_TOKEN` | — | Auth token (overrides the token file at `~/.config/agent-wechat/token`) |
+
+## Server-side (inside the container)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_DB_PATH` | `/data/agent.db` | Path to the agent SQLite database |
+| `PROXY` | — | Transparent proxy address (format: `user:pass@host:port` or `socks5://...`) |
+| `DISPLAY` | `:99` | X11 display (set automatically by the container entrypoint) |
+| `DBUS_SESSION_BUS_ADDRESS` | — | D-Bus session bus address (set automatically) |
+
+## File paths (inside the container)
+
+| Path | Description |
+|------|-------------|
+| `/data/auth-token` | Auth token file (read-only mount) |
+| `/data/agent.db` | Agent SQLite database |
+| `/home/wechat/` | WeChat user home directory |
+| `/opt/agent-server/agent-server` | Agent server binary |
+| `/opt/tools/` | Tool scripts (screenshot, click, input, etc.) |
+| `/opt/novnc/` | noVNC web viewer |

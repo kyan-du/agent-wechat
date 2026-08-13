@@ -2,6 +2,8 @@
 
 Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
 
+**[Documentation](https://thisnick.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
+
 ## Prerequisites
 
 - **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/thisnick/agent-wechat):

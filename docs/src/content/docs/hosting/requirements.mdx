@@ -1,0 +1,52 @@
+---
+title: Hosting Requirements
+description: What you need to run agent-wechat in production.
+---
+
+agent-wechat has specific infrastructure requirements due to how it controls the WeChat desktop process.
+
+## Required capabilities
+
+The container **must** have:
+
+- **`seccomp=unconfined`** — allows all syscalls (required for ptrace)
+- **`SYS_PTRACE`** capability — required to interact with the WeChat desktop process
+- **`NET_ADMIN`** capability — required only if using a proxy
+
+```yaml
+security_opt:
+  - seccomp=unconfined
+cap_add:
+  - SYS_PTRACE
+  - NET_ADMIN    # only if using proxy
+```
+
+## Incompatible environments
+
+agent-wechat **cannot** run in:
+
+| Environment | Why |
+|-------------|-----|
+| AWS Fargate | No ptrace support |
+| Google Cloud Run | No ptrace support |
+| Azure Container Instances | No ptrace support |
+| Any serverless container platform | No ptrace support |
+| Restricted Kubernetes clusters | If seccomp/ptrace is blocked by policy |
+
+## Compatible environments
+
+| Environment | Notes |
+|-------------|-------|
+| VPS (any provider) | Recommended. Full Docker support. |
+| Bare-metal servers | Full control, best performance |
+| AWS EC2 / GCP Compute Engine / Azure VMs | Run Docker directly on the VM |
+| Docker Desktop (local) | For development |
+| Colima (macOS) | For development on macOS |
+| Self-managed Kubernetes | Must allow privileged containers or ptrace capabilities |
+
+## Resource recommendations
+
+- **RAM**: 2 GB minimum (WeChat + Xvfb + agent server)
+- **Disk**: 10 GB+ for WeChat data (grows over time with messages and media)
+- **CPU**: 1 core minimum, 2 recommended
+- **Network**: Stable connection to WeChat servers (or use a proxy)

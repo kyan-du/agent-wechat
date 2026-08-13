@@ -1,5 +1,51 @@
 # @agent-wechat/wechat
 
+## 0.11.15
+
+### Patch Changes
+
+- [#150](https://github.com/thisnick/agent-wechat/pull/150) [`80621fe`](https://github.com/thisnick/agent-wechat/commit/80621fec95a51b815785f92fa28403092caa0abd) Thanks [@thisnick](https://github.com/thisnick)! - fix(ci): pin npm to 11.12.1 for OIDC trusted publishing in release workflow
+
+## 0.11.14
+
+### Patch Changes
+
+- [#148](https://github.com/thisnick/agent-wechat/pull/148) [`52056d9`](https://github.com/thisnick/agent-wechat/commit/52056d9b91243adcd890bf351af4a4a0e6c27604) Thanks [@thisnick](https://github.com/thisnick)! - Remove dead onboarding adapter that was deprecated in v0.11.10 but never deleted
+
+## 0.11.13
+
+## 0.11.12
+
+### Patch Changes
+
+- [#141](https://github.com/thisnick/agent-wechat/pull/141) [`5bd2938`](https://github.com/thisnick/agent-wechat/commit/5bd2938bda04def5d38b9e32146c3c5b26d45baf) Thanks [@thisnick](https://github.com/thisnick)! - Return "pending" instead of "unsupported" when voice data is not yet available in the database, so the extension retries instead of giving up.
+
+## 0.11.11
+
+### Patch Changes
+
+- [#139](https://github.com/thisnick/agent-wechat/pull/139) [`c10d6ab`](https://github.com/thisnick/agent-wechat/commit/c10d6abc1dd96b1c4c6ef1b65968a62d6e0ace08) Thanks [@thisnick](https://github.com/thisnick)! - Add build profiles for new WeChat builds (3eda8254 aarch64, eba86b80 x86_64) with updated chat selection offsets and image XOR masks. Detach Frida hook after selectSession returns to restore function prologue.
+
+## 0.11.10
+
+### Patch Changes
+
+- [#137](https://github.com/thisnick/agent-wechat/pull/137) [`9cb14d9`](https://github.com/thisnick/agent-wechat/commit/9cb14d9d0c153045805011b480b1fad780b9865c) Thanks [@thisnick](https://github.com/thisnick)! - Update openclaw dependency and fix breaking changes from plugin SDK refactor. Imports moved to dedicated subpaths (`channel-targets`, `config-runtime`, `command-auth`, `account-id`, `channel-reply-pipeline`). Removed deprecated `onboarding` adapter.
+
+## 0.11.9
+
+## 0.11.8
+
+## 0.11.7
+
+## 0.11.6
+
+## 0.11.5
+
+## 0.11.4
+
+## 0.11.3
+
 ## 0.11.2
 
 ## 0.11.1
