@@ -93,6 +93,49 @@ fn clean_content(content: &str, msg_type: i32) -> String {
                     }
                     parts.join("\n")
                 }
+                // Merged forward / chat history (19)
+                19 => {
+                    let mut parts = Vec::new();
+                    parts.push(format!("[Chat History] {title}"));
+                    // recorditem is XML-escaped inside the appmsg
+                    if let Some(record_raw) = extract_xml_tag(content, "recorditem") {
+                        let record = record_raw
+                            .replace("&lt;", "<")
+                            .replace("&gt;", ">")
+                            .replace("&amp;", "&")
+                            .replace("&quot;", "\"");
+                        // Extract each <dataitem> block
+                        let mut search_from = 0usize;
+                        while let Some(start) = record[search_from..].find("<dataitem") {
+                            let abs_start = search_from + start;
+                            if let Some(end_offset) = record[abs_start..].find("</dataitem>") {
+                                let item = &record[abs_start..abs_start + end_offset + "</dataitem>".len()];
+                                let sender_name = extract_xml_tag(item, "sourcename")
+                                    .or_else(|| extract_xml_tag(item, "displayname"))
+                                    .map(|value| value.replace("&amp;", "&"))
+                                    .unwrap_or_default();
+                                let data_title = extract_xml_tag(item, "datatitle")
+                                    .or_else(|| extract_xml_tag(item, "datadesc"))
+                                    .map(|value| value.replace("&amp;", "&"))
+                                    .unwrap_or_else(|| "[media]".to_string());
+                                if !sender_name.is_empty() {
+                                    parts.push(format!("{sender_name}: {data_title}"));
+                                } else {
+                                    parts.push(data_title);
+                                }
+                                search_from = abs_start + end_offset + "</dataitem>".len();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if parts.len() == 1 {
+                        // Only title, no items parsed — fall back to title
+                        title
+                    } else {
+                        parts.join("\n")
+                    }
+                }
                 _ => {
                     if title.is_empty() {
                         content.to_string()
@@ -398,4 +441,24 @@ pub fn list_messages(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod merged_forward_tests {
+    use super::*;
+
+    #[test]
+    fn parses_escaped_merged_forward_items() {
+        let xml = r#"<msg><appmsg><title>Team history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;datatitle&gt;Hello &amp;amp; welcome&lt;/datatitle&gt;&lt;/dataitem&gt;&lt;dataitem&gt;&lt;displayname&gt;Bob&lt;/displayname&gt;&lt;datadesc&gt;Second&lt;/datadesc&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        assert_eq!(
+            clean_content(xml, 49),
+            "[Chat History] Team history\nAlice: Hello & welcome\nBob: Second"
+        );
+    }
+
+    #[test]
+    fn merged_forward_without_items_falls_back_to_title() {
+        let xml = r#"<msg><appmsg><title>Empty history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        assert_eq!(clean_content(xml, 49), "Empty history");
+    }
 }
