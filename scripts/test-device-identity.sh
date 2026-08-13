@@ -151,6 +151,102 @@ done
 unset AGENT_WECHAT_IDENTITY_LOCK
 echo "device-identity: 5x100 stale file-lock recoveries all succeed"
 
+lock_free_within() {
+  local lock="$1"
+  local seconds="$2"
+  python3 -c '
+import fcntl, os, sys, time
+path, limit = sys.argv[1], float(sys.argv[2])
+start = time.time()
+while time.time() - start < limit:
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        raise SystemExit(0)
+    except BlockingIOError:
+        time.sleep(0.05)
+raise SystemExit(1)
+' "$lock" "$seconds"
+}
+
+run_promptly() {
+  local dir="$1"
+  python3 -c '
+import subprocess, sys
+subprocess.run([sys.argv[1], sys.argv[2]], check=True, timeout=3, stdout=subprocess.DEVNULL)
+' "$GEN" "$dir"
+}
+
+# SIGKILL before acquisition: waiter must not leave a holder behind.
+kdir="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "${envdir:-}" "$kdir"' EXIT
+kready="$kdir/holder-ready"
+python3 -c '
+import fcntl, os, sys, time
+path, ready = sys.argv[1], sys.argv[2]
+flags = os.O_RDWR | os.O_CREAT
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").write("ok\n")
+time.sleep(30)
+' "$kdir/.device-identity.lock" "$kready" &
+holder=$!
+while [ ! -f "$kready" ]; do sleep 0.01; done
+AGENT_WECHAT_IDENTITY_LOCK=file "$GEN" "$kdir" >"$kdir/waiter.out" 2>"$kdir/waiter.err" &
+waiter=$!
+sleep 0.3
+kill -9 "$waiter" 2>/dev/null || true
+wait "$waiter" 2>/dev/null || true
+if kill -0 "$waiter" 2>/dev/null; then
+  echo "SIGKILL waiter is still alive" >&2
+  kill -9 "$holder" 2>/dev/null || true
+  exit 1
+fi
+kill -9 "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+lock_free_within "$kdir/.device-identity.lock" 2
+run_promptly "$kdir"
+echo "device-identity: SIGKILL before acquire leaves no stranded lock"
+
+# SIGKILL after lock acquisition: helper-less owner dies, lock is released.
+kdir2="$(mktemp -d)"
+trap 'rm -rf "$a" "$b" "$evil" "${c:-}" "${envdir:-}" "$kdir" "$kdir2"' EXIT
+AGENT_WECHAT_IDENTITY_HOLD_MS=15000 AGENT_WECHAT_IDENTITY_LOCK=file \
+  "$GEN" "$kdir2" >"$kdir2/out" 2>"$kdir2/err" &
+held=$!
+python3 -c '
+import fcntl, os, sys, time
+path = sys.argv[1]
+start = time.time()
+while time.time() - start < 5:
+    try:
+        fd = os.open(path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.close(fd)
+        except BlockingIOError:
+            os.close(fd)
+            raise SystemExit(0)
+    except FileNotFoundError:
+        pass
+    time.sleep(0.05)
+raise SystemExit("lock was never held")
+' "$kdir2/.device-identity.lock"
+kill -9 "$held" 2>/dev/null || true
+wait "$held" 2>/dev/null || true
+if kill -0 "$held" 2>/dev/null; then
+  echo "SIGKILL holder is still alive" >&2
+  exit 1
+fi
+lock_free_within "$kdir2/.device-identity.lock" 2
+run_promptly "$kdir2"
+echo "device-identity: SIGKILL after acquire releases the lock"
+
 # Injection / malformed persisted files must be rejected and must not execute.
 marker="$evil/pwned"
 printf 'AGENT_WECHAT_MACHINE_ID=$(touch %s)\nAGENT_WECHAT_HOSTNAME=lenovo-pc-100\nAGENT_WECHAT_MAC=00:1b:21:00:00:01\n' "$marker" >"$evil/device-identity.env"

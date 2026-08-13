@@ -3,226 +3,204 @@
 # Used by Compose before `docker compose up` so hostname/MAC are applied at
 # create time (the container cannot change UTS hostname with only NET_ADMIN).
 #
-# First-run creation is serialized: contenders take a lock, re-read the
-# persisted file, and only the first writer generates. Everyone then emits
-# the single on-disk winner. The env file is parsed as data, never sourced.
+# The generator process owns the fcntl lock. SIGKILL/crash closes the fd and
+# releases it; there is no helper that can outlive the caller.
 set -euo pipefail
+exec python3 - "$@" <<'PY'
+import fcntl
+import os
+import re
+import shlex
+import stat
+import sys
+import tempfile
+import time
+import uuid
+from typing import Callable, Optional
 
-DIR="${1:-${AGENT_WECHAT_IDENTITY_DIR:-$HOME/.config/agent-wechat}}"
-mkdir -p "$DIR"
-ENV_FILE="$DIR/device-identity.env"
-LOCK_FILE="$DIR/.device-identity.lock"
-LOCK_PY=""
-LOCK_READY=""
+PREFIXES = ("lenovo-pc", "honor-pc", "xiaomi-pc", "asus-pc", "dell-pc", "hp-pc", "thinkpad")
+MACHINE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
-die() {
-  echo "[identity] $*" >&2
-  exit 1
-}
 
-valid_machine_id() {
-  case "$1" in
-    *$'\n'* | *$'\r'*) return 1 ;;
-  esac
-  [[ "$1" =~ ^[0-9a-f]{32}$ ]]
-}
+def die(message: str) -> None:
+    print(f"[identity] {message}", file=sys.stderr)
+    raise SystemExit(1)
 
-valid_hostname() {
-  case "$1" in
-    *$'\n'* | *$'\r'*) return 1 ;;
-  esac
-  [ "${#1}" -ge 1 ] && [ "${#1}" -le 63 ] || return 1
-  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
-}
 
-valid_mac() {
-  case "$1" in
-    *$'\n'* | *$'\r'*) return 1 ;;
-  esac
-  [[ "$1" =~ ^[0-9a-f]{2}(:[0-9a-f]{2}){5}$ ]] || return 1
-  local first="${1%%:*}"
-  local dec=$((16#$first))
-  [ $((dec % 2)) -eq 0 ]
-}
+def valid_machine_id(value: str) -> bool:
+    return "\n" not in value and "\r" not in value and bool(MACHINE_ID_RE.fullmatch(value))
 
-# Parse KEY=value records as data. Reject unknown/duplicate/malformed lines.
-parse_identity_file() {
-  local file="$1"
-  local line value
-  local mid="" hn="" mac=""
-  local seen_mid=0 seen_hn=0 seen_mac=0
 
-  if command -v python3 >/dev/null 2>&1; then
-    if python3 -c 'import sys; sys.exit(0 if b"\0" in open(sys.argv[1],"rb").read() else 1)' "$file"; then
-      die "NUL in $file"
-    fi
-  fi
+def valid_hostname(value: str) -> bool:
+    return (
+        "\n" not in value
+        and "\r" not in value
+        and 1 <= len(value) <= 63
+        and bool(HOSTNAME_RE.fullmatch(value))
+    )
 
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      AGENT_WECHAT_MACHINE_ID=*)
-        [ "$seen_mid" -eq 0 ] || die "duplicate AGENT_WECHAT_MACHINE_ID in $file"
-        value="${line#AGENT_WECHAT_MACHINE_ID=}"
-        valid_machine_id "$value" || die "invalid AGENT_WECHAT_MACHINE_ID in $file"
-        mid="$value"
-        seen_mid=1
-        ;;
-      AGENT_WECHAT_HOSTNAME=*)
-        [ "$seen_hn" -eq 0 ] || die "duplicate AGENT_WECHAT_HOSTNAME in $file"
-        value="${line#AGENT_WECHAT_HOSTNAME=}"
-        valid_hostname "$value" || die "invalid AGENT_WECHAT_HOSTNAME in $file"
-        hn="$value"
-        seen_hn=1
-        ;;
-      AGENT_WECHAT_MAC=*)
-        [ "$seen_mac" -eq 0 ] || die "duplicate AGENT_WECHAT_MAC in $file"
-        value="${line#AGENT_WECHAT_MAC=}"
-        valid_mac "$value" || die "invalid AGENT_WECHAT_MAC in $file"
-        mac="$value"
-        seen_mac=1
-        ;;
-      *)
-        die "unexpected line in $file"
-        ;;
-    esac
-  done <"$file"
 
-  [ "$seen_mid" -eq 1 ] && [ "$seen_hn" -eq 1 ] && [ "$seen_mac" -eq 1 ] ||
-    die "incomplete identity in $file"
+def valid_mac(value: str) -> bool:
+    if "\n" in value or "\r" in value or not MAC_RE.fullmatch(value):
+        return False
+    return int(value.split(":", 1)[0], 16) % 2 == 0
 
-  AGENT_WECHAT_MACHINE_ID="$mid"
-  AGENT_WECHAT_HOSTNAME="$hn"
-  AGENT_WECHAT_MAC="$mac"
-}
 
-validate_override() {
-  local name="$1"
-  local value="$2"
-  local checker="$3"
-  if [ -n "$value" ] && ! "$checker" "$value"; then
-    die "invalid $name override"
-  fi
-}
+def validate_override(name: str, value: Optional[str], checker: Callable[[str], bool]) -> Optional[str]:
+    if not value:
+        return None
+    if not checker(value):
+        die(f"invalid {name} override")
+    return value
 
-write_identity_atomic() {
-  local tmp
-  tmp="$(mktemp "$ENV_FILE.XXXXXX")"
-  chmod 0600 "$tmp"
-  printf 'AGENT_WECHAT_MACHINE_ID=%s\n' "$AGENT_WECHAT_MACHINE_ID" >"$tmp"
-  printf 'AGENT_WECHAT_HOSTNAME=%s\n' "$AGENT_WECHAT_HOSTNAME" >>"$tmp"
-  printf 'AGENT_WECHAT_MAC=%s\n' "$AGENT_WECHAT_MAC" >>"$tmp"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os,sys; f=open(sys.argv[1],"ab"); os.fsync(f.fileno()); f.close()' "$tmp"
-  fi
-  mv -f "$tmp" "$ENV_FILE"
-  chmod 0600 "$ENV_FILE"
-}
 
-derive_hostname() {
-  local mid="$1"
-  local prefixes=(lenovo-pc honor-pc xiaomi-pc asus-pc dell-pc hp-pc thinkpad)
-  local idx=$(( 0x${mid:0:2} % ${#prefixes[@]} ))
-  local num=$(( 0x${mid:2:4} % 900 + 100 ))
-  printf '%s-%s' "${prefixes[$idx]}" "$num"
-}
+def parse_identity_file(path: str) -> tuple[str, str, str]:
+    data = open(path, "rb").read()
+    if b"\0" in data:
+        die(f"NUL in {path}")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        die(f"non-ascii identity in {path}")
+    mid = hn = mac = None
+    for line in text.splitlines():
+        if line.startswith("AGENT_WECHAT_MACHINE_ID="):
+            if mid is not None:
+                die(f"duplicate AGENT_WECHAT_MACHINE_ID in {path}")
+            value = line[len("AGENT_WECHAT_MACHINE_ID=") :]
+            if not valid_machine_id(value):
+                die(f"invalid AGENT_WECHAT_MACHINE_ID in {path}")
+            mid = value
+        elif line.startswith("AGENT_WECHAT_HOSTNAME="):
+            if hn is not None:
+                die(f"duplicate AGENT_WECHAT_HOSTNAME in {path}")
+            value = line[len("AGENT_WECHAT_HOSTNAME=") :]
+            if not valid_hostname(value):
+                die(f"invalid AGENT_WECHAT_HOSTNAME in {path}")
+            hn = value
+        elif line.startswith("AGENT_WECHAT_MAC="):
+            if mac is not None:
+                die(f"duplicate AGENT_WECHAT_MAC in {path}")
+            value = line[len("AGENT_WECHAT_MAC=") :]
+            if not valid_mac(value):
+                die(f"invalid AGENT_WECHAT_MAC in {path}")
+            mac = value
+        else:
+            die(f"unexpected line in {path}")
+    if not (mid and hn and mac):
+        die(f"incomplete identity in {path}")
+    return mid, hn, mac
 
-derive_mac() {
-  local mid="$1"
-  printf '00:1b:21:%s:%s:%s' "${mid:6:2}" "${mid:8:2}" "${mid:10:2}"
-}
 
-release_lock() {
-  if [ -n "$LOCK_PY" ]; then
-    kill "$LOCK_PY" 2>/dev/null || true
-    wait "$LOCK_PY" 2>/dev/null || true
-    LOCK_PY=""
-  fi
-  if [ -n "$LOCK_READY" ]; then
-    rm -f "$LOCK_READY"
-    LOCK_READY=""
-  fi
-}
+def derive_hostname(mid: str) -> str:
+    idx = int(mid[0:2], 16) % len(PREFIXES)
+    num = int(mid[2:6], 16) % 900 + 100
+    return f"{PREFIXES[idx]}-{num}"
 
-# Portable exclusive lock via fcntl. An orphaned lock file is just a
-# handle; the next helper acquires it. No PID-based rm of a shared path.
-acquire_fcntl_lock() {
-  command -v python3 >/dev/null 2>&1 || die "python3 is required for the portable identity lock"
-  LOCK_READY="$DIR/.device-identity.lock.ready.$$.$RANDOM"
-  rm -f "$LOCK_READY"
-  python3 -c '
-import fcntl, os, signal, sys, time
 
-def _exit(_signum, _frame):
-    raise SystemExit(0)
+def derive_mac(mid: str) -> str:
+    return f"00:1b:21:{mid[6:8]}:{mid[8:10]}:{mid[10:12]}"
 
-signal.signal(signal.SIGTERM, _exit)
-signal.signal(signal.SIGINT, _exit)
-fh = open(sys.argv[1], "a+")
-fcntl.flock(fh, fcntl.LOCK_EX)
-ready = sys.argv[2]
-tmp = ready + ".tmp"
-with open(tmp, "w") as out:
-    out.write("ok\n")
-os.replace(tmp, ready)
-while True:
-    time.sleep(3600)
-' "$LOCK_FILE" "$LOCK_READY" &
-  LOCK_PY=$!
-  n=0
-  while [ ! -f "$LOCK_READY" ]; do
-    if ! kill -0 "$LOCK_PY" 2>/dev/null; then
-      die "identity lock helper exited before acquiring"
-    fi
-    n=$((n + 1))
-    if [ "$n" -ge 1000 ]; then
-      die "timeout waiting for identity lock helper"
-    fi
-    sleep 0.01
-  done
-  rm -f "$LOCK_READY"
-}
 
-trap release_lock EXIT
+def write_identity_atomic(env_file: str, mid: str, hn: str, mac: str) -> None:
+    directory = os.path.dirname(env_file)
+    fd, tmp = tempfile.mkstemp(prefix="device-identity.env.", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        payload = (
+            f"AGENT_WECHAT_MACHINE_ID={mid}\n"
+            f"AGENT_WECHAT_HOSTNAME={hn}\n"
+            f"AGENT_WECHAT_MAC={mac}\n"
+        ).encode("ascii")
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, env_file)
+    os.chmod(env_file, 0o600)
 
-if [ "${AGENT_WECHAT_IDENTITY_LOCK:-}" != "file" ] && command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE"
-  flock 9
-else
-  acquire_fcntl_lock
-fi
 
-if [ -f "$ENV_FILE" ]; then
-  parse_identity_file "$ENV_FILE"
-else
-  validate_override AGENT_WECHAT_MACHINE_ID "${AGENT_WECHAT_MACHINE_ID:-}" valid_machine_id
-  validate_override AGENT_WECHAT_HOSTNAME "${AGENT_WECHAT_HOSTNAME:-}" valid_hostname
-  validate_override AGENT_WECHAT_MAC "${AGENT_WECHAT_MAC:-}" valid_mac
+def acquire_lock(lock_path: str) -> int:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        die(f"cannot open lock {lock_path}: {exc}")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            die(f"{lock_path} is not a regular file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
 
-  if [ -z "${AGENT_WECHAT_MACHINE_ID:-}" ]; then
-    if [ -r /proc/sys/kernel/random/uuid ]; then
-      AGENT_WECHAT_MACHINE_ID="$(tr -d '-' </proc/sys/kernel/random/uuid | tr 'A-F' 'a-f')"
-    else
-      AGENT_WECHAT_MACHINE_ID="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    fi
-    AGENT_WECHAT_MACHINE_ID="$(printf '%s' "$AGENT_WECHAT_MACHINE_ID" | tr -dc 'a-f0-9' | head -c 32)"
-  fi
-  valid_machine_id "$AGENT_WECHAT_MACHINE_ID" || die "generated machine-id is invalid"
 
-  if [ -z "${AGENT_WECHAT_HOSTNAME:-}" ]; then
-    AGENT_WECHAT_HOSTNAME="$(derive_hostname "$AGENT_WECHAT_MACHINE_ID")"
-  fi
-  if [ -z "${AGENT_WECHAT_MAC:-}" ]; then
-    AGENT_WECHAT_MAC="$(derive_mac "$AGENT_WECHAT_MACHINE_ID")"
-  fi
-  valid_hostname "$AGENT_WECHAT_HOSTNAME" || die "generated hostname is invalid"
-  valid_mac "$AGENT_WECHAT_MAC" || die "generated MAC is invalid"
+def main() -> None:
+    ident_dir = (
+        sys.argv[1]
+        if len(sys.argv) > 1
+        else os.environ.get("AGENT_WECHAT_IDENTITY_DIR")
+        or os.path.join(os.path.expanduser("~"), ".config", "agent-wechat")
+    )
+    os.makedirs(ident_dir, exist_ok=True)
+    env_file = os.path.join(ident_dir, "device-identity.env")
+    lock_path = os.path.join(ident_dir, ".device-identity.lock")
+    lock_fd = acquire_lock(lock_path)
+    try:
+        hold_ms = int(os.environ.get("AGENT_WECHAT_IDENTITY_HOLD_MS") or "0")
+    except ValueError:
+        hold_ms = 0
 
-  write_identity_atomic
-  parse_identity_file "$ENV_FILE"
-fi
+    try:
+        if os.path.isfile(env_file):
+            mid, hn, mac = parse_identity_file(env_file)
+        else:
+            mid = validate_override(
+                "AGENT_WECHAT_MACHINE_ID",
+                os.environ.get("AGENT_WECHAT_MACHINE_ID"),
+                valid_machine_id,
+            )
+            hn = validate_override(
+                "AGENT_WECHAT_HOSTNAME",
+                os.environ.get("AGENT_WECHAT_HOSTNAME"),
+                valid_hostname,
+            )
+            mac = validate_override(
+                "AGENT_WECHAT_MAC",
+                os.environ.get("AGENT_WECHAT_MAC"),
+                valid_mac,
+            )
+            if mid is None:
+                mid = uuid.uuid4().hex
+            if not valid_machine_id(mid):
+                die("generated machine-id is invalid")
+            if hn is None:
+                hn = derive_hostname(mid)
+            if mac is None:
+                mac = derive_mac(mid)
+            if not valid_hostname(hn):
+                die("generated hostname is invalid")
+            if not valid_mac(mac):
+                die("generated MAC is invalid")
+            write_identity_atomic(env_file, mid, hn, mac)
+            mid, hn, mac = parse_identity_file(env_file)
+        if hold_ms > 0:
+            time.sleep(hold_ms / 1000.0)
+    finally:
+        # Keep lock_fd alive until process exit so a crash still releases it.
+        os.close(lock_fd)
 
-# Emit shell-safe exports so `eval "$(./scripts/device-identity.sh)"` can
-# populate Compose interpolation. The persisted file is KEY=value data.
-printf 'export AGENT_WECHAT_MACHINE_ID=%q\n' "$AGENT_WECHAT_MACHINE_ID"
-printf 'export AGENT_WECHAT_HOSTNAME=%q\n' "$AGENT_WECHAT_HOSTNAME"
-printf 'export AGENT_WECHAT_MAC=%q\n' "$AGENT_WECHAT_MAC"
+    print(f"export AGENT_WECHAT_MACHINE_ID={shlex.quote(mid)}")
+    print(f"export AGENT_WECHAT_HOSTNAME={shlex.quote(hn)}")
+    print(f"export AGENT_WECHAT_MAC={shlex.quote(mac)}")
+
+
+if __name__ == "__main__":
+    main()
+PY
