@@ -12,6 +12,7 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
+import { sendLogicalMediaTask } from "./outbound.js";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -62,11 +63,16 @@ async function sendWeChatMedia(
   }
 
   const isImage = mimeType.startsWith("image/");
-  const result = isImage
-    ? await client.sendMessage({ chatId: to, text: text || undefined, image: { data: base64, mimeType } })
-    : await client.sendMessage({ chatId: to, text: text || undefined, file: { data: base64, filename } });
-  if (!result.success) throw new Error(result.error ?? "Send media failed");
-  return `wechat:${to}:${Date.now()}`;
+  const requestId = await sendLogicalMediaTask({
+    client,
+    chatId: to,
+    media: isImage
+      ? [{ image: { data: base64, mimeType } }]
+      : [{ file: { data: base64, filename } }],
+    caption: text || undefined,
+    interPartDelayMs: account.mediaPartDelayMs,
+  });
+  return `wechat:${to}:${requestId}`;
 }
 
 const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
@@ -148,6 +154,10 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
         },
         pollIntervalMs: { type: "integer", minimum: 100 },
         authPollIntervalMs: { type: "integer", minimum: 1000 },
+        catchUpMode: { type: "string", enum: ["read-only", "latest"] },
+        catchUpMaxMessages: { type: "integer", minimum: 1 },
+        catchUpMaxAgeMs: { type: "integer", minimum: 1000 },
+        mediaPartDelayMs: { type: "integer", minimum: 0 },
       },
     },
   },
@@ -173,6 +183,10 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
           groups: {},
           pollIntervalMs: 1000,
           authPollIntervalMs: 30000,
+          catchUpMode: "read-only",
+          catchUpMaxMessages: 10,
+          catchUpMaxAgeMs: 300000,
+          mediaPartDelayMs: 750,
         };
       }
       return account;
