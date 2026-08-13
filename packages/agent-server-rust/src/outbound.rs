@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Serialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -131,6 +132,20 @@ impl IntoResponse for OutboundSendResponse {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundStatus {
+    pub queue_capacity: usize,
+    pub queue_depth: usize,
+    pub available_capacity: usize,
+    pub min_spacing_ms: u128,
+    pub jitter_ms: u128,
+    pub task_ttl_ms: u128,
+    pub idempotency_ttl_ms: u128,
+    pub read_only: bool,
+    pub idempotency_entries: usize,
 }
 
 #[derive(Clone)]
@@ -284,6 +299,24 @@ impl OutboundSender {
                 reject_without_idempotency_cache(task, unavailable_result(), &self.idempotency);
                 OutboundSendResponse::Rejected(OutboundError::unavailable())
             }
+        }
+    }
+
+    pub fn status(&self) -> OutboundStatus {
+        OutboundStatus {
+            queue_capacity: self.config.queue_capacity,
+            queue_depth: self.tx.max_capacity().saturating_sub(self.tx.capacity()),
+            available_capacity: self.tx.capacity(),
+            min_spacing_ms: self.config.min_spacing.as_millis(),
+            jitter_ms: self.config.jitter.as_millis(),
+            task_ttl_ms: self.config.task_ttl.as_millis(),
+            idempotency_ttl_ms: self.config.idempotency_ttl.as_millis(),
+            read_only: self.config.read_only,
+            idempotency_entries: self
+                .idempotency
+                .lock()
+                .expect("idempotency store poisoned")
+                .len(),
         }
     }
 }
@@ -512,6 +545,10 @@ impl IdempotencyStore {
         self.entries.remove(key);
     }
 
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn prune(&mut self, now: Instant) {
         while let Some(key) = self.order.front() {
             let expired = match self.entries.get(key) {
@@ -730,6 +767,41 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
+    }
+
+    #[test]
+    fn status_reports_queue_config_and_idempotency_entries() {
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::from_millis(150),
+            jitter: Duration::from_millis(25),
+            task_ttl: Duration::from_secs(30),
+            idempotency_ttl: Duration::from_secs(60),
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            tx,
+            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+        };
+
+        sender
+            .idempotency
+            .lock()
+            .unwrap()
+            .start("status-key", Instant::now());
+
+        let status = sender.status();
+        assert_eq!(status.queue_capacity, 2);
+        assert_eq!(status.queue_depth, 0);
+        assert_eq!(status.available_capacity, 2);
+        assert_eq!(status.min_spacing_ms, 150);
+        assert_eq!(status.jitter_ms, 25);
+        assert_eq!(status.task_ttl_ms, 30_000);
+        assert_eq!(status.idempotency_ttl_ms, 60_000);
+        assert!(status.read_only);
+        assert_eq!(status.idempotency_entries, 1);
     }
 
     fn test_params(text: &str) -> SendMessageParams {

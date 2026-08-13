@@ -43,10 +43,13 @@ If the outbound queue is full, the server returns `429 Too Many Requests` with a
 
 If outbound sending is disabled by read-only mode, the endpoint returns `503 Service Unavailable` with `errorCode: "OUTBOUND_DISABLED"`.
 
+`GET /api/status/outbound` reports queue `queueDepth`, `queueCapacity`, `availableCapacity`, current read-only state, idempotency cache size, and configured spacing/TTL values for operational monitoring.
+
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/api/status/outbound` | Inspect outbound send queue pressure and safety settings |
 | `GET` | `/api/auth/status` | Check login status |
 | `POST` | `/api/auth/logout` | Log out of WeChat |
 | `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |

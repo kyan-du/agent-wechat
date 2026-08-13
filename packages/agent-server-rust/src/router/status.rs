@@ -15,6 +15,7 @@ use crate::db::get_db;
 use crate::execution::run_execution_loop;
 use crate::ia::types::*;
 use crate::ia::{find_state_by_id, identify_states};
+use crate::outbound::outbound_sender;
 use crate::plans::login::{LoginParams, LoginPlan};
 use crate::plans::logout::{LogoutParams, LogoutPlan};
 use crate::sessions::manager::get_session;
@@ -36,6 +37,10 @@ pub async fn get_status() -> Json<serde_json::Value> {
         "loginState": { "status": login_status },
         "version": "0.1.0"
     }))
+}
+
+pub async fn outbound_status() -> Json<crate::outbound::OutboundStatus> {
+    Json(outbound_sender().status())
 }
 
 /// Check auth status via one FSM observation cycle.
