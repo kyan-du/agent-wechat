@@ -42,15 +42,23 @@ pub fn close_window() -> Action {
 // Login Actions
 // ============================================
 
+/// Saved-account login on the official Linux client (EN / ZH).
+pub const SAVED_ACCOUNT_LOGIN_SELECTOR: &str =
+    r#"push-button[name=/^(Log In|Open WeChat|登录|打开微信)$/]"#;
+
+/// Adjacent switch-account control (EN / ZH). Auto-resume never clicks this.
+pub const SWITCH_ACCOUNT_SELECTOR: &str =
+    r#"push-button[name=/^(Switch Account|切换账号|切换帐号)$/]"#;
+
 pub fn click_login() -> Action {
     Action::ClickSelector {
-        selector: r#"push-button[name=/^(Log In|Open WeChat)$/]"#.to_string(),
+        selector: SAVED_ACCOUNT_LOGIN_SELECTOR.to_string(),
     }
 }
 
 pub fn click_switch_account() -> Action {
     Action::ClickSelector {
-        selector: r#"push-button[name="Switch Account"]"#.to_string(),
+        selector: SWITCH_ACCOUNT_SELECTOR.to_string(),
     }
 }
 

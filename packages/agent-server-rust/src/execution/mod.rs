@@ -15,6 +15,12 @@ use tokio_util::sync::CancellationToken;
 /// Only one plan can run at a time — they all drive the GUI.
 static PLAN_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// Non-blocking acquire so the health monitor can click Log In without
+/// racing an active plan. `None` means a plan already holds the GUI.
+pub fn try_acquire_plan_lock() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    PLAN_LOCK.try_lock().ok()
+}
+
 pub struct ExecutionResult {
     pub success: bool,
     pub error: Option<String>,

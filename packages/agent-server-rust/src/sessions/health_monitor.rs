@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
 use crate::sessions::manager::get_session;
@@ -21,6 +21,54 @@ const RESTART_DELAY_SECS: u64 = 3;
 const MAX_RAPID_RESTARTS: u32 = 5;
 const RAPID_WINDOW_SECS: u64 = 60;
 const BACKOFF_DELAY_SECS: u64 = 30;
+
+/// After docker/WeChat restart the official client parks on saved-account
+/// LoginAccount. VNC is view-only, so the health monitor clicks Log In.
+const LOGIN_RESUME_COOLDOWN: Duration = Duration::from_secs(8);
+const LOGIN_RESUME_MAX_CLICKS: u32 = 5;
+
+/// Click budget / cooldown for auto-resuming a previously logged-in account.
+/// Never clicks Switch Account. Stops once the UI leaves `login_account`.
+#[derive(Debug, Default)]
+struct LoginResumePolicy {
+    last_click: Option<Instant>,
+    clicks: u32,
+}
+
+impl LoginResumePolicy {
+    fn reset(&mut self) {
+        self.last_click = None;
+        self.clicks = 0;
+    }
+
+    fn observe(&mut self, state_id: Option<&str>) {
+        if state_id != Some("login_account") {
+            self.clicks = 0;
+        }
+    }
+
+    fn should_click(&self, state_id: Option<&str>, has_logged_in_user: bool, now: Instant) -> bool {
+        if state_id != Some("login_account") || !has_logged_in_user {
+            return false;
+        }
+        if self.clicks >= LOGIN_RESUME_MAX_CLICKS {
+            return false;
+        }
+        match self.last_click {
+            None => true,
+            Some(last) => now.saturating_duration_since(last) >= LOGIN_RESUME_COOLDOWN,
+        }
+    }
+
+    fn record_click(&mut self, now: Instant) {
+        self.last_click = Some(now);
+        self.clicks = self.clicks.saturating_add(1);
+    }
+
+    fn budget_exhausted(&self) -> bool {
+        self.clicks >= LOGIN_RESUME_MAX_CLICKS
+    }
+}
 
 /// Global flag to pause health monitoring during active execution loops.
 static MONITORING_PAUSED: AtomicBool = AtomicBool::new(false);
@@ -57,6 +105,9 @@ fn spawn_wechat(session: &crate::ia::types::Session) {
 /// Every second, it checks the default session's WeChat process by running
 /// a11y → identify. If WeChat has crashed, it restarts it. If no IA state
 /// has been identified for more than 60 seconds, it kills and restarts it.
+/// After a container restart the official client often sits on saved-account
+/// LoginAccount; if this session already has a logged-in user, the monitor
+/// clicks Log In via AT-SPI (VNC is view-only) and never Switch Account.
 pub fn spawn_health_monitor() {
     tokio::spawn(async move {
         tracing::info!("[health] WeChat health monitor started");
@@ -66,6 +117,8 @@ pub fn spawn_health_monitor() {
         let mut restart_count: u32 = 0;
         let mut window_start = Instant::now();
         let mut waiting_restart_since: Option<Instant> = None;
+        let mut login_resume = LoginResumePolicy::default();
+        let mut login_resume_exhausted_logged = false;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
@@ -102,6 +155,8 @@ pub fn spawn_health_monitor() {
                         );
                         was_running = false;
                         waiting_restart_since = Some(Instant::now());
+                        login_resume.reset();
+                        login_resume_exhausted_logged = false;
                     }
 
                     // Handle restart with crash loop protection
@@ -151,9 +206,7 @@ pub fn spawn_health_monitor() {
                 }
             };
 
-            let screenshot = capture_screenshot(&exec_options)
-                .await
-                .unwrap_or_default();
+            let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
             let identified = identify_states(&a11y, &screenshot);
 
             if identified.main_window.is_some() {
@@ -162,6 +215,57 @@ pub fn spawn_health_monitor() {
             } else {
                 // No state identified — check timeout
                 check_and_kill(wechat_pid, &last_identified);
+            }
+
+            let state_id = identified
+                .main_window
+                .as_ref()
+                .map(|state| state.state_id.as_str());
+            login_resume.observe(state_id);
+            if state_id != Some("login_account") {
+                login_resume_exhausted_logged = false;
+            }
+
+            if login_resume.should_click(state_id, session.logged_in_user.is_some(), Instant::now())
+            {
+                let Some(_plan_guard) = crate::execution::try_acquire_plan_lock() else {
+                    continue;
+                };
+                tracing::info!(
+                    "[health] LoginAccount with saved session; clicking Log In (attempt {})",
+                    login_resume.clicks + 1
+                );
+                let action = crate::ia::actions::click_login();
+                let frame = identified
+                    .main_window
+                    .as_ref()
+                    .and_then(|state| state.frame.clone());
+                let emit = |_event: crate::ia::types::SubscriptionEvent| {};
+                match crate::execution::actions::execute_action(
+                    &action,
+                    frame.as_ref(),
+                    &exec_options,
+                    &a11y,
+                    &emit,
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!("[health] Saved-account Log In click dispatched"),
+                    Err(error) => tracing::warn!(
+                        "[health] Saved-account Log In click failed: {}",
+                        error.detail
+                    ),
+                }
+                login_resume.record_click(Instant::now());
+            } else if state_id == Some("login_account")
+                && session.logged_in_user.is_some()
+                && login_resume.budget_exhausted()
+                && !login_resume_exhausted_logged
+            {
+                tracing::warn!(
+                    "[health] LoginAccount resume click budget exhausted; waiting for explicit login"
+                );
+                login_resume_exhausted_logged = true;
             }
         }
     });
@@ -205,5 +309,68 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
             elapsed.as_secs(),
             UNRESPONSIVE_TIMEOUT_SECS
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicks_login_account_only_when_session_has_saved_user() {
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        assert!(policy.should_click(Some("login_account"), true, now));
+        assert!(!policy.should_click(Some("login_account"), false, now));
+        assert!(!policy.should_click(Some("login_qr"), true, now));
+        assert!(!policy.should_click(Some("login_phone_confirm"), true, now));
+        assert!(!policy.should_click(Some("chat"), true, now));
+        assert!(!policy.should_click(None, true, now));
+    }
+
+    #[test]
+    fn cooldown_blocks_immediate_retry() {
+        let mut policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        assert!(policy.should_click(Some("login_account"), true, now));
+        policy.record_click(now);
+        assert!(!policy.should_click(Some("login_account"), true, now));
+        assert!(policy.should_click(Some("login_account"), true, now + LOGIN_RESUME_COOLDOWN));
+    }
+
+    #[test]
+    fn click_budget_stops_after_max_attempts() {
+        let mut policy = LoginResumePolicy::default();
+        let mut now = Instant::now();
+        for _ in 0..LOGIN_RESUME_MAX_CLICKS {
+            assert!(policy.should_click(Some("login_account"), true, now));
+            policy.record_click(now);
+            now += LOGIN_RESUME_COOLDOWN;
+        }
+        assert!(policy.budget_exhausted());
+        assert!(!policy.should_click(Some("login_account"), true, now));
+    }
+
+    #[test]
+    fn leaving_login_account_resets_click_budget() {
+        let mut policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        for _ in 0..LOGIN_RESUME_MAX_CLICKS {
+            policy.record_click(now);
+        }
+        assert!(policy.budget_exhausted());
+        policy.observe(Some("login_phone_confirm"));
+        assert!(!policy.budget_exhausted());
+        assert!(policy.should_click(Some("login_account"), true, now + LOGIN_RESUME_COOLDOWN));
+    }
+
+    #[test]
+    fn process_reset_allows_immediate_click() {
+        let mut policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        policy.record_click(now);
+        assert!(!policy.should_click(Some("login_account"), true, now));
+        policy.reset();
+        assert!(policy.should_click(Some("login_account"), true, now));
     }
 }
