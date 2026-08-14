@@ -6,8 +6,8 @@ mod effects;
 mod execution;
 mod ia;
 mod outbound;
-mod risk;
 mod plans;
+mod risk;
 mod router;
 mod sessions;
 mod tools;
@@ -17,6 +17,10 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() {
+    if let Some(exit_code) = tools::exec::exec_supervisor_entrypoint() {
+        std::process::exit(exit_code);
+    }
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))

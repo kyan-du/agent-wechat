@@ -19,6 +19,7 @@ dependencies = [
  "chrono",
  "futures",
  "image",
+ "libc",
  "md-5",
  "qrcode",
  "refinery",

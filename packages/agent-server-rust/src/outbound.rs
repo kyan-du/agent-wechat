@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -226,6 +226,116 @@ pub struct OutboundStatus {
     pub read_only: bool,
     pub runtime_paused: bool,
     pub idempotency_entries: usize,
+    pub diagnostics: OutboundDiagnosticsSnapshot,
+    pub chat_select_diagnostics: crate::tools::chat_select::ChatSelectDiagnostics,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundDiagnosticsSnapshot {
+    pub enqueued_total: u64,
+    pub completed_total: u64,
+    pub failed_total: u64,
+    pub rejected_429_total: u64,
+    pub queue_expired_total: u64,
+    pub pause_total: u64,
+    pub resume_total: u64,
+    pub duplicate_suppressed_total: u64,
+    pub uncertain_total: u64,
+    pub budget_rejected_total: u64,
+    pub quiet_hours_rejected_total: u64,
+    pub last_queue_wait_ms: u64,
+    pub max_queue_wait_ms: u64,
+    pub last_send_interval_ms: u64,
+}
+
+#[derive(Default)]
+struct OutboundDiagnostics {
+    enqueued_total: AtomicU64,
+    completed_total: AtomicU64,
+    failed_total: AtomicU64,
+    rejected_429_total: AtomicU64,
+    queue_expired_total: AtomicU64,
+    pause_total: AtomicU64,
+    resume_total: AtomicU64,
+    duplicate_suppressed_total: AtomicU64,
+    uncertain_total: AtomicU64,
+    budget_rejected_total: AtomicU64,
+    quiet_hours_rejected_total: AtomicU64,
+    last_queue_wait_ms: AtomicU64,
+    max_queue_wait_ms: AtomicU64,
+    last_send_interval_ms: AtomicU64,
+}
+
+impl OutboundDiagnostics {
+    fn snapshot(&self) -> OutboundDiagnosticsSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        OutboundDiagnosticsSnapshot {
+            enqueued_total: load(&self.enqueued_total),
+            completed_total: load(&self.completed_total),
+            failed_total: load(&self.failed_total),
+            rejected_429_total: load(&self.rejected_429_total),
+            queue_expired_total: load(&self.queue_expired_total),
+            pause_total: load(&self.pause_total),
+            resume_total: load(&self.resume_total),
+            duplicate_suppressed_total: load(&self.duplicate_suppressed_total),
+            uncertain_total: load(&self.uncertain_total),
+            budget_rejected_total: load(&self.budget_rejected_total),
+            quiet_hours_rejected_total: load(&self.quiet_hours_rejected_total),
+            last_queue_wait_ms: load(&self.last_queue_wait_ms),
+            max_queue_wait_ms: load(&self.max_queue_wait_ms),
+            last_send_interval_ms: load(&self.last_send_interval_ms),
+        }
+    }
+
+    fn record_rejection(&self, error: &OutboundError) {
+        if matches!(
+            error.kind,
+            OutboundErrorKind::QueueFull
+                | OutboundErrorKind::DuplicateInProgress
+                | OutboundErrorKind::QuietHours
+                | OutboundErrorKind::Budget
+        ) {
+            self.rejected_429_total.fetch_add(1, Ordering::Relaxed);
+        }
+        match error.kind {
+            OutboundErrorKind::DuplicateInProgress => {
+                self.duplicate_suppressed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::Expired => {
+                self.queue_expired_total.fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::QuietHours => {
+                self.quiet_hours_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::Budget => {
+                self.budget_rejected_total.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_queue_wait(&self, wait: Duration) {
+        let millis = wait.as_millis().min(u64::MAX as u128) as u64;
+        self.last_queue_wait_ms.store(millis, Ordering::Relaxed);
+        self.max_queue_wait_ms.fetch_max(millis, Ordering::Relaxed);
+    }
+
+    fn record_result(&self, result: &SendResult) {
+        self.completed_total.fetch_add(1, Ordering::Relaxed);
+        if !result.success {
+            self.failed_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if is_uncertain_result(result) {
+            self.uncertain_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if result.error_code.as_deref() == Some("duplicate_send_action_suppressed") {
+            self.duplicate_suppressed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 pub enum IdempotencyAdmission {
@@ -489,6 +599,7 @@ pub struct OutboundSender {
     control: Arc<OutboundControl>,
     tx: mpsc::Sender<OutboundTask>,
     usage: Arc<Mutex<Usage>>,
+    diagnostics: Arc<OutboundDiagnostics>,
 }
 
 static OUTBOUND_SENDER: OnceLock<OutboundSender> = OnceLock::new();
@@ -511,12 +622,21 @@ impl OutboundSender {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let control = Arc::new(OutboundControl::new(config.read_only));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker_control = Arc::clone(&control);
         let worker_usage = Arc::clone(&usage);
+        let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_config = config.clone();
 
         tokio::spawn(async move {
-            worker_loop(worker_config, worker_control, rx, worker_usage).await;
+            worker_loop(
+                worker_config,
+                worker_control,
+                rx,
+                worker_usage,
+                worker_diagnostics,
+            )
+            .await;
         });
 
         Self {
@@ -524,6 +644,7 @@ impl OutboundSender {
             control,
             tx,
             usage,
+            diagnostics,
         }
     }
 
@@ -547,12 +668,13 @@ impl OutboundSender {
                 }
                 IdempotencyAdmission::InProgress => {
                     cleanup_temp_files(&params);
-                    return OutboundSendResponse::Rejected(OutboundError::duplicate_in_progress(
-                        self.config.retry_after(),
-                    ));
+                    let error = OutboundError::duplicate_in_progress(self.config.retry_after());
+                    self.diagnostics.record_rejection(&error);
+                    return OutboundSendResponse::Rejected(error);
                 }
                 IdempotencyAdmission::Rejected(error) => {
                     cleanup_temp_files(&params);
+                    self.diagnostics.record_rejection(&error);
                     return OutboundSendResponse::Rejected(error);
                 }
             }
@@ -639,7 +761,9 @@ impl OutboundSender {
                     lease.disarm();
                 }
             }
-            return OutboundSendResponse::Rejected(OutboundError::read_only());
+            let error = OutboundError::read_only();
+            self.diagnostics.record_rejection(&error);
+            return OutboundSendResponse::Rejected(error);
         }
 
         {
@@ -670,6 +794,7 @@ impl OutboundSender {
                     }
                 }
                 cleanup_temp_files(&params);
+                self.diagnostics.record_rejection(&error);
                 return OutboundSendResponse::Rejected(error);
             }
         }
@@ -685,50 +810,56 @@ impl OutboundSender {
         };
 
         match self.tx.try_send(task) {
-            Ok(()) => match result_rx.await {
-                Ok(response) => response,
-                Err(_) => {
-                    if let Some(key) = idempotency_key.as_deref() {
-                        if let Err(error) = persist_result(
-                            key,
-                            idempotency_generation,
-                            &unavailable_result(),
-                            self.config.idempotency_ttl,
-                        ) {
-                            tracing::error!(
-                                "[outbound] failed to persist scheduler unavailable result: {error}"
-                            );
-                            if !mark_needs_reconciliation(
+            Ok(()) => {
+                self.diagnostics
+                    .enqueued_total
+                    .fetch_add(1, Ordering::Relaxed);
+                match result_rx.await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        if let Some(key) = idempotency_key.as_deref() {
+                            if let Err(error) = persist_result(
                                 key,
                                 idempotency_generation,
-                                true,
+                                &unavailable_result(),
                                 self.config.idempotency_ttl,
                             ) {
                                 tracing::error!(
+                                "[outbound] failed to persist scheduler unavailable result: {error}"
+                            );
+                                if !mark_needs_reconciliation(
+                                    key,
+                                    idempotency_generation,
+                                    true,
+                                    self.config.idempotency_ttl,
+                                ) {
+                                    tracing::error!(
                                     "[outbound] failed to mark scheduler unavailable reconciliation state"
                                 );
+                                }
+                                self.control.set_runtime_paused(true);
+                                return OutboundSendResponse::Rejected(OutboundError::persistence(
+                                    true,
+                                ));
                             }
-                            self.control.set_runtime_paused(true);
-                            return OutboundSendResponse::Rejected(OutboundError::persistence(
-                                true,
-                            ));
                         }
+                        let error = OutboundError::unavailable();
+                        self.diagnostics.record_rejection(&error);
+                        OutboundSendResponse::Rejected(error)
                     }
-                    OutboundSendResponse::Rejected(OutboundError::unavailable())
                 }
-            },
+            }
             Err(mpsc::error::TrySendError::Full(task)) => {
                 let error = OutboundError::queue_full(self.config.retry_after());
+                self.diagnostics.record_rejection(&error);
                 reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
                 OutboundSendResponse::Rejected(error)
             }
             Err(mpsc::error::TrySendError::Closed(task)) => {
-                reject_without_idempotency_cache(
-                    task,
-                    OutboundError::unavailable(),
-                    self.config.idempotency_ttl,
-                );
-                OutboundSendResponse::Rejected(OutboundError::unavailable())
+                let error = OutboundError::unavailable();
+                self.diagnostics.record_rejection(&error);
+                reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
+                OutboundSendResponse::Rejected(error)
             }
         }
     }
@@ -767,20 +898,36 @@ impl OutboundSender {
             read_only: self.control.is_read_only(),
             runtime_paused: self.control.is_runtime_paused(),
             idempotency_entries: count_persistent_idempotency(),
+            diagnostics: self.diagnostics.snapshot(),
+            chat_select_diagnostics: crate::tools::chat_select::diagnostics(),
         }
     }
 
     pub fn trip_kill_switch(&self, reason: &str) -> OutboundStatus {
-        tracing::warn!("[outbound] kill switch: {reason}");
+        let code = match reason {
+            "security_popup" => "SECURITY_POPUP",
+            "FRIDA_ATTACH_TIMEOUT" => "FRIDA_ATTACH_TIMEOUT",
+            "FRIDA_ATTACH_FAILED" => "FRIDA_ATTACH_FAILED",
+            _ => "SAFETY_POLICY",
+        };
+        tracing::warn!("[outbound] paused code={code}");
         self.pause()
     }
 
     pub fn pause(&self) -> OutboundStatus {
+        if !self.control.is_runtime_paused() {
+            self.diagnostics.pause_total.fetch_add(1, Ordering::Relaxed);
+        }
         self.control.set_runtime_paused(true);
         self.status()
     }
 
     pub fn resume(&self) -> OutboundStatus {
+        if self.control.is_runtime_paused() {
+            self.diagnostics
+                .resume_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.control.set_runtime_paused(false);
         self.status()
     }
@@ -822,16 +969,16 @@ async fn worker_loop(
     control: Arc<OutboundControl>,
     mut rx: mpsc::Receiver<OutboundTask>,
     usage: Arc<Mutex<Usage>>,
+    diagnostics: Arc<OutboundDiagnostics>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
+    let mut last_send_started: Option<Instant> = None;
     while let Some(task) = rx.recv().await {
         let now = Instant::now();
         if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(
-                task,
-                OutboundError::expired(),
-                config.idempotency_ttl,
-            );
+            let error = OutboundError::expired();
+            diagnostics.record_rejection(&error);
+            reject_without_idempotency_cache(task, error, config.idempotency_ttl);
             continue;
         }
 
@@ -855,7 +1002,14 @@ async fn worker_loop(
             tokio::time::sleep(delay).await;
         }
 
-        let task = match admit_for_execute(task, &control, config.task_ttl, &config, &usage) {
+        let task = match admit_for_execute(
+            task,
+            &control,
+            config.task_ttl,
+            &config,
+            &usage,
+            &diagnostics,
+        ) {
             Some(task) => task,
             None => continue,
         };
@@ -874,6 +1028,7 @@ async fn worker_loop(
         let extra = match extra {
             Ok(wait) => wait,
             Err(error) => {
+                diagnostics.record_rejection(&error);
                 reject_without_idempotency_cache(task, error, config.idempotency_ttl);
                 continue;
             }
@@ -882,7 +1037,14 @@ async fn worker_loop(
             tokio::time::sleep(extra).await;
         }
 
-        let task = match admit_for_execute(task, &control, config.task_ttl, &config, &usage) {
+        let task = match admit_for_execute(
+            task,
+            &control,
+            config.task_ttl,
+            &config,
+            &usage,
+            &diagnostics,
+        ) {
             Some(task) => task,
             None => continue,
         };
@@ -905,16 +1067,26 @@ async fn worker_loop(
                 }
                 control.set_runtime_paused(true);
                 cleanup_temp_files(&task.params);
-                let _ = task.result_tx.send(OutboundSendResponse::Rejected(
-                    OutboundError::persistence(false),
-                ));
+                let error = OutboundError::persistence(false);
+                diagnostics.record_rejection(&error);
+                let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
                 continue;
             }
             if let Some(lease) = &mut task.idempotency_lease {
                 lease.disarm();
             }
         }
+        diagnostics.record_queue_wait(Instant::now().saturating_duration_since(task.enqueued_at));
+        let send_started = Instant::now();
+        if let Some(last) = last_send_started.replace(send_started) {
+            let interval = send_started.saturating_duration_since(last);
+            diagnostics.last_send_interval_ms.store(
+                interval.as_millis().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+        }
         let result = execute_send(&task.params).await;
+        diagnostics.record_result(&result);
         apply_send_result_to_usage(
             &usage,
             &result,
@@ -932,13 +1104,18 @@ fn admit_for_execute(
     task_ttl: Duration,
     config: &OutboundConfig,
     usage: &Mutex<Usage>,
+    diagnostics: &OutboundDiagnostics,
 ) -> Option<OutboundTask> {
     if control.is_read_only() {
-        reject_without_idempotency_cache(task, OutboundError::read_only(), config.idempotency_ttl);
+        let error = OutboundError::read_only();
+        diagnostics.record_rejection(&error);
+        reject_without_idempotency_cache(task, error, config.idempotency_ttl);
         return None;
     }
     if task_expired(&task, Instant::now(), task_ttl) {
-        reject_without_idempotency_cache(task, OutboundError::expired(), config.idempotency_ttl);
+        let error = OutboundError::expired();
+        diagnostics.record_rejection(&error);
+        reject_without_idempotency_cache(task, error, config.idempotency_ttl);
         return None;
     }
     let policy = {
@@ -955,6 +1132,7 @@ fn admit_for_execute(
     match policy {
         Ok(_) => Some(task),
         Err(error) => {
+            diagnostics.record_rejection(&error);
             reject_without_idempotency_cache(task, error, config.idempotency_ttl);
             None
         }
@@ -968,7 +1146,7 @@ fn task_expired(task: &OutboundTask, now: Instant, task_ttl: Duration) -> bool {
 async fn execute_send(params: &SendMessageParams) -> SendResult {
     let session = match get_session("default") {
         Some(s) => s,
-        None => return send_error("No session available"),
+        None => return send_error("SESSION_UNAVAILABLE"),
     };
 
     if session.logged_in_user.is_none() {
@@ -993,13 +1171,42 @@ fn send_result_from_plan(
     plan_state: &crate::plans::send_message::SendMessagePlanState,
     result_error: Option<String>,
 ) -> SendResult {
-    let error = plan_state.diagnostic_error.clone().or(result_error);
+    let error = plan_state
+        .diagnostic_error
+        .clone()
+        .or_else(|| result_error.as_deref().map(execution_error_code));
     SendResult {
         success,
         error_code: error.clone(),
         error,
         commit_attempted: plan_state.send_action_executed,
     }
+}
+
+fn execution_error_code(error: &str) -> String {
+    match error {
+        "Aborted" => "EXECUTION_ABORTED",
+        "No action selected" => "NO_ACTION_SELECTED",
+        "Max steps reached" => "MAX_STEPS_REACHED",
+        _ if error.starts_with("Execution timeout") => "EXECUTION_TIMEOUT",
+        _ if error.starts_with("Unknown state") => "UNKNOWN_UI_STATE_TIMEOUT",
+        _ => "SEND_EXECUTION_FAILED",
+    }
+    .to_string()
+}
+
+fn is_uncertain_result(result: &SendResult) -> bool {
+    !result.success
+        && (result.commit_attempted
+            || matches!(
+                result.error_code.as_deref(),
+                Some(
+                    "send_commit_uncertain"
+                        | "send_result_uncertain"
+                        | "popup_after_send_action"
+                        | "composer_missing_during_confirmation"
+                )
+            ))
 }
 
 fn counts_toward_usage(result: &SendResult) -> bool {
@@ -1752,6 +1959,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(false)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         let pending = tokio::spawn(async move {
@@ -1811,6 +2019,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(false)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
         let pending = tokio::spawn(async move {
             sender
@@ -1861,6 +2070,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(false)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         let (result_tx, _result_rx) = oneshot::channel();
@@ -2013,6 +2223,7 @@ mod tests {
             control: Arc::clone(&control),
             tx,
             usage,
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         fail_next_persistence_for(&FAIL_RESULT_PERSISTENCE_FOR, key);
@@ -2087,7 +2298,13 @@ mod tests {
         let control = Arc::new(OutboundControl::new(false));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            usage,
+            Arc::new(OutboundDiagnostics::default()),
+        ));
         let (result_tx, result_rx) = oneshot::channel();
 
         fail_next_persistence_for(&FAIL_SENDING_PERSISTENCE_FOR, key);
@@ -2154,6 +2371,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         match sender
@@ -2198,6 +2416,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         match sender
@@ -2251,6 +2470,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         match sender
@@ -2294,6 +2514,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         match sender
@@ -2356,7 +2577,13 @@ mod tests {
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            usage,
+            Arc::new(OutboundDiagnostics::default()),
+        ));
 
         let (first_tx, first_rx) = oneshot::channel();
         assert!(matches!(
@@ -2432,7 +2659,13 @@ mod tests {
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            usage,
+            Arc::new(OutboundDiagnostics::default()),
+        ));
 
         let (first_tx, first_rx) = oneshot::channel();
         assert!(matches!(
@@ -2510,6 +2743,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(true)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         assert!(matches!(
@@ -2593,6 +2827,7 @@ mod tests {
             control: Arc::new(OutboundControl::new(false)),
             tx,
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
         assert!(matches!(
             claim_idempotency("replay", Duration::from_secs(60)),
@@ -2638,7 +2873,13 @@ mod tests {
         let control = Arc::new(OutboundControl::new(false));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            usage,
+            Arc::new(OutboundDiagnostics::default()),
+        ));
         let (result_tx, result_rx) = oneshot::channel();
         assert!(matches!(
             claim_idempotency("quiet", Duration::from_secs(60)),

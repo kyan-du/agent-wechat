@@ -109,6 +109,9 @@ mod tests {
         std::env::set_var("AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", "1000");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_JITTER_MS", "0");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", "5000");
+        // Keep this route fixture independent of the runner's local timezone.
+        std::env::set_var("AGENT_WECHAT_QUIET_START_MIN", "0");
+        std::env::set_var("AGENT_WECHAT_QUIET_END_MIN", "0");
         std::env::remove_var("AGENT_WECHAT_OUTBOUND_DISABLED");
         std::env::remove_var("AGENT_WECHAT_READ_ONLY");
         auth::init_token();
@@ -141,6 +144,30 @@ mod tests {
                 name.starts_with("send_image_") || name.starts_with("send_file_")
             })
             .count()
+    }
+
+    #[tokio::test]
+    async fn outbound_status_contains_only_redacted_diagnostics() {
+        init_test_server_state().await;
+        let response = build_router()
+            .oneshot(authed("GET", "/api/status/outbound", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert!(body["diagnostics"].is_object());
+        assert!(body["chatSelectDiagnostics"].is_object());
+        let serialized = serde_json::to_string(&body).unwrap();
+        for sensitive in [
+            "message text",
+            "contact display name",
+            "/tmp/send_file_secret.pdf",
+            "Bearer secret-token",
+            "data:image/png;base64",
+            "qrData",
+        ] {
+            assert!(!serialized.contains(sensitive));
+        }
     }
 
     #[tokio::test]
