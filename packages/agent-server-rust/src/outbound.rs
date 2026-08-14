@@ -2065,6 +2065,16 @@ fn consume_persistence_failure(slot: &OnceLock<Mutex<Option<String>>>, key: &str
 }
 
 #[cfg(test)]
+static IDEMPOTENCY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+fn lock_idempotency_tests() -> std::sync::MutexGuard<'static, ()> {
+    IDEMPOTENCY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
 fn clear_persistence_faults() {
     for slot in [
         &FAIL_SENDING_PERSISTENCE_FOR,
@@ -2355,9 +2365,14 @@ mod tests {
         });
     }
 
-    fn clear_idempotency_rows() {
+    fn clear_idempotency_rows() -> std::sync::MutexGuard<'static, ()> {
+        let guard = lock_idempotency_tests();
         init_test_db();
         clear_persistence_faults();
+        if let Some(db) = crate::db::try_get_db() {
+            db.execute("DELETE FROM outbound_idempotency", []).ok();
+        }
+        guard
     }
 
     fn test_executor() -> ExecuteSend {
@@ -2509,7 +2524,7 @@ mod tests {
 
     #[test]
     fn idempotency_replays_completed_result_and_blocks_in_progress_duplicate() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
 
         assert!(matches!(
             claim_idempotency("replay-k", Duration::from_secs(60)),
@@ -2559,7 +2574,7 @@ mod tests {
 
     #[test]
     fn completed_idempotency_key_can_be_reused_after_ttl() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("ttl-k", Duration::from_millis(1)),
             IdempotencyStart::Inserted(_)
@@ -2583,7 +2598,7 @@ mod tests {
 
     #[test]
     fn in_progress_idempotency_key_does_not_expire_after_ttl() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("in-progress-k", Duration::from_millis(1)),
             IdempotencyStart::Inserted(_)
@@ -2597,7 +2612,7 @@ mod tests {
 
     #[test]
     fn concurrent_same_key_admission_inserts_once() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let inserted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -2621,7 +2636,7 @@ mod tests {
 
     #[test]
     fn persisted_queued_or_sending_blocks_duplicate_after_restart() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("restart-queued", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -2644,7 +2659,7 @@ mod tests {
 
     #[test]
     fn manual_reconcile_marks_persisted_queued_uncertain_without_reclaim() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("manual-queued", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -2667,7 +2682,7 @@ mod tests {
 
     #[test]
     fn dropped_claim_lease_marks_exact_queued_generation_needs_reconciliation() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-drop-queued";
         assert!(matches!(
             claim_idempotency(key, Duration::from_secs(60)),
@@ -2702,7 +2717,7 @@ mod tests {
 
     #[test]
     fn dropped_old_generation_claim_lease_cannot_overwrite_reclaimed_key() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-old-generation";
         assert!(matches!(
             claim_idempotency(key, Duration::from_secs(60)),
@@ -2736,7 +2751,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_task_owns_lease_after_caller_abort_until_runtime_drop() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-after-try-send-abort";
         assert!(matches!(
             claim_idempotency(key, Duration::from_secs(60)),
@@ -2796,7 +2811,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_receiver_before_worker_takes_task_reconciles_queued_lease() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-runtime-shutdown";
         assert!(matches!(
             claim_idempotency(key, Duration::from_secs(60)),
@@ -2855,7 +2870,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_bound_rejects_when_channel_is_full() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::from_secs(60),
@@ -2914,7 +2929,7 @@ mod tests {
 
     #[test]
     fn expired_task_returns_queue_expired_and_cleans_file() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().to_string();
         assert!(matches!(
@@ -2962,7 +2977,7 @@ mod tests {
 
     #[test]
     fn terminal_persistence_failure_returns_fail_closed_rejection() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("persist-fail", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3007,7 +3022,7 @@ mod tests {
 
     #[test]
     fn unknown_worker_result_after_sending_is_needs_reconciliation_not_failed() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "unknown-after-sending";
         {
             let db = get_db();
@@ -3034,7 +3049,7 @@ mod tests {
 
     #[test]
     fn protected_capacity_rejects_new_keys_but_keeps_existing_and_survives_restart() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let held = "cap-held";
         let extra = "cap-extra";
         let limit = {
@@ -3119,7 +3134,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_claimed_oneshot_close_after_sending_does_not_persist_failed() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "oneshot-close-after-sending";
         {
             let db = get_db();
@@ -3179,7 +3194,7 @@ mod tests {
 
     #[test]
     fn dropped_sending_lease_marks_exact_generation_needs_reconciliation() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-drop-sending";
         {
             let db = get_db();
@@ -3213,7 +3228,7 @@ mod tests {
 
     #[test]
     fn dropped_sending_lease_cannot_overwrite_terminal_or_other_generation() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "lease-sending-stale";
         {
             let db = get_db();
@@ -3264,7 +3279,7 @@ mod tests {
 
     #[test]
     fn persistence_paths_log_only_coarse_codes_for_hostile_sqlite_errors() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let logs = capture_logs(|| {
             fail_next_claim_with_hostile_error();
             let config = OutboundConfig {
@@ -3312,7 +3327,7 @@ mod tests {
 
     #[test]
     fn sending_and_rejection_persistence_failures_are_visible() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("sending-fail", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3337,7 +3352,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_sending_persistence_failure_marks_reconciliation_and_pauses() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "worker-sending-persist-fail";
         {
             let db = get_db();
@@ -3426,7 +3441,7 @@ mod tests {
 
     #[tokio::test]
     async fn kill_switch_rejects_without_queueing() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -3467,7 +3482,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_duplicate_does_not_overwrite_queued_idempotency() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("paused-queued", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3511,7 +3526,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_duplicate_replays_terminal_idempotency() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("paused-terminal", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3565,7 +3580,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_admission_expires_stale_terminal_instead_of_replaying() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let key = "paused-expired-terminal";
         {
             let db = get_db();
@@ -3626,7 +3641,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_after_paused_duplicate_replays_once_without_requeueing() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("resume-once", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3696,7 +3711,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_task_rechecks_pause_after_spacing_delay() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(25),
@@ -3789,7 +3804,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_task_rechecks_ttl_after_spacing_delay() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(30),
@@ -3886,7 +3901,7 @@ mod tests {
 
     #[test]
     fn status_reports_queue_config_and_idempotency_entries() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(150),
@@ -3942,7 +3957,7 @@ mod tests {
 
     #[test]
     fn uncertain_terminal_result_is_cached_and_not_retried() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("uncertain-k", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3972,7 +3987,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_replay_beats_quiet_hours_policy() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -4021,7 +4036,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_rejects_quiet_hours_instead_of_sending() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::ZERO,
@@ -4169,7 +4184,7 @@ mod tests {
 
     #[test]
     fn pre_execution_reject_does_not_contaminate_completed_result() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         assert!(matches!(
             claim_idempotency("pre-reject-k", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -4216,11 +4231,13 @@ mod p0c_tests {
         });
     }
 
-    fn clear_idempotency_rows() {
+    fn clear_idempotency_rows() -> std::sync::MutexGuard<'static, ()> {
+        let guard = super::lock_idempotency_tests();
         init_test_db();
         super::clear_persistence_faults();
         let db = get_db();
         db.execute("DELETE FROM outbound_idempotency", []).unwrap();
+        guard
     }
 
     use super::*;
@@ -4599,7 +4616,7 @@ mod p0c_tests {
 
     #[tokio::test]
     async fn queue_bound_rejects_when_channel_is_full() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::from_secs(60),
@@ -4662,7 +4679,7 @@ mod p0c_tests {
 
     #[tokio::test]
     async fn cancelled_confirmed_send_releases_capacity_and_similarity_without_false_block() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(50),
@@ -4737,7 +4754,7 @@ mod p0c_tests {
 
     #[tokio::test]
     async fn kill_switch_rejects_without_queueing() {
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -4820,7 +4837,7 @@ mod p0c_tests {
             execute: test_executor(),
         };
 
-        clear_idempotency_rows();
+        let _idempotency_lock = clear_idempotency_rows();
 
         let status = sender.status();
         assert_eq!(status.queue_capacity, 2);
