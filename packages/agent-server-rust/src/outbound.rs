@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -136,9 +136,7 @@ impl IntoResponse for OutboundSendResponse {
                     OutboundErrorKind::QueueFull
                     | OutboundErrorKind::DuplicateInProgress
                     | OutboundErrorKind::QuietHours
-                    | OutboundErrorKind::Budget => {
-                        StatusCode::TOO_MANY_REQUESTS
-                    }
+                    | OutboundErrorKind::Budget => StatusCode::TOO_MANY_REQUESTS,
                     OutboundErrorKind::ReadOnly => StatusCode::SERVICE_UNAVAILABLE,
                     OutboundErrorKind::Expired | OutboundErrorKind::Unavailable => {
                         StatusCode::SERVICE_UNAVAILABLE
@@ -180,6 +178,118 @@ pub struct OutboundStatus {
     pub read_only: bool,
     pub runtime_paused: bool,
     pub idempotency_entries: usize,
+    pub diagnostics: OutboundDiagnosticsSnapshot,
+    pub chat_select_diagnostics: crate::tools::chat_select::ChatSelectDiagnostics,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundDiagnosticsSnapshot {
+    pub enqueued_total: u64,
+    /// Worker executions that reached a terminal send result. Replays and
+    /// pre-execution rejections are intentionally excluded.
+    pub completed_total: u64,
+    pub failed_total: u64,
+    pub rejected_429_total: u64,
+    pub queue_expired_total: u64,
+    pub pause_total: u64,
+    pub resume_total: u64,
+    pub duplicate_suppressed_total: u64,
+    pub uncertain_total: u64,
+    pub budget_rejected_total: u64,
+    pub quiet_hours_rejected_total: u64,
+    pub last_queue_wait_ms: u64,
+    pub max_queue_wait_ms: u64,
+    pub last_send_interval_ms: u64,
+}
+
+#[derive(Default)]
+struct OutboundDiagnostics {
+    enqueued_total: AtomicU64,
+    completed_total: AtomicU64,
+    failed_total: AtomicU64,
+    rejected_429_total: AtomicU64,
+    queue_expired_total: AtomicU64,
+    pause_total: AtomicU64,
+    resume_total: AtomicU64,
+    duplicate_suppressed_total: AtomicU64,
+    uncertain_total: AtomicU64,
+    budget_rejected_total: AtomicU64,
+    quiet_hours_rejected_total: AtomicU64,
+    last_queue_wait_ms: AtomicU64,
+    max_queue_wait_ms: AtomicU64,
+    last_send_interval_ms: AtomicU64,
+}
+
+impl OutboundDiagnostics {
+    fn snapshot(&self) -> OutboundDiagnosticsSnapshot {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        OutboundDiagnosticsSnapshot {
+            enqueued_total: load(&self.enqueued_total),
+            completed_total: load(&self.completed_total),
+            failed_total: load(&self.failed_total),
+            rejected_429_total: load(&self.rejected_429_total),
+            queue_expired_total: load(&self.queue_expired_total),
+            pause_total: load(&self.pause_total),
+            resume_total: load(&self.resume_total),
+            duplicate_suppressed_total: load(&self.duplicate_suppressed_total),
+            uncertain_total: load(&self.uncertain_total),
+            budget_rejected_total: load(&self.budget_rejected_total),
+            quiet_hours_rejected_total: load(&self.quiet_hours_rejected_total),
+            last_queue_wait_ms: load(&self.last_queue_wait_ms),
+            max_queue_wait_ms: load(&self.max_queue_wait_ms),
+            last_send_interval_ms: load(&self.last_send_interval_ms),
+        }
+    }
+
+    fn record_rejection(&self, error: &OutboundError) {
+        if matches!(
+            error.kind,
+            OutboundErrorKind::QueueFull
+                | OutboundErrorKind::DuplicateInProgress
+                | OutboundErrorKind::QuietHours
+                | OutboundErrorKind::Budget
+        ) {
+            self.rejected_429_total.fetch_add(1, Ordering::Relaxed);
+        }
+        match error.kind {
+            OutboundErrorKind::DuplicateInProgress => {
+                self.duplicate_suppressed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::Expired => {
+                self.queue_expired_total.fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::QuietHours => {
+                self.quiet_hours_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OutboundErrorKind::Budget => {
+                self.budget_rejected_total.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_queue_wait(&self, wait: Duration) {
+        let millis = wait.as_millis().min(u64::MAX as u128) as u64;
+        self.last_queue_wait_ms.store(millis, Ordering::Relaxed);
+        self.max_queue_wait_ms.fetch_max(millis, Ordering::Relaxed);
+    }
+
+    fn record_result(&self, result: &SendResult) {
+        self.completed_total.fetch_add(1, Ordering::Relaxed);
+        if !result.success {
+            self.failed_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if is_uncertain_result(result) {
+            self.uncertain_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if result.error_code.as_deref() == Some("duplicate_send_action_suppressed") {
+            self.duplicate_suppressed_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -323,15 +433,25 @@ fn policy_allows_send(
         )));
     }
     if usage.hour_count >= config.hourly_budget {
-        return Err(OutboundError::budget("HOURLY_BUDGET", Duration::from_secs(600)));
+        return Err(OutboundError::budget(
+            "HOURLY_BUDGET",
+            Duration::from_secs(600),
+        ));
     }
     if usage.day_count >= config.daily_budget {
-        return Err(OutboundError::budget("DAILY_BUDGET", Duration::from_secs(3600)));
+        return Err(OutboundError::budget(
+            "DAILY_BUDGET",
+            Duration::from_secs(3600),
+        ));
     }
     let extra = usage
         .last_per_chat
         .get(chat_id)
-        .map(|last| config.chat_cooldown.saturating_sub(now.saturating_duration_since(*last)))
+        .map(|last| {
+            config
+                .chat_cooldown
+                .saturating_sub(now.saturating_duration_since(*last))
+        })
         .unwrap_or(Duration::ZERO);
     Ok(extra)
 }
@@ -371,6 +491,7 @@ pub struct OutboundSender {
     tx: mpsc::Sender<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
+    diagnostics: Arc<OutboundDiagnostics>,
 }
 
 static OUTBOUND_SENDER: OnceLock<OutboundSender> = OnceLock::new();
@@ -385,13 +506,23 @@ impl OutboundSender {
         let control = Arc::new(OutboundControl::new(config.read_only));
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(config.idempotency_ttl)));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker_control = Arc::clone(&control);
         let worker_store = Arc::clone(&idempotency);
         let worker_usage = Arc::clone(&usage);
+        let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_config = config.clone();
 
         tokio::spawn(async move {
-            worker_loop(worker_config, worker_control, rx, worker_store, worker_usage).await;
+            worker_loop(
+                worker_config,
+                worker_control,
+                rx,
+                worker_store,
+                worker_usage,
+                worker_diagnostics,
+            )
+            .await;
         });
 
         Self {
@@ -400,6 +531,7 @@ impl OutboundSender {
             tx,
             idempotency,
             usage,
+            diagnostics,
         }
     }
 
@@ -411,7 +543,9 @@ impl OutboundSender {
         let now = Instant::now();
         if self.control.is_read_only() {
             cleanup_temp_files(&params);
-            return OutboundSendResponse::Rejected(OutboundError::read_only());
+            let error = OutboundError::read_only();
+            self.diagnostics.record_rejection(&error);
+            return OutboundSendResponse::Rejected(error);
         }
 
         if let Some(key) = idempotency_key.as_deref() {
@@ -424,9 +558,9 @@ impl OutboundSender {
                 }
                 IdempotencyStart::InProgress => {
                     cleanup_temp_files(&params);
-                    return OutboundSendResponse::Rejected(OutboundError::duplicate_in_progress(
-                        self.config.retry_after(),
-                    ));
+                    let error = OutboundError::duplicate_in_progress(self.config.retry_after());
+                    self.diagnostics.record_rejection(&error);
+                    return OutboundSendResponse::Rejected(error);
                 }
             }
         }
@@ -448,6 +582,7 @@ impl OutboundSender {
                         .remove(key);
                 }
                 cleanup_temp_files(&params);
+                self.diagnostics.record_rejection(&error);
                 return OutboundSendResponse::Rejected(error);
             }
         }
@@ -461,30 +596,36 @@ impl OutboundSender {
         };
 
         match self.tx.try_send(task) {
-            Ok(()) => match result_rx.await {
-                Ok(response) => response,
-                Err(_) => {
-                    if let Some(key) = idempotency_key.as_deref() {
-                        self.idempotency
-                            .lock()
-                            .expect("idempotency store poisoned")
-                            .complete(key, now, unavailable_result());
+            Ok(()) => {
+                self.diagnostics
+                    .enqueued_total
+                    .fetch_add(1, Ordering::Relaxed);
+                match result_rx.await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        if let Some(key) = idempotency_key.as_deref() {
+                            self.idempotency
+                                .lock()
+                                .expect("idempotency store poisoned")
+                                .complete(key, now, unavailable_result());
+                        }
+                        let error = OutboundError::unavailable();
+                        self.diagnostics.record_rejection(&error);
+                        OutboundSendResponse::Rejected(error)
                     }
-                    OutboundSendResponse::Rejected(OutboundError::unavailable())
                 }
-            },
+            }
             Err(mpsc::error::TrySendError::Full(task)) => {
                 let error = OutboundError::queue_full(self.config.retry_after());
+                self.diagnostics.record_rejection(&error);
                 reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
                 OutboundSendResponse::Rejected(error)
             }
             Err(mpsc::error::TrySendError::Closed(task)) => {
-                reject_without_idempotency_cache(
-                    task,
-                    OutboundError::unavailable(),
-                    &self.idempotency,
-                );
-                OutboundSendResponse::Rejected(OutboundError::unavailable())
+                let error = OutboundError::unavailable();
+                self.diagnostics.record_rejection(&error);
+                reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
+                OutboundSendResponse::Rejected(error)
             }
         }
     }
@@ -505,20 +646,36 @@ impl OutboundSender {
                 .lock()
                 .expect("idempotency store poisoned")
                 .len(),
+            diagnostics: self.diagnostics.snapshot(),
+            chat_select_diagnostics: crate::tools::chat_select::diagnostics(),
         }
     }
 
     pub fn trip_kill_switch(&self, reason: &str) -> OutboundStatus {
-        tracing::warn!("[outbound] kill switch: {reason}");
+        let code = match reason {
+            "security_popup" => "SECURITY_POPUP",
+            "FRIDA_ATTACH_TIMEOUT" => "FRIDA_ATTACH_TIMEOUT",
+            "FRIDA_ATTACH_FAILED" => "FRIDA_ATTACH_FAILED",
+            _ => "SAFETY_POLICY",
+        };
+        tracing::warn!("[outbound] paused code={code}");
         self.pause()
     }
 
     pub fn pause(&self) -> OutboundStatus {
+        if !self.control.is_runtime_paused() {
+            self.diagnostics.pause_total.fetch_add(1, Ordering::Relaxed);
+        }
         self.control.set_runtime_paused(true);
         self.status()
     }
 
     pub fn resume(&self) -> OutboundStatus {
+        if self.control.is_runtime_paused() {
+            self.diagnostics
+                .resume_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.control.set_runtime_paused(false);
         self.status()
     }
@@ -561,12 +718,16 @@ async fn worker_loop(
     mut rx: mpsc::Receiver<OutboundTask>,
     idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
+    diagnostics: Arc<OutboundDiagnostics>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
+    let mut last_send_started: Option<Instant> = None;
     while let Some(task) = rx.recv().await {
         let now = Instant::now();
         if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
+            let error = OutboundError::expired();
+            diagnostics.record_rejection(&error);
+            reject_without_idempotency_cache(task, error, &idempotency);
             continue;
         }
 
@@ -597,6 +758,7 @@ async fn worker_loop(
             &config,
             &usage,
             &idempotency,
+            &diagnostics,
         ) {
             Some(task) => task,
             None => continue,
@@ -616,6 +778,7 @@ async fn worker_loop(
         let extra = match extra {
             Ok(wait) => wait,
             Err(error) => {
+                diagnostics.record_rejection(&error);
                 reject_without_idempotency_cache(task, error, &idempotency);
                 continue;
             }
@@ -631,12 +794,25 @@ async fn worker_loop(
             &config,
             &usage,
             &idempotency,
+            &diagnostics,
         ) {
             Some(task) => task,
             None => continue,
         };
 
+        let send_started = Instant::now();
+        diagnostics.record_queue_wait(send_started.saturating_duration_since(task.enqueued_at));
+        if let Some(previous) = last_send_started.replace(send_started) {
+            let interval = send_started
+                .saturating_duration_since(previous)
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            diagnostics
+                .last_send_interval_ms
+                .store(interval, Ordering::Relaxed);
+        }
         let result = execute_send(&task.params).await;
+        diagnostics.record_result(&result);
         apply_send_result_to_usage(
             &usage,
             &result,
@@ -655,13 +831,18 @@ fn admit_for_execute(
     config: &OutboundConfig,
     usage: &Mutex<Usage>,
     idempotency: &Arc<Mutex<IdempotencyStore>>,
+    diagnostics: &OutboundDiagnostics,
 ) -> Option<OutboundTask> {
     if control.is_read_only() {
-        reject_without_idempotency_cache(task, OutboundError::read_only(), idempotency);
+        let error = OutboundError::read_only();
+        diagnostics.record_rejection(&error);
+        reject_without_idempotency_cache(task, error, idempotency);
         return None;
     }
     if task_expired(&task, Instant::now(), task_ttl) {
-        reject_without_idempotency_cache(task, OutboundError::expired(), idempotency);
+        let error = OutboundError::expired();
+        diagnostics.record_rejection(&error);
+        reject_without_idempotency_cache(task, error, idempotency);
         return None;
     }
     let policy = {
@@ -678,6 +859,7 @@ fn admit_for_execute(
     match policy {
         Ok(_) => Some(task),
         Err(error) => {
+            diagnostics.record_rejection(&error);
             reject_without_idempotency_cache(task, error, idempotency);
             None
         }
@@ -691,7 +873,7 @@ fn task_expired(task: &OutboundTask, now: Instant, task_ttl: Duration) -> bool {
 async fn execute_send(params: &SendMessageParams) -> SendResult {
     let session = match get_session("default") {
         Some(s) => s,
-        None => return send_error("No session available"),
+        None => return send_error("SESSION_UNAVAILABLE"),
     };
 
     if session.logged_in_user.is_none() {
@@ -716,13 +898,42 @@ fn send_result_from_plan(
     plan_state: &crate::plans::send_message::SendMessagePlanState,
     result_error: Option<String>,
 ) -> SendResult {
-    let error = plan_state.diagnostic_error.clone().or(result_error);
+    let code = plan_state
+        .diagnostic_error
+        .clone()
+        .or_else(|| result_error.as_deref().map(execution_error_code));
     SendResult {
         success,
-        error_code: error.clone(),
-        error,
+        error_code: code.clone(),
+        error: code,
         commit_attempted: plan_state.send_action_executed,
     }
+}
+
+fn execution_error_code(error: &str) -> String {
+    match error {
+        "Aborted" => "EXECUTION_ABORTED",
+        "No action selected" => "NO_ACTION_SELECTED",
+        "Max steps reached" => "MAX_STEPS_REACHED",
+        _ if error.starts_with("Execution timeout") => "EXECUTION_TIMEOUT",
+        _ if error.starts_with("Unknown state") => "UNKNOWN_UI_STATE_TIMEOUT",
+        _ => "SEND_EXECUTION_FAILED",
+    }
+    .to_string()
+}
+
+fn is_uncertain_result(result: &SendResult) -> bool {
+    !result.success
+        && (result.commit_attempted
+            || matches!(
+                result.error_code.as_deref(),
+                Some(
+                    "send_commit_uncertain"
+                        | "send_result_uncertain"
+                        | "popup_after_send_action"
+                        | "composer_missing_during_confirmation"
+                )
+            ))
 }
 
 fn counts_toward_usage(result: &SendResult) -> bool {
@@ -1047,6 +1258,7 @@ mod tests {
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         let (result_tx, _result_rx) = oneshot::channel();
@@ -1078,6 +1290,10 @@ mod tests {
                 .start("queue-full", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.rejected_429_total, 1);
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
     }
 
     #[test]
@@ -1142,6 +1358,7 @@ mod tests {
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         match sender
@@ -1154,6 +1371,10 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
     }
 
     #[tokio::test]
@@ -1175,12 +1396,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
+            Arc::clone(&diagnostics),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -1224,6 +1447,10 @@ mod tests {
                 .start("second", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.queue_expired_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
 
         drop(tx);
         worker.await.unwrap();
@@ -1248,12 +1475,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
+            Arc::clone(&diagnostics),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -1296,6 +1525,10 @@ mod tests {
                 .start("second", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.queue_expired_total, 1);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
 
         drop(tx);
         worker.await.unwrap();
@@ -1323,6 +1556,7 @@ mod tests {
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
         sender
@@ -1342,6 +1576,127 @@ mod tests {
         assert!(status.read_only);
         assert!(status.runtime_paused);
         assert_eq!(status.idempotency_entries, 1);
+        assert_eq!(status.diagnostics.enqueued_total, 0);
+        assert_eq!(status.chat_select_diagnostics.attach_total, 0);
+
+        let json = serde_json::to_string(&status).unwrap();
+        for sensitive in [
+            "private message body",
+            "Alice Display Name",
+            "/tmp/send_file_secret.pdf",
+            "Bearer secret-token",
+            "data:image/png;base64",
+        ] {
+            assert!(!json.contains(sensitive));
+        }
+        assert!(json.contains("diagnostics"));
+        assert!(json.contains("chatSelectDiagnostics"));
+    }
+
+    #[test]
+    fn diagnostics_count_redacted_outcomes_and_durations() {
+        let diagnostics = OutboundDiagnostics::default();
+        diagnostics.record_rejection(&OutboundError::queue_full(Duration::from_secs(1)));
+        diagnostics.record_rejection(&OutboundError::expired());
+        diagnostics.record_rejection(&OutboundError::quiet_hours(Duration::from_secs(1)));
+        diagnostics.record_rejection(&OutboundError::budget(
+            "HOURLY_BUDGET",
+            Duration::from_secs(1),
+        ));
+        diagnostics.record_queue_wait(Duration::from_millis(23));
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_commit_uncertain".into()),
+            error: Some("send_commit_uncertain".into()),
+            commit_attempted: true,
+        });
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.rejected_429_total, 3);
+        assert_eq!(snapshot.queue_expired_total, 1);
+        assert_eq!(snapshot.quiet_hours_rejected_total, 1);
+        assert_eq!(snapshot.budget_rejected_total, 1);
+        assert_eq!(snapshot.completed_total, 1);
+        assert_eq!(snapshot.failed_total, 1);
+        assert_eq!(snapshot.uncertain_total, 1);
+        assert_eq!(snapshot.last_queue_wait_ms, 23);
+        assert_eq!(snapshot.max_queue_wait_ms, 23);
+    }
+
+    #[test]
+    fn pause_resume_and_uncertain_completion_are_counted_once() {
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+        sender.pause();
+        sender.pause();
+        sender.resume();
+        sender.resume();
+        sender.diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_result_uncertain".into()),
+            error: None,
+            commit_attempted: true,
+        });
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.pause_total, 1);
+        assert_eq!(counters.resume_total, 1);
+        assert_eq!(counters.completed_total, 1);
+        assert_eq!(counters.failed_total, 1);
+        assert_eq!(counters.uncertain_total, 1);
+    }
+
+    #[test]
+    fn uncertain_counter_uses_only_post_commit_terminal_codes() {
+        let diagnostics = OutboundDiagnostics::default();
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("target_confirmation_identity_mismatch".into()),
+            error: None,
+            commit_attempted: false,
+        });
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_result_uncertain".into()),
+            error: None,
+            commit_attempted: true,
+        });
+        assert_eq!(diagnostics.snapshot().uncertain_total, 1);
+    }
+
+    #[test]
+    fn execution_errors_are_mapped_to_stable_codes_without_detail() {
+        assert_eq!(
+            execution_error_code("Execution timeout after 301s /tmp/private"),
+            "EXECUTION_TIMEOUT"
+        );
+        assert_eq!(
+            execution_error_code("Unknown state for 60s - Alice secret"),
+            "UNKNOWN_UI_STATE_TIMEOUT"
+        );
+        assert_eq!(
+            execution_error_code("untrusted error with message text and token"),
+            "SEND_EXECUTION_FAILED"
+        );
     }
 
     fn test_params(text: &str) -> SendMessageParams {
@@ -1401,6 +1756,7 @@ mod tests {
             tx,
             idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
         sender.idempotency.lock().unwrap().complete(
             "replay",
@@ -1412,12 +1768,19 @@ mod tests {
                 commit_attempted: true,
             },
         );
-        match sender.send(test_params("hello"), Some("replay".into())).await {
+        match sender
+            .send(test_params("hello"), Some("replay".into()))
+            .await
+        {
             OutboundSendResponse::Result(result) => assert!(result.success),
             OutboundSendResponse::Rejected(error) => {
                 panic!("replay must not be rejected as {}", error.code)
             }
         }
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.quiet_hours_rejected_total, 0);
     }
 
     #[tokio::test]
@@ -1439,12 +1802,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
+            Arc::clone(&diagnostics),
         ));
         let (result_tx, result_rx) = oneshot::channel();
         tx.try_send(OutboundTask {
@@ -1460,6 +1825,10 @@ mod tests {
             }
             _ => panic!("queued quiet-hours task must be rejected, not sent"),
         }
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.quiet_hours_rejected_total, 1);
+        assert_eq!(counters.rejected_429_total, 1);
+        assert_eq!(counters.completed_total, 0);
         drop(tx);
         worker.await.unwrap();
     }

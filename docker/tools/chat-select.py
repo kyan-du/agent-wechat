@@ -81,6 +81,18 @@ BUILD_PROFILES = {
 }
 
 FRIDA_BIN = shutil.which("frida") or "/usr/local/bin/frida"
+FRIDA_ENUM_TIMEOUT = 10
+FRIDA_READY_TIMEOUT = 5
+FRIDA_HOOK_TIMEOUT = 4
+MAX_ENUM_ATTEMPTS = 1
+_START_TIME = time.monotonic()
+_DIAGNOSTICS = {"used_frida": False, "frida_attach_count": 0}
+
+
+class FridaError(RuntimeError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
 def log(msg):
@@ -96,10 +108,20 @@ def is_official_account(username):
 
 
 def result_json(ok, **kwargs):
-    """Print JSON result and exit."""
-    out = {"ok": ok, **kwargs}
+    """Print a redacted, machine-readable result and exit."""
+    out = {
+        "ok": ok,
+        "usedFrida": _DIAGNOSTICS["used_frida"],
+        "fridaAttachCount": _DIAGNOSTICS["frida_attach_count"],
+        "durationMs": int((time.monotonic() - _START_TIME) * 1000),
+        **kwargs,
+    }
     print(json.dumps(out))
     sys.exit(0 if ok else 1)
+
+
+def fail(code, message, **kwargs):
+    result_json(False, errorCode=code, error=message, **kwargs)
 
 
 def get_pid():
@@ -144,11 +166,11 @@ def get_profile(pid):
     if not build_id:
         return None, "Could not read WeChat BuildID"
     prefix = build_id[:8]
-    log(f"[chat-select] BuildID: {build_id[:16]}... prefix={prefix}")
+    log(f"[chat-select] Build profile matched={prefix in BUILD_PROFILES}")
     profile = BUILD_PROFILES.get(prefix)
     if not profile:
-        return None, f"Unknown BuildID prefix: {prefix}. Known: {list(BUILD_PROFILES.keys())}"
-    log(f"[chat-select] Profile: SELECT_SESSION=0x{profile['SELECT_SESSION']:x} USERNAME_OFF=0x{profile['USERNAME_OFF']:x}")
+        return None, "Unsupported WeChat build"
+    log(f"[chat-select] Profile arch={profile['ARCH']}")
     return profile, None
 
 
@@ -162,7 +184,7 @@ def find_chat_item_from_a11y():
             env={**os.environ, "QT_ACCESSIBILITY": "1", "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1"}
         )
         if r.returncode != 0:
-            log(f"[chat-select] a11y-dump failed: {r.stderr}")
+            log(f"[chat-select] a11y-dump failed exit_code={r.returncode}")
             return None
 
         tree = json.loads(r.stdout)
@@ -178,10 +200,10 @@ def find_chat_item_from_a11y():
         b = item["bounds"]
         cx = b["x"] + b["width"] // 2
         cy = b["y"] + b["height"] // 2
-        log(f"[chat-select] Found chat item: name={item.get('name', '?')!r} bounds={b} -> click ({cx}, {cy})")
+        log(f"[chat-select] Found live chat-list click target bounds={b}")
         return (cx, cy)
-    except Exception as e:
-        log(f"[chat-select] a11y error: {e}")
+    except Exception:
+        log("[chat-select] a11y inspection failed")
         return None
 
 
@@ -280,9 +302,12 @@ ATTACH_COUNT_PATH = "/tmp/agent-wechat-frida-attach-count"
 
 
 def record_frida_attach():
+    _DIAGNOSTICS["used_frida"] = True
+    _DIAGNOSTICS["frida_attach_count"] += 1
     try:
         try:
-            n = int(open(ATTACH_COUNT_PATH, encoding="utf-8").read().strip() or "0")
+            with open(ATTACH_COUNT_PATH, encoding="utf-8") as fh:
+                n = int(fh.read().strip() or "0")
         except (OSError, ValueError):
             n = 0
         with open(ATTACH_COUNT_PATH, "w", encoding="utf-8") as fh:
@@ -291,14 +316,17 @@ def record_frida_attach():
         pass
 
 
-def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
-    """Run a frida script, return output lines."""
+def run_frida_script(pid, script_path, timeout=FRIDA_ENUM_TIMEOUT, stop_on="SCRIPT_DONE"):
+    """Run a bounded Frida script and require its terminal marker."""
     record_frida_attach()
-    proc = subprocess.Popen(
-        [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8", "-q"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE, text=True, bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8", "-q"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE, text=True, bufsize=1,
+        )
+    except OSError as exc:
+        raise FridaError("FRIDA_ATTACH_FAILED", "Frida could not start") from exc
     try:
         lines = read_lines_until(proc, timeout, stop_on=stop_on)
     finally:
@@ -311,19 +339,37 @@ def run_frida_script(pid, script_path, timeout=30, stop_on="SCRIPT_DONE"):
             proc.wait(timeout=3)
         except Exception:
             proc.kill()
-        time.sleep(1)  # ensure frida fully detaches before next attach
+        time.sleep(0.2)
+    if any("Failed to attach" in line or "Unable to attach" in line for line in lines):
+        raise FridaError("FRIDA_ATTACH_FAILED", "Frida attach failed")
+    if stop_on and not any(stop_on in line for line in lines):
+        raise FridaError("FRIDA_ATTACH_TIMEOUT", "Frida attach timed out")
     return lines
 
 
 def run_frida_bg(pid, script_path):
-    """Start frida in background, wait for READY, return process."""
+    """Start Frida and fail closed unless the hook reports READY in time."""
     record_frida_attach()
-    proc = subprocess.Popen(
-        [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        stdin=subprocess.PIPE, text=True, bufsize=1,
-    )
-    read_lines_until(proc, 10, stop_on="READY")
+    try:
+        proc = subprocess.Popen(
+            [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE, text=True, bufsize=1,
+        )
+    except OSError as exc:
+        raise FridaError("FRIDA_ATTACH_FAILED", "Frida could not start") from exc
+    try:
+        lines = read_lines_until(proc, FRIDA_READY_TIMEOUT, stop_on="READY")
+        if any("Failed to attach" in line or "Unable to attach" in line for line in lines):
+            raise FridaError("FRIDA_ATTACH_FAILED", "Frida attach failed")
+        if not any("READY" in line for line in lines):
+            raise FridaError("FRIDA_ATTACH_TIMEOUT", "Frida hook readiness timed out")
+    except FridaError:
+        kill_frida(proc)
+        raise
+    except (OSError, ValueError) as exc:
+        kill_frida(proc)
+        raise FridaError("FRIDA_ATTACH_FAILED", "Frida readiness check failed") from exc
     return proc
 
 
@@ -470,12 +516,12 @@ if (!manager) {{
 }}
 """)
 
-    for attempt in range(3):
+    for attempt in range(MAX_ENUM_ATTEMPTS):
         if attempt > 0:
             log(f"[chat-select] Enumerate retry {attempt}...")
             time.sleep(2)
         log(f"[chat-select] Running Frida enumerate script (attempt {attempt})...")
-        lines = run_frida_script(pid, "/tmp/_cs_enum.js", timeout=45)
+        lines = run_frida_script(pid, "/tmp/_cs_enum.js")
         # Parse raw sessions from Frida output (raw vector index -> username)
         raw_sessions = []  # [(raw_index, username), ...] in vector order
         vector_base = None
@@ -500,7 +546,7 @@ if (!manager) {{
             raw_sessions.sort(key=lambda x: x[0])
 
             gh_count = sum(1 for _, u in raw_sessions if is_official_account(u))
-            log(f"[chat-select] Raw vector: {len(raw_sessions)} sessions ({gh_count} official accounts), base={vector_base} count={vector_count}")
+            log(f"[chat-select] Raw vector sessions={len(raw_sessions)} official_accounts={gh_count} count={vector_count}")
 
             # Build filtered index: skip official accounts, re-number from 0
             # selectSession() uses indices that exclude official accounts
@@ -513,9 +559,9 @@ if (!manager) {{
                 filtered_idx += 1
 
             if current_sel:
-                log(f"[chat-select] Current selection: {current_sel}")
+                log("[chat-select] Current selection identity available=true")
 
-            log(f"[chat-select] Filtered: {len(sessions)} sessions (excluded {gh_count} official accounts)")
+            log(f"[chat-select] Filtered sessions={len(sessions)} excluded_official={gh_count}")
 
             return sessions, vector_base, vector_count, current_sel
     return {}, None, 0, None
@@ -529,7 +575,7 @@ def select_by_index(pid, profile, target_index, click_coords, vector_base, vecto
     # Register that holds the index argument: x1 on aarch64, rsi on x86_64
     reg = "x1" if profile.get("ARCH") == "aarch64" else "rsi"
 
-    log(f"[chat-select] Hooking selectSession, target_index={target_index}")
+    log("[chat-select] Preparing bounded selection hook")
 
     write_js("/tmp/_cs_select.js", f"""
 var w = Process.getModuleByName("wechat");
@@ -573,12 +619,12 @@ function readFilteredUsername(filteredIdx) {{
     return "<oob-filtered:" + filteredIdx + ">";
 }}
 
-console.log("READY target_filtered=" + TARGET + " -> " + readFilteredUsername(TARGET));
+console.log("READY");
 
 var hook = Interceptor.attach(addr, {{
     onEnter: function(args) {{
         var orig = args[1].toInt32();
-        console.log("REDIRECT " + orig + " -> " + TARGET + " (" + readFilteredUsername(TARGET) + ")");
+        console.log("REDIRECT");
         args[1] = ptr(TARGET);
         this.context.{reg} = TARGET;
     }},
@@ -592,24 +638,37 @@ var hook = Interceptor.attach(addr, {{
 """)
 
     proc = run_frida_bg(pid, "/tmp/_cs_select.js")
+    lines = []
+    try:
+        # The interceptor must always be detached, including click spawn/timeout
+        # failures, or it could redirect a later manual click.
+        cx, cy = click_coords
+        log("[chat-select] Clicking verified chat-list target")
+        try:
+            click_result = subprocess.run(
+                ["/opt/tools/click", str(cx), str(cy)],
+                timeout=5,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FridaError("CHAT_CLICK_TIMEOUT", "Chat-list click timed out") from exc
+        except OSError as exc:
+            raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed") from exc
+        if click_result.returncode != 0:
+            raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed")
+        log("[chat-select] Click completed")
 
-    # Click the chat item via the click tool
-    cx, cy = click_coords
-    log(f"[chat-select] Clicking at ({cx}, {cy})...")
-    click_result = subprocess.run(["/opt/tools/click", str(cx), str(cy)],
-                                 timeout=5, capture_output=True, text=True)
-    log(f"[chat-select] Click result: {click_result.stdout.strip()}")
+        # Read output looking for DETACHED confirmation (hook fires once then
+        # detaches). Bounded read: if the click did not produce a selectSession
+        # call the hook never fires and we give up after the deadline.
+        lines = read_lines_until(proc, FRIDA_HOOK_TIMEOUT, stop_on="DETACHED")
+    finally:
+        kill_frida(proc)
 
-    # Read output looking for DETACHED confirmation (hook fires once then
-    # detaches). Bounded read: if the click did not produce a selectSession
-    # call the hook never fires and we give up after the deadline.
-    lines = read_lines_until(proc, 5, stop_on="DETACHED")
-
-    kill_frida(proc)
-
-    redirected = any("REDIRECT" in l for l in lines)
+    redirected = any("REDIRECT" in line for line in lines)
     if not redirected:
-        log(f"[chat-select] No REDIRECT seen in hook output. All lines: {lines}")
+        log("[chat-select] Selection hook did not redirect")
     return redirected
 
 
@@ -617,7 +676,7 @@ def main():
     # Parse args: chat-select [--force] [--verify-only] [--click-xy X Y] <username>
     args = sys.argv[1:]
     if not args:
-        result_json(False, error="Usage: chat-select [--force|--verify-only] [--click-xy X Y] <username> | chat-select --list")
+        fail("INVALID_ARGUMENT", "Invalid chat-select arguments")
 
     force = False
     verify_only = False
@@ -634,30 +693,40 @@ def main():
             i += 1
         elif args[i] == "--click-xy":
             if i + 2 >= len(args):
-                result_json(False, error="--click-xy requires X Y arguments")
-            click_xy = (int(args[i + 1]), int(args[i + 2]))
+                fail("INVALID_ARGUMENT", "Invalid click coordinates")
+            try:
+                x = int(args[i + 1])
+                y = int(args[i + 2])
+            except ValueError:
+                fail("INVALID_ARGUMENT", "Invalid click coordinates")
+            if not (0 <= x <= 32767 and 0 <= y <= 32767):
+                fail("INVALID_ARGUMENT", "Invalid click coordinates")
+            click_xy = (x, y)
             i += 3
         else:
             positional.append(args[i])
             i += 1
 
     if not positional:
-        result_json(False, error="Usage: chat-select [--force|--verify-only] [--click-xy X Y] <username> | chat-select --list")
+        fail("INVALID_ARGUMENT", "Invalid chat-select arguments")
 
     pid = get_pid()
     if not pid:
-        result_json(False, error="WeChat is not running")
-    log(f"[chat-select] WeChat PID={pid}")
+        fail("WECHAT_NOT_RUNNING", "WeChat is not running")
+    log("[chat-select] WeChat process found")
 
     profile, err = get_profile(pid)
     if not profile:
-        result_json(False, error=err)
+        fail("UNSUPPORTED_WECHAT_BUILD", "WeChat build is not supported")
 
     # Enumerate sessions
     log("[chat-select] Enumerating sessions...")
-    sessions, vector_base, vector_count, current_sel = enumerate_sessions(pid, profile)
+    try:
+        sessions, vector_base, vector_count, current_sel = enumerate_sessions(pid, profile)
+    except FridaError as exc:
+        fail(exc.code, str(exc))
     if not sessions:
-        result_json(False, error="No sessions found. Is WeChat logged in with chats visible?")
+        fail("FRIDA_ENUMERATION_FAILED", "Live chat identity could not be enumerated")
 
     # --list mode
     if positional[0] == "--list":
@@ -665,22 +734,18 @@ def main():
 
     target = positional[0]
     if is_official_account(target):
-        result_json(False, error=f"'{target}' is an official account and cannot be opened")
+        fail("OFFICIAL_ACCOUNT_UNSUPPORTED", "Official accounts cannot be opened")
     if target not in sessions:
-        matches = [u for u in sessions if target.lower() in u.lower()]
-        if matches:
-            result_json(False, error=f"'{target}' not found. Close matches: {matches[:5]}")
-        else:
-            result_json(False, error=f"'{target}' not found in session list ({len(sessions)} sessions)")
+        fail("TARGET_NOT_FOUND", "Target was not found in the live session list")
 
     target_index = sessions[target]
-    log(f"[chat-select] Target: {target} -> index {target_index}")
+    log("[chat-select] Exact target found in live session list")
 
     if verify_only:
         if current_sel == target:
             result_json(True, username=target, index=target_index, skipped=True, verified=True)
         log("[chat-select] Current conversation does not match target (identities redacted)")
-        result_json(False, error="Target conversation is not active", verified=False)
+        fail("TARGET_NOT_ACTIVE", "Target conversation is not active", verified=False)
 
     # Already-selected short-circuit: if the target chat is ALREADY the current
     # selection, the right-hand pane is already showing it — there is nothing
@@ -691,7 +756,7 @@ def main():
     # from WeChat's current-session pointer on every invocation, so there is
     # no stale skip decision for force to override.
     if current_sel == target:
-        log(f"[chat-select] Target already selected (current_sel={current_sel}), skipping (force={force})")
+        log("[chat-select] Exact target already selected")
         result_json(True, username=target, index=target_index, skipped=True, verified=True)
 
     # Find click coordinates: use --click-xy if provided, else fall back to a11y
@@ -699,25 +764,36 @@ def main():
     if not click_coords:
         click_coords = find_chat_item_from_a11y()
     if not click_coords:
-        result_json(False, error="No clickable chat item found in a11y tree. Is the chat list visible?")
+        fail("A11Y_CLICK_TARGET_UNAVAILABLE", "No live chat-list click target is available")
 
     # Hook and click
     if not vector_base:
-        result_json(False, error="Session vector base address not found")
-    ok = select_by_index(pid, profile, target_index, click_coords, vector_base, vector_count)
+        fail("FRIDA_SESSION_VECTOR_UNAVAILABLE", "Live session vector is unavailable")
+    try:
+        ok = select_by_index(pid, profile, target_index, click_coords, vector_base, vector_count)
+    except FridaError as exc:
+        fail(exc.code, str(exc))
     if not ok:
-        result_json(False, error="Hook did not fire. Click may not have landed on a chat item.")
+        fail("FRIDA_HOOK_FAILED", "Frida selection hook did not complete")
 
     # The hook firing only proves that WeChat handled a selection call. Re-read
     # the live current-session pointer and require an exact target match before
     # allowing callers to type or send anything.
-    _, _, _, confirmed_sel = enumerate_sessions(pid, profile)
+    try:
+        _, _, _, confirmed_sel = enumerate_sessions(pid, profile)
+    except FridaError as exc:
+        fail(exc.code, str(exc), verified=False)
     if confirmed_sel != target:
         log("[chat-select] Target confirmation failed after selection (identities redacted)")
-        result_json(False, error="Target conversation could not be confirmed", verified=False)
+        fail("TARGET_CONFIRMATION_FAILED", "Target conversation could not be confirmed", verified=False)
 
     result_json(True, username=target, index=target_index, skipped=False, verified=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FridaError as exc:
+        fail(exc.code, str(exc))
+    except (OSError, subprocess.SubprocessError):
+        fail("CHAT_SELECT_TOOL_FAILED", "Chat selection tool failed")
