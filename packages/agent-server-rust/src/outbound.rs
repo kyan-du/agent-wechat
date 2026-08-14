@@ -186,6 +186,8 @@ pub struct OutboundStatus {
 #[serde(rename_all = "camelCase")]
 pub struct OutboundDiagnosticsSnapshot {
     pub enqueued_total: u64,
+    /// Worker executions that reached a terminal send result. Replays and
+    /// pre-execution rejections are intentionally excluded.
     pub completed_total: u64,
     pub failed_total: u64,
     pub rejected_429_total: u64,
@@ -1288,6 +1290,10 @@ mod tests {
                 .start("queue-full", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.rejected_429_total, 1);
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
     }
 
     #[test]
@@ -1365,6 +1371,10 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
     }
 
     #[tokio::test]
@@ -1386,13 +1396,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
-            Arc::new(OutboundDiagnostics::default()),
+            Arc::clone(&diagnostics),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -1436,6 +1447,10 @@ mod tests {
                 .start("second", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.queue_expired_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
 
         drop(tx);
         worker.await.unwrap();
@@ -1460,13 +1475,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
-            Arc::new(OutboundDiagnostics::default()),
+            Arc::clone(&diagnostics),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -1509,6 +1525,10 @@ mod tests {
                 .start("second", Instant::now() + Duration::from_secs(1)),
             IdempotencyStart::Inserted
         ));
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.queue_expired_total, 1);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
 
         drop(tx);
         worker.await.unwrap();
@@ -1601,6 +1621,48 @@ mod tests {
         assert_eq!(snapshot.uncertain_total, 1);
         assert_eq!(snapshot.last_queue_wait_ms, 23);
         assert_eq!(snapshot.max_queue_wait_ms, 23);
+    }
+
+    #[test]
+    fn pause_resume_and_uncertain_completion_are_counted_once() {
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+        sender.pause();
+        sender.pause();
+        sender.resume();
+        sender.resume();
+        sender.diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_result_uncertain".into()),
+            error: None,
+            commit_attempted: true,
+        });
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.pause_total, 1);
+        assert_eq!(counters.resume_total, 1);
+        assert_eq!(counters.completed_total, 1);
+        assert_eq!(counters.failed_total, 1);
+        assert_eq!(counters.uncertain_total, 1);
     }
 
     #[test]
@@ -1715,6 +1777,10 @@ mod tests {
                 panic!("replay must not be rejected as {}", error.code)
             }
         }
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.quiet_hours_rejected_total, 0);
     }
 
     #[tokio::test]
@@ -1736,13 +1802,14 @@ mod tests {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
             Arc::clone(&idempotency),
             usage,
-            Arc::new(OutboundDiagnostics::default()),
+            Arc::clone(&diagnostics),
         ));
         let (result_tx, result_rx) = oneshot::channel();
         tx.try_send(OutboundTask {
@@ -1758,6 +1825,10 @@ mod tests {
             }
             _ => panic!("queued quiet-hours task must be rejected, not sent"),
         }
+        let counters = diagnostics.snapshot();
+        assert_eq!(counters.quiet_hours_rejected_total, 1);
+        assert_eq!(counters.rejected_429_total, 1);
+        assert_eq!(counters.completed_total, 0);
         drop(tx);
         worker.await.unwrap();
     }

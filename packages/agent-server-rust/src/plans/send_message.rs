@@ -91,6 +91,30 @@ fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<S
         .map(|error| format!("target_confirmation_{}", error.code()))
 }
 
+fn is_unverifiable_chat_selection(code: &str) -> bool {
+    matches!(
+        code,
+        "CHAT_SELECT_FAILED"
+            | "CHAT_SELECT_TIMEOUT"
+            | "CHAT_SELECT_INVALID_RESPONSE"
+            | "FRIDA_ATTACH_TIMEOUT"
+            | "FRIDA_ATTACH_FAILED"
+            | "FRIDA_ENUMERATION_FAILED"
+            | "FRIDA_HOOK_FAILED"
+            | "FRIDA_SESSION_VECTOR_UNAVAILABLE"
+            | "TARGET_CONFIRMATION_FAILED"
+            | "CHAT_CLICK_TIMEOUT"
+            | "CHAT_CLICK_FAILED"
+    )
+}
+
+fn fail_chat_selection(plan_state: &mut SendMessagePlanState, code: String) {
+    if is_unverifiable_chat_selection(&code) {
+        crate::outbound::outbound_sender().trip_kill_switch(&code);
+    }
+    plan_state.diagnostic_error = Some(code);
+}
+
 fn reset_after_popup(plan_state: &mut SendMessagePlanState) -> Result<(), &'static str> {
     if plan_state.send_action_executed {
         plan_state.diagnostic_error = Some("popup_after_send_action".to_string());
@@ -212,10 +236,7 @@ impl Plan for SendMessagePlan {
                     let result = open_chat(&params.chat_id, true, click_xy).await;
                     if let Some(error) = target_confirmation_error(&result, &params.chat_id) {
                         tracing::warn!("[send] target confirmation failed code={error}");
-                        if error == "FRIDA_ATTACH_TIMEOUT" || error == "FRIDA_ATTACH_FAILED" {
-                            crate::outbound::outbound_sender().trip_kill_switch(&error);
-                        }
-                        plan_state.diagnostic_error = Some(error);
+                        fail_chat_selection(plan_state, error);
                         plan_state.open_result = Some(result);
                         return None;
                     }
@@ -303,10 +324,7 @@ impl Plan for SendMessagePlan {
                             target_confirmation_error(&live_target, &params.chat_id)
                         {
                             tracing::warn!("[send] pre-send target rescan failed code={error}");
-                            if error == "FRIDA_ATTACH_TIMEOUT" || error == "FRIDA_ATTACH_FAILED" {
-                                crate::outbound::outbound_sender().trip_kill_switch(&error);
-                            }
-                            plan_state.diagnostic_error = Some(error);
+                            fail_chat_selection(plan_state, error);
                             return None;
                         }
                     }
@@ -451,6 +469,34 @@ mod tests {
             duration_ms: Some(0),
             error_code: None,
             error: None,
+        }
+    }
+
+    #[test]
+    fn all_unverifiable_fallback_codes_are_safety_critical() {
+        for code in [
+            "CHAT_SELECT_FAILED",
+            "CHAT_SELECT_TIMEOUT",
+            "CHAT_SELECT_INVALID_RESPONSE",
+            "FRIDA_ATTACH_TIMEOUT",
+            "FRIDA_ATTACH_FAILED",
+            "FRIDA_ENUMERATION_FAILED",
+            "FRIDA_HOOK_FAILED",
+            "FRIDA_SESSION_VECTOR_UNAVAILABLE",
+            "TARGET_CONFIRMATION_FAILED",
+            "CHAT_CLICK_TIMEOUT",
+            "CHAT_CLICK_FAILED",
+        ] {
+            assert!(is_unverifiable_chat_selection(code), "{code}");
+        }
+        for ordinary in [
+            "UNSUPPORTED_WECHAT_BUILD",
+            "TARGET_NOT_FOUND",
+            "OFFICIAL_ACCOUNT_UNSUPPORTED",
+            "TARGET_NOT_ACTIVE",
+            "INVALID_ARGUMENT",
+        ] {
+            assert!(!is_unverifiable_chat_selection(ordinary), "{ordinary}");
         }
     }
 

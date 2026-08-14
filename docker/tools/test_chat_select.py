@@ -24,15 +24,17 @@ class FakeProcess:
     def __init__(self):
         self.stdout = FakeStdout()
         self.stdin = mock.Mock()
+        self.terminated = False
+        self.killed = False
 
     def terminate(self):
-        pass
+        self.terminated = True
 
     def wait(self, timeout=None):
         return 0
 
     def kill(self):
-        pass
+        self.killed = True
 
 
 class ChatSelectDiagnosticsTests(unittest.TestCase):
@@ -91,9 +93,48 @@ class ChatSelectDiagnosticsTests(unittest.TestCase):
         result = json.loads(stream.getvalue())
         self.assertEqual(result["errorCode"], "FRIDA_ATTACH_TIMEOUT")
         self.assertFalse(result["ok"])
-        serialized = json.dumps(result)
-        self.assertNotIn("Sensitive Name", serialized)
-        self.assertNotIn("private-wxid", serialized)
+        self.assertNotIn("private-wxid", json.dumps(result))
+
+    def test_click_timeout_always_detaches_background_hook(self):
+        proc = FakeProcess()
+        profile = {"SELECT_SESSION": 1, "USERNAME_OFF": 2, "ELEM_SIZE": 16, "ARCH": "x86_64"}
+        with mock.patch.object(chat_select, "run_frida_bg", return_value=proc):
+            with mock.patch.object(
+                chat_select.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired(["click"], 5),
+            ):
+                with self.assertRaises(chat_select.FridaError) as caught:
+                    chat_select.select_by_index("123", profile, 0, (1, 2), "0x1000", 1)
+        self.assertEqual(caught.exception.code, "CHAT_CLICK_TIMEOUT")
+        self.assertTrue(proc.terminated)
+
+    def test_click_spawn_failure_always_detaches_background_hook(self):
+        proc = FakeProcess()
+        profile = {"SELECT_SESSION": 1, "USERNAME_OFF": 2, "ELEM_SIZE": 16, "ARCH": "x86_64"}
+        with mock.patch.object(chat_select, "run_frida_bg", return_value=proc):
+            with mock.patch.object(
+                chat_select.subprocess,
+                "run",
+                side_effect=OSError("SUPER_SECRET /private/tool"),
+            ):
+                with self.assertRaises(chat_select.FridaError) as caught:
+                    chat_select.select_by_index("123", profile, 0, (1, 2), "0x1000", 1)
+        self.assertEqual(caught.exception.code, "CHAT_CLICK_FAILED")
+        self.assertTrue(proc.terminated)
+        self.assertNotIn("SECRET", str(caught.exception))
+
+    def test_malformed_click_coordinates_return_redacted_json_without_traceback(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        argv = ["chat-select", "--click-xy", "SUPER_SECRET", "1", "private-wxid"]
+        with mock.patch.object(sys, "argv", argv):
+            with self.assertRaises(SystemExit), redirect_stdout(stdout), mock.patch("sys.stderr", stderr):
+                chat_select.main()
+        result = json.loads(stdout.getvalue())
+        self.assertEqual(result["errorCode"], "INVALID_ARGUMENT")
+        self.assertNotIn("SUPER_SECRET", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":

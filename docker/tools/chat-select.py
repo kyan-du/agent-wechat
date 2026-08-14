@@ -633,22 +633,35 @@ var hook = Interceptor.attach(addr, {{
 """)
 
     proc = run_frida_bg(pid, "/tmp/_cs_select.js")
+    lines = []
+    try:
+        # The interceptor must always be detached, including click spawn/timeout
+        # failures, or it could redirect a later manual click.
+        cx, cy = click_coords
+        log("[chat-select] Clicking verified chat-list target")
+        try:
+            click_result = subprocess.run(
+                ["/opt/tools/click", str(cx), str(cy)],
+                timeout=5,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FridaError("CHAT_CLICK_TIMEOUT", "Chat-list click timed out") from exc
+        except OSError as exc:
+            raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed") from exc
+        if click_result.returncode != 0:
+            raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed")
+        log("[chat-select] Click completed")
 
-    # Click the chat item via the click tool
-    cx, cy = click_coords
-    log("[chat-select] Clicking verified chat-list target")
-    click_result = subprocess.run(["/opt/tools/click", str(cx), str(cy)],
-                                 timeout=5, capture_output=True, text=True)
-    log(f"[chat-select] Click completed exit_code={click_result.returncode}")
+        # Read output looking for DETACHED confirmation (hook fires once then
+        # detaches). Bounded read: if the click did not produce a selectSession
+        # call the hook never fires and we give up after the deadline.
+        lines = read_lines_until(proc, FRIDA_HOOK_TIMEOUT, stop_on="DETACHED")
+    finally:
+        kill_frida(proc)
 
-    # Read output looking for DETACHED confirmation (hook fires once then
-    # detaches). Bounded read: if the click did not produce a selectSession
-    # call the hook never fires and we give up after the deadline.
-    lines = read_lines_until(proc, FRIDA_HOOK_TIMEOUT, stop_on="DETACHED")
-
-    kill_frida(proc)
-
-    redirected = any("REDIRECT" in l for l in lines)
+    redirected = any("REDIRECT" in line for line in lines)
     if not redirected:
         log("[chat-select] Selection hook did not redirect")
     return redirected
@@ -676,7 +689,14 @@ def main():
         elif args[i] == "--click-xy":
             if i + 2 >= len(args):
                 fail("INVALID_ARGUMENT", "Invalid click coordinates")
-            click_xy = (int(args[i + 1]), int(args[i + 2]))
+            try:
+                x = int(args[i + 1])
+                y = int(args[i + 2])
+            except ValueError:
+                fail("INVALID_ARGUMENT", "Invalid click coordinates")
+            if not (0 <= x <= 32767 and 0 <= y <= 32767):
+                fail("INVALID_ARGUMENT", "Invalid click coordinates")
+            click_xy = (x, y)
             i += 3
         else:
             positional.append(args[i])
