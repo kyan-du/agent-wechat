@@ -109,7 +109,7 @@ mod tests {
         std::env::set_var("AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", "1000");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_JITTER_MS", "0");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", "5000");
-        // Keep this route fixture independent of the runner's local timezone.
+        // This test exercises pause/resume, not the host's local quiet-hours clock.
         std::env::set_var("AGENT_WECHAT_QUIET_START_MIN", "0");
         std::env::set_var("AGENT_WECHAT_QUIET_END_MIN", "0");
         std::env::remove_var("AGENT_WECHAT_OUTBOUND_DISABLED");
