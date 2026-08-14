@@ -156,23 +156,91 @@ pub fn count_protected_outbound_idempotency(conn: &Connection) -> usize {
     .max(0) as usize
 }
 
-pub fn outbound_generation_seq(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
+pub fn count_outbound_generation_clock(conn: &Connection) -> usize {
     conn.query_row(
-        "SELECT generation FROM outbound_idempotency_seq WHERE key = ?1",
-        params![key],
-        |row| row.get(0),
+        "SELECT count(*) FROM outbound_idempotency_clock",
+        [],
+        |row| row.get::<_, i64>(0),
     )
-    .optional()
+    .unwrap_or(0)
+    .max(0) as usize
 }
 
-pub fn allocate_outbound_generation(conn: &Connection, key: &str) -> rusqlite::Result<i64> {
+pub fn allocate_outbound_generation(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row(
-        "INSERT INTO outbound_idempotency_seq (key, generation) VALUES (?1, 1)
-         ON CONFLICT(key) DO UPDATE SET generation = generation + 1
-         RETURNING generation",
-        params![key],
+        "UPDATE outbound_idempotency_clock
+         SET next_generation = next_generation + 1
+         WHERE id = 1
+         RETURNING next_generation - 1",
+        [],
         |row| row.get(0),
     )
+}
+
+#[derive(Debug)]
+pub enum OutboundAdmit {
+    Inserted(i64),
+    InProgress,
+    NeedsReconciliation,
+    Completed(SendResult),
+    Capacity,
+}
+
+pub fn admit_outbound_claim(
+    conn: &Connection,
+    key: &str,
+    ttl: std::time::Duration,
+    max_rows: usize,
+) -> rusqlite::Result<OutboundAdmit> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = admit_outbound_claim_locked(conn, key, ttl, max_rows);
+    match &outcome {
+        Ok(_) => conn.execute_batch("COMMIT")?,
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+    outcome
+}
+
+fn admit_outbound_claim_locked(
+    conn: &Connection,
+    key: &str,
+    ttl: std::time::Duration,
+    max_rows: usize,
+) -> rusqlite::Result<OutboundAdmit> {
+    expire_outbound_if_stale(conn, key)?;
+    if let Some(record) = get_outbound_idempotency(conn, key)? {
+        if record.state.is_completed_execution() {
+            return Ok(OutboundAdmit::Completed(record.result.unwrap_or(
+                SendResult {
+                    success: false,
+                    error_code: Some("REPLAY_UNAVAILABLE".to_string()),
+                    error: Some("REPLAY_UNAVAILABLE".to_string()),
+                    commit_attempted: false,
+                },
+            )));
+        }
+        if matches!(
+            record.state,
+            OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
+        ) {
+            return Ok(OutboundAdmit::InProgress);
+        }
+        if record.state == OutboundIdempotencyState::NeedsReconciliation {
+            return Ok(OutboundAdmit::NeedsReconciliation);
+        }
+    }
+    if count_protected_outbound_idempotency(conn) >= max_rows {
+        return Ok(OutboundAdmit::Capacity);
+    }
+    if let Some(generation) = insert_outbound_queued(conn, key, ttl)? {
+        return Ok(OutboundAdmit::Inserted(generation));
+    }
+    if let Some(generation) = claim_reusable_outbound_queued(conn, key, ttl)? {
+        return Ok(OutboundAdmit::Inserted(generation));
+    }
+    Ok(OutboundAdmit::InProgress)
 }
 
 pub fn insert_outbound_queued(
@@ -182,7 +250,7 @@ pub fn insert_outbound_queued(
 ) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    let generation = allocate_outbound_generation(conn, key)?;
+    let generation = allocate_outbound_generation(conn)?;
     let changed = conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
@@ -200,7 +268,7 @@ pub fn claim_reusable_outbound_queued(
 ) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    let generation = allocate_outbound_generation(conn, key)?;
+    let generation = allocate_outbound_generation(conn)?;
     let changed = conn.execute(
         "UPDATE outbound_idempotency
          SET state = 'queued',
@@ -487,7 +555,7 @@ pub fn reject_outbound_pre_execution(
     }
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    let generation = allocate_outbound_generation(conn, key)?;
+    let generation = allocate_outbound_generation(conn)?;
     let changed = conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
@@ -517,7 +585,7 @@ pub fn reject_outbound_unless_active_or_completed(
 ) -> rusqlite::Result<()> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    let generation = allocate_outbound_generation(conn, key)?;
+    let generation = allocate_outbound_generation(conn)?;
     conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
@@ -651,10 +719,12 @@ mod tests {
                 completed_at TEXT,
                 generation INTEGER NOT NULL DEFAULT 0
              );
-             CREATE TABLE IF NOT EXISTS outbound_idempotency_seq (
-                key TEXT PRIMARY KEY,
-                generation INTEGER NOT NULL
-             );",
+             CREATE TABLE IF NOT EXISTS outbound_idempotency_clock (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                next_generation INTEGER NOT NULL
+             );
+             INSERT OR IGNORE INTO outbound_idempotency_clock (id, next_generation)
+             VALUES (1, 1);",
         )
         .unwrap();
         conn
@@ -1034,7 +1104,7 @@ mod tests {
         assert!(get_outbound_idempotency(&conn, "aba-key")
             .unwrap()
             .is_none());
-        assert_eq!(outbound_generation_seq(&conn, "aba-key").unwrap(), Some(1));
+        assert_eq!(count_outbound_generation_clock(&conn), 1);
 
         let stale = open_test_conn(&path);
         let fresh = open_test_conn(&path);
@@ -1086,6 +1156,77 @@ mod tests {
         assert_eq!(count_outbound_idempotency(&conn), 20);
         assert_eq!(count_protected_outbound_idempotency(&conn), 20);
         assert!(count_protected_outbound_idempotency(&conn) > 3);
+    }
+
+    #[test]
+    fn independent_connections_do_not_oversubscribe_protected_capacity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cap-atomic.db");
+        open_test_conn(&path);
+        let barrier = Arc::new(Barrier::new(2));
+        let inserted = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for i in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                let inserted = Arc::clone(&inserted);
+                let path = path.clone();
+                scope.spawn(move || {
+                    let conn = open_test_conn(&path);
+                    barrier.wait();
+                    match admit_outbound_claim(
+                        &conn,
+                        &format!("cap-key-{i}"),
+                        Duration::from_secs(60),
+                        1,
+                    )
+                    .unwrap()
+                    {
+                        OutboundAdmit::Inserted(_) => {
+                            inserted.fetch_add(1, Ordering::SeqCst);
+                        }
+                        OutboundAdmit::Capacity => {}
+                        other => panic!("unexpected admit result: {other:?}"),
+                    }
+                });
+            }
+        });
+
+        let conn = open_test_conn(&path);
+        assert_eq!(inserted.load(Ordering::SeqCst), 1);
+        assert_eq!(count_protected_outbound_idempotency(&conn), 1);
+    }
+
+    #[test]
+    fn global_clock_stays_one_row_across_high_cardinality_and_restart() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("clock.db");
+        let conn = open_test_conn(&path);
+        for i in 0..80 {
+            assert!(reject_outbound_pre_execution(
+                &conn,
+                &format!("rej-card-{i}"),
+                None,
+                OutboundIdempotencyState::Rejected,
+                "QUEUE_FULL",
+                Duration::from_millis(1),
+            )
+            .unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        sweep_outbound_idempotency(&conn, 1).unwrap();
+        assert_eq!(count_outbound_generation_clock(&conn), 1);
+        let first = allocate_outbound_generation(&conn).unwrap();
+
+        let restarted = open_test_conn(&path);
+        assert_eq!(count_outbound_generation_clock(&restarted), 1);
+        let second = allocate_outbound_generation(&restarted).unwrap();
+        assert!(second > first);
+        let claimed = insert_outbound_queued(&restarted, "after-restart", Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        assert!(claimed >= second);
+        assert_eq!(count_outbound_generation_clock(&restarted), 1);
     }
 }
 

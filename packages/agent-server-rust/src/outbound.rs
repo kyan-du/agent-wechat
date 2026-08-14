@@ -22,13 +22,14 @@ use crate::{
     db::{
         get_db,
         queries::{
-            claim_reusable_outbound_queued, complete_outbound_result, count_outbound_idempotency,
+            admit_outbound_claim, complete_outbound_result, count_outbound_idempotency,
             count_protected_outbound_idempotency, expire_outbound_if_stale,
-            get_outbound_idempotency, insert_outbound_queued, mark_outbound_needs_reconciliation,
-            mark_outbound_queued_needs_reconciliation, mark_outbound_sending,
-            mark_outbound_sending_needs_reconciliation, reconcile_outbound_idempotency,
-            reject_outbound_pre_execution, reject_outbound_unless_active_or_completed,
-            sweep_outbound_idempotency, OutboundIdempotencyRecord, OutboundIdempotencyState,
+            get_outbound_idempotency, mark_outbound_needs_reconciliation,
+            mark_outbound_queued_needs_reconciliation,
+            mark_outbound_sending, mark_outbound_sending_needs_reconciliation,
+            reconcile_outbound_idempotency, reject_outbound_pre_execution,
+            reject_outbound_unless_active_or_completed, sweep_outbound_idempotency, OutboundAdmit,
+            OutboundIdempotencyRecord, OutboundIdempotencyState,
         },
         try_get_db,
     },
@@ -1462,25 +1463,6 @@ enum IdempotencyStart {
     Capacity,
 }
 
-fn replay_existing_record(record: OutboundIdempotencyRecord) -> IdempotencyStart {
-    if record.state.is_completed_execution() {
-        IdempotencyStart::Completed(
-            record
-                .result
-                .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
-        )
-    } else if matches!(
-        record.state,
-        OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
-    ) {
-        IdempotencyStart::InProgress
-    } else if record.state == OutboundIdempotencyState::NeedsReconciliation {
-        IdempotencyStart::NeedsReconciliation
-    } else {
-        IdempotencyStart::Capacity
-    }
-}
-
 fn try_claim_idempotency(key: &str, ttl: Duration) -> rusqlite::Result<IdempotencyStart> {
     try_claim_idempotency_limited(key, ttl, idempotency_max_rows())
 }
@@ -1495,41 +1477,16 @@ fn try_claim_idempotency_limited(
         return Err(hostile_sqlite_error());
     }
     let db = get_db();
-    expire_outbound_if_stale(&db, key)?;
     if let Err(error) = sweep_outbound_idempotency(&db, max_rows) {
         log_persist_failure("sweep", &error);
     }
-    if count_protected_outbound_idempotency(&db) >= max_rows {
-        return Ok(match get_outbound_idempotency(&db, key)? {
-            Some(record) => replay_existing_record(record),
-            None => IdempotencyStart::Capacity,
-        });
-    }
-    if let Some(generation) = insert_outbound_queued(&db, key, ttl)? {
-        return Ok(IdempotencyStart::Inserted(generation));
-    }
-    if let Some(generation) = claim_reusable_outbound_queued(&db, key, ttl)? {
-        return Ok(IdempotencyStart::Inserted(generation));
-    }
-    match get_outbound_idempotency(&db, key)? {
-        Some(record) if record.state.is_completed_execution() => Ok(IdempotencyStart::Completed(
-            record
-                .result
-                .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
-        )),
-        Some(record)
-            if matches!(
-                record.state,
-                OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
-            ) =>
-        {
-            Ok(IdempotencyStart::InProgress)
-        }
-        Some(record) if record.state == OutboundIdempotencyState::NeedsReconciliation => {
-            Ok(IdempotencyStart::NeedsReconciliation)
-        }
-        _ => Ok(IdempotencyStart::InProgress),
-    }
+    Ok(match admit_outbound_claim(&db, key, ttl, max_rows)? {
+        OutboundAdmit::Inserted(generation) => IdempotencyStart::Inserted(generation),
+        OutboundAdmit::Completed(result) => IdempotencyStart::Completed(result),
+        OutboundAdmit::InProgress => IdempotencyStart::InProgress,
+        OutboundAdmit::NeedsReconciliation => IdempotencyStart::NeedsReconciliation,
+        OutboundAdmit::Capacity => IdempotencyStart::Capacity,
+    })
 }
 
 fn persist_sending(key: &str, generation: Option<i64>) -> rusqlite::Result<()> {
@@ -2555,6 +2512,28 @@ mod tests {
                 .unwrap(),
             IdempotencyStart::Inserted(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn capacity_rejection_http_response_exposes_stable_code() {
+        let response =
+            OutboundSendResponse::Rejected(OutboundError::capacity(Duration::from_secs(2)))
+                .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["errorCode"], "IDEMPOTENCY_CAPACITY");
+        assert_eq!(json["commitAttempted"], false);
     }
 
     #[tokio::test]

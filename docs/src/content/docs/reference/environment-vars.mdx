@@ -21,6 +21,7 @@ description: All environment variables used by agent-wechat.
 | `AGENT_WECHAT_OUTBOUND_JITTER_MS` | `250` | Extra random delay added for burst smoothing only |
 | `AGENT_WECHAT_OUTBOUND_TASK_TTL_MS` | `60000` | Maximum time an outbound task may sit in the queue before expiring |
 | `AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS` | `600000` | How long completed `idempotencyKey` results are replayed |
+| `AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS` | `10000` | Maximum protected outbound idempotency rows (`queued`, `sending`, `uncertain`, `needs_reconciliation`). New unique keys return `429` with `errorCode: "IDEMPOTENCY_CAPACITY"` once this bound is reached |
 | `AGENT_WECHAT_OUTBOUND_DISABLED` | `false` | Emergency kill switch for all outbound sends |
 | `AGENT_WECHAT_READ_ONLY` | `false` | Read-only mode alias that disables outbound sends |
 | `DISPLAY` | `:99` | X11 display (set automatically by the container entrypoint) |

@@ -4,6 +4,7 @@ export * from "./types/index.js";
 // Export HTTP client
 export {
   WeChatClient,
+  WeChatHttpError,
   type WeChatClientOptions,
   type StatusResponse,
   type AuthStatus,

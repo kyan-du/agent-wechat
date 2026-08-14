@@ -41,6 +41,8 @@ If the outbound queue is full, the server returns `429 Too Many Requests` with a
 }
 ```
 
+If protected idempotency evidence (`queued`, `sending`, `uncertain`, `needs_reconciliation`) already occupies `AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS`, a new unique `idempotencyKey` is not inserted and the endpoint returns `429 Too Many Requests` with `errorCode: "IDEMPOTENCY_CAPACITY"` and `Retry-After`. Existing in-progress keys still return `IDEMPOTENCY_IN_PROGRESS`; completed keys still replay. Clients should treat `IDEMPOTENCY_CAPACITY` as backpressure and retry later with the same key only after capacity is free, or use a new key after an operator has cleared protected rows. The shared `WeChatHttpError.errorCode` field exposes this code on `429` responses.
+
 If outbound sending is disabled by read-only mode, the endpoint returns `503 Service Unavailable` with `errorCode: "OUTBOUND_DISABLED"`.
 
 `GET /api/status/outbound` reports queue `queueDepth`, `queueCapacity`, `availableCapacity`, current read-only state, idempotency cache size, and configured spacing/TTL values for operational monitoring. Its `diagnostics` object contains monotonic counters for enqueue/completion/failure, `429`, TTL expiry, pause/resume, duplicate suppression, uncertain sends, and budget/quiet-hours rejection, plus queue-wait and actual-send-interval durations. `completedTotal` and `failedTotal` count worker executions that reached a terminal send result; cached idempotency replays and pre-execution rejections are excluded. `chatSelectDiagnostics` reports open/verify fallback, Frida attach, timeout, and failure counts.

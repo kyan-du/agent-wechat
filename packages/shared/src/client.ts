@@ -30,6 +30,56 @@ export interface WeChatClientOptions {
   headers?: Record<string, string>;
 }
 
+export class WeChatHttpError extends Error {
+  readonly status: number;
+  readonly errorCode?: string;
+  readonly retryAfter?: number;
+
+  constructor(
+    status: number,
+    statusText: string,
+    body: string,
+    errorCode?: string,
+    retryAfter?: number,
+  ) {
+    super(
+      errorCode
+        ? `${status} ${statusText}: ${errorCode}`
+        : `${status} ${statusText}: ${body}`,
+    );
+    this.name = "WeChatHttpError";
+    this.status = status;
+    this.errorCode = errorCode;
+    this.retryAfter = retryAfter;
+  }
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? seconds : undefined;
+}
+
+async function throwHttpError(res: Response): Promise<never> {
+  const body = await res.text();
+  let errorCode: string | undefined;
+  try {
+    const parsed = JSON.parse(body) as { errorCode?: unknown };
+    if (typeof parsed.errorCode === "string") {
+      errorCode = parsed.errorCode;
+    }
+  } catch {
+    // Non-JSON error bodies stay generic.
+  }
+  throw new WeChatHttpError(
+    res.status,
+    res.statusText,
+    body,
+    errorCode,
+    parseRetryAfter(res.headers.get("retry-after")),
+  );
+}
+
 function normalizeUrl(base: string): string {
   const url = base.startsWith("http") ? base : `http://${base}`;
   return url.replace(/\/$/, "");
@@ -73,10 +123,7 @@ export class WeChatClient {
     const res = await fetch(`${this.base}${path}`, {
       headers: this.headers,
     });
-    if (!res.ok)
-      throw new Error(
-        `${res.status} ${res.statusText}: ${await res.text()}`,
-      );
+    if (!res.ok) await throwHttpError(res);
     return res.json() as Promise<T>;
   }
 
@@ -86,10 +133,7 @@ export class WeChatClient {
       headers: this.headers,
       body: body != null ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok)
-      throw new Error(
-        `${res.status} ${res.statusText}: ${await res.text()}`,
-      );
+    if (!res.ok) await throwHttpError(res);
     return res.json() as Promise<T>;
   }
 
@@ -98,10 +142,7 @@ export class WeChatClient {
       method: "DELETE",
       headers: this.headers,
     });
-    if (!res.ok)
-      throw new Error(
-        `${res.status} ${res.statusText}: ${await res.text()}`,
-      );
+    if (!res.ok) await throwHttpError(res);
     return res.json() as Promise<T>;
   }
 
