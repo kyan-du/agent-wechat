@@ -24,7 +24,8 @@ use crate::{
         queries::{
             complete_outbound_result, count_outbound_idempotency, expire_outbound_if_stale,
             get_outbound_idempotency, insert_outbound_queued, reject_outbound_pre_execution,
-            update_outbound_state, OutboundIdempotencyRecord, OutboundIdempotencyState,
+            reject_outbound_unless_active_or_completed, update_outbound_state,
+            OutboundIdempotencyRecord, OutboundIdempotencyState,
         },
     },
     execution::run_execution_loop,
@@ -414,12 +415,21 @@ impl OutboundSender {
         let now = Instant::now();
         if self.control.is_read_only() {
             if let Some(key) = idempotency_key.as_deref() {
-                persist_rejection(
-                    key,
-                    OutboundIdempotencyState::Rejected,
-                    "OUTBOUND_DISABLED",
-                    self.config.idempotency_ttl,
-                );
+                match get_active_or_completed_idempotency(key) {
+                    IdempotencyReplay::Completed(result) => {
+                        cleanup_temp_files(&params);
+                        return OutboundSendResponse::Result(result);
+                    }
+                    IdempotencyReplay::InProgress => {
+                        cleanup_temp_files(&params);
+                        return OutboundSendResponse::Rejected(
+                            OutboundError::duplicate_in_progress(self.config.retry_after()),
+                        );
+                    }
+                    IdempotencyReplay::None => {
+                        persist_read_only_rejection(key, self.config.idempotency_ttl);
+                    }
+                }
             }
             cleanup_temp_files(&params);
             return OutboundSendResponse::Rejected(OutboundError::read_only());
@@ -850,6 +860,43 @@ fn persist_rejection(key: &str, state: OutboundIdempotencyState, error_code: &st
     let _ = reject_outbound_pre_execution(&db, key, state, error_code, ttl);
 }
 
+fn persist_read_only_rejection(key: &str, ttl: Duration) {
+    let db = get_db();
+    let _ = reject_outbound_unless_active_or_completed(
+        &db,
+        key,
+        OutboundIdempotencyState::Rejected,
+        "OUTBOUND_DISABLED",
+        ttl,
+    );
+}
+
+enum IdempotencyReplay {
+    None,
+    InProgress,
+    Completed(SendResult),
+}
+
+fn get_active_or_completed_idempotency(key: &str) -> IdempotencyReplay {
+    let db = get_db();
+    match get_outbound_idempotency(&db, key).ok().flatten() {
+        Some(record) if record.state.is_completed_execution() => IdempotencyReplay::Completed(
+            record
+                .result
+                .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
+        ),
+        Some(record)
+            if matches!(
+                record.state,
+                OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
+            ) =>
+        {
+            IdempotencyReplay::InProgress
+        }
+        _ => IdempotencyReplay::None,
+    }
+}
+
 fn count_persistent_idempotency() -> usize {
     try_get_db()
         .map(|db| count_outbound_idempotency(&db))
@@ -1215,6 +1262,166 @@ mod tests {
             get_idempotency_status("k").unwrap().state,
             OutboundIdempotencyState::Rejected
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_duplicate_does_not_overwrite_queued_idempotency() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("paused-queued", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+
+        match sender
+            .send(test_params("duplicate"), Some("paused-queued".into()))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::DuplicateInProgress);
+            }
+            _ => panic!("expected in-progress replay"),
+        }
+        assert_eq!(
+            get_idempotency_status("paused-queued").unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_duplicate_replays_terminal_idempotency() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("paused-terminal", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        persist_result(
+            "paused-terminal",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+
+        match sender
+            .send(test_params("duplicate"), Some("paused-terminal".into()))
+            .await
+        {
+            OutboundSendResponse::Result(result) => assert!(result.success),
+            OutboundSendResponse::Rejected(error) => {
+                panic!("terminal replay must not be rejected as {}", error.code)
+            }
+        }
+        assert_eq!(
+            get_idempotency_status("paused-terminal").unwrap().state,
+            OutboundIdempotencyState::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_after_paused_duplicate_replays_once_without_requeueing() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("resume-once", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+
+        match sender
+            .send(
+                test_params("duplicate while paused"),
+                Some("resume-once".into()),
+            )
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::DuplicateInProgress);
+            }
+            _ => panic!("expected paused duplicate to be treated as in-progress"),
+        }
+        sender.resume();
+        persist_sending("resume-once");
+        persist_result(
+            "resume-once",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        match sender
+            .send(test_params("replay after resume"), Some("resume-once".into()))
+            .await
+        {
+            OutboundSendResponse::Result(result) => assert!(result.success),
+            OutboundSendResponse::Rejected(error) => {
+                panic!("completed resume replay must not be rejected as {}", error.code)
+            }
+        }
+        assert_eq!(sender.status().queue_depth, 0);
     }
 
     #[tokio::test]

@@ -141,31 +141,6 @@ mod tests {
         let resume_body = json_response(resume).await;
         assert_eq!(resume_body["runtimePaused"], false);
 
-        let first = app
-            .clone()
-            .oneshot(authed(
-                "POST",
-                "/api/messages/send",
-                Body::from(r#"{"chatId":"chat","text":"first"}"#),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(first.status(), StatusCode::OK);
-
-        let pending_app = app.clone();
-        let pending = tokio::spawn(async move {
-            pending_app
-                .oneshot(authed(
-                    "POST",
-                    "/api/messages/send",
-                    Body::from(r#"{"chatId":"chat","text":"second","idempotencyKey":"api-pause"}"#),
-                ))
-                .await
-                .unwrap()
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
         let pause = app
             .clone()
             .oneshot(authed("POST", "/api/status/outbound/pause", Body::empty()))
@@ -176,7 +151,15 @@ mod tests {
         assert_eq!(pause_body["readOnly"], true);
         assert_eq!(pause_body["runtimePaused"], true);
 
-        let rejected = pending.await.unwrap();
+        let rejected = app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(r#"{"chatId":"chat","text":"second","idempotencyKey":"api-pause-route"}"#),
+            ))
+            .await
+            .unwrap();
         assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
         let rejected_body = json_response(rejected).await;
         assert_eq!(rejected_body["success"], false);

@@ -246,6 +246,34 @@ pub fn reject_outbound_pre_execution(
     Ok(())
 }
 
+pub fn reject_outbound_unless_active_or_completed(
+    conn: &Connection,
+    key: &str,
+    state: OutboundIdempotencyState,
+    error_code: &str,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<()> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    conn.execute(
+        "INSERT INTO outbound_idempotency
+            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at)
+         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5)
+         ON CONFLICT(key) DO UPDATE SET
+            state = excluded.state,
+            result_success = 0,
+            error_code = excluded.error_code,
+            error = excluded.error,
+            commit_attempted = 0,
+            expires_at = excluded.expires_at,
+            updated_at = excluded.updated_at,
+            completed_at = excluded.completed_at
+         WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed')",
+        params![key, state.as_str(), error_code, expires_at, now],
+    )?;
+    Ok(())
+}
+
 pub fn expire_outbound_if_stale(conn: &Connection, key: &str) -> rusqlite::Result<bool> {
     let changed = conn.execute(
         "UPDATE outbound_idempotency
