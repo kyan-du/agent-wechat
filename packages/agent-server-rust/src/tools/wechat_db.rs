@@ -298,8 +298,10 @@ mod tests {
             // Signal: reader is holding connection open
             b1.wait();
 
-            // Keep connection alive while writer tries to write
-            std::thread::sleep(Duration::from_millis(200));
+            // Hold long enough that a true exclusive-lock wait exceeds the
+            // writer's budget. A loaded CI runner can take >100ms to open
+            // SQLite without being locked.
+            std::thread::sleep(Duration::from_millis(500));
             drop(conn);
         });
 
@@ -320,9 +322,10 @@ mod tests {
             .unwrap();
             let elapsed = start.elapsed();
 
-            // Writer should complete quickly (< 100ms), not blocked by reader
+            // Unblocked writers finish well under this; a SHARED-lock wait
+            // lasts ~500ms until the reader drops.
             assert!(
-                elapsed < Duration::from_millis(100),
+                elapsed < Duration::from_millis(250),
                 "Writer was blocked for {:?} — immutable reader is holding locks!",
                 elapsed
             );
