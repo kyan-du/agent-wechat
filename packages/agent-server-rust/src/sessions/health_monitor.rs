@@ -27,6 +27,67 @@ const BACKOFF_DELAY_SECS: u64 = 30;
 const LOGIN_RESUME_COOLDOWN: Duration = Duration::from_secs(8);
 const LOGIN_RESUME_MAX_CLICKS: u32 = 5;
 
+/// Overlay that must not sit on top of a saved-account Log In click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeOverlay {
+    None,
+    Security,
+    Popup,
+    Settings,
+    ContactCard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoginResumeSnapshot {
+    state_id: Option<String>,
+    has_logged_in_user: bool,
+    overlay: ResumeOverlay,
+}
+
+impl LoginResumeSnapshot {
+    fn from_identified(
+        identified: &crate::ia::types::IdentifiedStates,
+        has_logged_in_user: bool,
+    ) -> Self {
+        let overlay = if identified
+            .popup
+            .as_ref()
+            .is_some_and(|popup| popup.state_id == "popup_security")
+        {
+            ResumeOverlay::Security
+        } else if identified.popup.is_some() {
+            ResumeOverlay::Popup
+        } else if identified.settings.is_some() {
+            ResumeOverlay::Settings
+        } else if identified.contact_card.is_some() {
+            ResumeOverlay::ContactCard
+        } else {
+            ResumeOverlay::None
+        };
+        Self {
+            state_id: identified
+                .main_window
+                .as_ref()
+                .map(|state| state.state_id.clone()),
+            has_logged_in_user,
+            overlay,
+        }
+    }
+
+    fn is_bare_login_account(&self) -> bool {
+        self.state_id.as_deref() == Some("login_account")
+            && self.has_logged_in_user
+            && self.overlay == ResumeOverlay::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeDecision {
+    Click,
+    Skip,
+    TripSecurity,
+}
+
 /// Click budget / cooldown for auto-resuming a previously logged-in account.
 /// Never clicks Switch Account. Stops once the UI leaves `login_account`.
 #[derive(Debug, Default)]
@@ -47,8 +108,8 @@ impl LoginResumePolicy {
         }
     }
 
-    fn should_click(&self, state_id: Option<&str>, has_logged_in_user: bool, now: Instant) -> bool {
-        if state_id != Some("login_account") || !has_logged_in_user {
+    fn should_click(&self, snap: &LoginResumeSnapshot, now: Instant) -> bool {
+        if !snap.is_bare_login_account() {
             return false;
         }
         if self.clicks >= LOGIN_RESUME_MAX_CLICKS {
@@ -58,6 +119,27 @@ impl LoginResumePolicy {
             None => true,
             Some(last) => now.saturating_duration_since(last) >= LOGIN_RESUME_COOLDOWN,
         }
+    }
+
+    fn decide(&self, snap: &LoginResumeSnapshot, now: Instant) -> ResumeDecision {
+        if snap.overlay == ResumeOverlay::Security {
+            return ResumeDecision::TripSecurity;
+        }
+        if self.should_click(snap, now) {
+            ResumeDecision::Click
+        } else {
+            ResumeDecision::Skip
+        }
+    }
+
+    /// Authoritative decision is the snapshot taken under the plan lock.
+    fn decide_after_lock(
+        &self,
+        _candidate: &LoginResumeSnapshot,
+        locked: &LoginResumeSnapshot,
+        now: Instant,
+    ) -> ResumeDecision {
+        self.decide(locked, now)
     }
 
     fn record_click(&mut self, now: Instant) {
@@ -217,56 +299,97 @@ pub fn spawn_health_monitor() {
                 check_and_kill(wechat_pid, &last_identified);
             }
 
-            let state_id = identified
-                .main_window
-                .as_ref()
-                .map(|state| state.state_id.as_str());
-            login_resume.observe(state_id);
-            if state_id != Some("login_account") {
+            let candidate = LoginResumeSnapshot::from_identified(
+                &identified,
+                session.logged_in_user.is_some(),
+            );
+            login_resume.observe(candidate.state_id.as_deref());
+            if candidate.state_id.as_deref() != Some("login_account") {
                 login_resume_exhausted_logged = false;
             }
 
-            if login_resume.should_click(state_id, session.logged_in_user.is_some(), Instant::now())
-            {
-                let Some(_plan_guard) = crate::execution::try_acquire_plan_lock() else {
+            match login_resume.decide(&candidate, Instant::now()) {
+                ResumeDecision::TripSecurity => {
+                    crate::outbound::outbound_sender().trip_kill_switch("security_popup");
                     continue;
-                };
-                tracing::info!(
-                    "[health] LoginAccount with saved session; clicking Log In (attempt {})",
-                    login_resume.clicks + 1
-                );
-                let action = crate::ia::actions::click_login();
-                let frame = identified
-                    .main_window
-                    .as_ref()
-                    .and_then(|state| state.frame.clone());
-                let emit = |_event: crate::ia::types::SubscriptionEvent| {};
-                match crate::execution::actions::execute_action(
-                    &action,
-                    frame.as_ref(),
-                    &exec_options,
-                    &a11y,
-                    &emit,
-                )
-                .await
-                {
-                    Ok(_) => tracing::info!("[health] Saved-account Log In click dispatched"),
-                    Err(error) => tracing::warn!(
-                        "[health] Saved-account Log In click failed: {}",
-                        error.detail
-                    ),
                 }
-                login_resume.record_click(Instant::now());
-            } else if state_id == Some("login_account")
-                && session.logged_in_user.is_some()
-                && login_resume.budget_exhausted()
-                && !login_resume_exhausted_logged
-            {
-                tracing::warn!(
-                    "[health] LoginAccount resume click budget exhausted; waiting for explicit login"
-                );
-                login_resume_exhausted_logged = true;
+                ResumeDecision::Skip => {
+                    if candidate.state_id.as_deref() == Some("login_account")
+                        && candidate.has_logged_in_user
+                        && candidate.overlay == ResumeOverlay::None
+                        && login_resume.budget_exhausted()
+                        && !login_resume_exhausted_logged
+                    {
+                        tracing::warn!(
+                            "[health] LoginAccount resume click budget exhausted; waiting for explicit login"
+                        );
+                        login_resume_exhausted_logged = true;
+                    }
+                    continue;
+                }
+                ResumeDecision::Click => {}
             }
+
+            let Some(_plan_guard) = crate::execution::try_acquire_plan_lock() else {
+                continue;
+            };
+
+            let session = match get_session("default") {
+                Some(s) if s.status == "running" => s,
+                _ => continue,
+            };
+            let exec_options = ExecOptions {
+                session: Some(session.clone()),
+                timeout_ms: 10_000,
+            };
+            let a11y = match get_a11y_desktop(&exec_options).await {
+                Ok(tree) => tree,
+                Err(_) => continue,
+            };
+            let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
+            let identified = identify_states(&a11y, &screenshot);
+            let locked = LoginResumeSnapshot::from_identified(
+                &identified,
+                session.logged_in_user.is_some(),
+            );
+
+            match login_resume.decide_after_lock(&candidate, &locked, Instant::now()) {
+                ResumeDecision::TripSecurity => {
+                    crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+                    continue;
+                }
+                ResumeDecision::Skip => continue,
+                ResumeDecision::Click => {}
+            }
+
+            let Some(action) = crate::ia::actions::saved_account_login_click(&a11y) else {
+                continue;
+            };
+            let frame = identified
+                .main_window
+                .as_ref()
+                .and_then(|state| state.frame.clone());
+            tracing::info!(
+                "[health] LoginAccount with saved session; clicking Log In (attempt {})",
+                login_resume.clicks + 1
+            );
+            let emit = |_event: crate::ia::types::SubscriptionEvent| {};
+            match crate::execution::actions::execute_action(
+                &action,
+                frame.as_ref(),
+                &exec_options,
+                &a11y,
+                &emit,
+            )
+            .await
+            {
+                Ok(_) => tracing::info!("[health] Saved-account Log In click dispatched"),
+                Err(error) => tracing::warn!(
+                    "[health] Saved-account Log In click failed code={}",
+                    error.diagnostic
+                ),
+            }
+            login_resume.record_click(Instant::now());
         }
     });
 }
@@ -315,27 +438,62 @@ fn check_and_kill(wechat_pid: i64, last_identified: &Instant) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ia::types::{IdentifiedState, IdentifiedStates};
+
+    fn snap(state: Option<&str>, user: bool, overlay: ResumeOverlay) -> LoginResumeSnapshot {
+        LoginResumeSnapshot {
+            state_id: state.map(str::to_string),
+            has_logged_in_user: user,
+            overlay,
+        }
+    }
+
+    fn bare_login(user: bool) -> LoginResumeSnapshot {
+        snap(Some("login_account"), user, ResumeOverlay::None)
+    }
+
+    fn identified(
+        main: Option<&str>,
+        popup: Option<&str>,
+        settings: bool,
+        card: bool,
+    ) -> IdentifiedStates {
+        let state = |id: &str, fsm: &str| IdentifiedState {
+            state_id: id.to_string(),
+            fsm: fsm.to_string(),
+            frame: None,
+        };
+        IdentifiedStates {
+            main_window: main.map(|id| state(id, "mainWindow")),
+            popup: popup.map(|id| state(id, "popup")),
+            contact_card: card.then(|| state("contact_card", "contactCard")),
+            settings: settings.then(|| state("settings", "settings")),
+        }
+    }
 
     #[test]
     fn clicks_login_account_only_when_session_has_saved_user() {
         let policy = LoginResumePolicy::default();
         let now = Instant::now();
-        assert!(policy.should_click(Some("login_account"), true, now));
-        assert!(!policy.should_click(Some("login_account"), false, now));
-        assert!(!policy.should_click(Some("login_qr"), true, now));
-        assert!(!policy.should_click(Some("login_phone_confirm"), true, now));
-        assert!(!policy.should_click(Some("chat"), true, now));
-        assert!(!policy.should_click(None, true, now));
+        assert!(policy.should_click(&bare_login(true), now));
+        assert!(!policy.should_click(&bare_login(false), now));
+        assert!(!policy.should_click(&snap(Some("login_qr"), true, ResumeOverlay::None), now));
+        assert!(!policy.should_click(
+            &snap(Some("login_phone_confirm"), true, ResumeOverlay::None),
+            now
+        ));
+        assert!(!policy.should_click(&snap(Some("chat"), true, ResumeOverlay::None), now));
+        assert!(!policy.should_click(&snap(None, true, ResumeOverlay::None), now));
     }
 
     #[test]
     fn cooldown_blocks_immediate_retry() {
         let mut policy = LoginResumePolicy::default();
         let now = Instant::now();
-        assert!(policy.should_click(Some("login_account"), true, now));
+        assert!(policy.should_click(&bare_login(true), now));
         policy.record_click(now);
-        assert!(!policy.should_click(Some("login_account"), true, now));
-        assert!(policy.should_click(Some("login_account"), true, now + LOGIN_RESUME_COOLDOWN));
+        assert!(!policy.should_click(&bare_login(true), now));
+        assert!(policy.should_click(&bare_login(true), now + LOGIN_RESUME_COOLDOWN));
     }
 
     #[test]
@@ -343,12 +501,12 @@ mod tests {
         let mut policy = LoginResumePolicy::default();
         let mut now = Instant::now();
         for _ in 0..LOGIN_RESUME_MAX_CLICKS {
-            assert!(policy.should_click(Some("login_account"), true, now));
+            assert!(policy.should_click(&bare_login(true), now));
             policy.record_click(now);
             now += LOGIN_RESUME_COOLDOWN;
         }
         assert!(policy.budget_exhausted());
-        assert!(!policy.should_click(Some("login_account"), true, now));
+        assert!(!policy.should_click(&bare_login(true), now));
     }
 
     #[test]
@@ -361,7 +519,7 @@ mod tests {
         assert!(policy.budget_exhausted());
         policy.observe(Some("login_phone_confirm"));
         assert!(!policy.budget_exhausted());
-        assert!(policy.should_click(Some("login_account"), true, now + LOGIN_RESUME_COOLDOWN));
+        assert!(policy.should_click(&bare_login(true), now + LOGIN_RESUME_COOLDOWN));
     }
 
     #[test]
@@ -369,8 +527,90 @@ mod tests {
         let mut policy = LoginResumePolicy::default();
         let now = Instant::now();
         policy.record_click(now);
-        assert!(!policy.should_click(Some("login_account"), true, now));
+        assert!(!policy.should_click(&bare_login(true), now));
         policy.reset();
-        assert!(policy.should_click(Some("login_account"), true, now));
+        assert!(policy.should_click(&bare_login(true), now));
+    }
+
+    #[test]
+    fn lock_reobserve_after_logout_does_not_click_or_spend_budget() {
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        let candidate = bare_login(true);
+        let locked = bare_login(false);
+        assert_eq!(policy.decide(&candidate, now), ResumeDecision::Click);
+        assert_eq!(
+            policy.decide_after_lock(&candidate, &locked, now),
+            ResumeDecision::Skip
+        );
+        assert_eq!(policy.clicks, 0);
+        assert!(!policy.budget_exhausted());
+    }
+
+    #[test]
+    fn lock_reobserve_after_login_plan_does_not_click() {
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        let candidate = bare_login(true);
+        let locked = snap(Some("chat"), true, ResumeOverlay::None);
+        assert_eq!(
+            policy.decide_after_lock(&candidate, &locked, now),
+            ResumeDecision::Skip
+        );
+        assert_eq!(policy.clicks, 0);
+    }
+
+    #[test]
+    fn overlays_skip_click_and_do_not_consume_budget() {
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        for overlay in [
+            ResumeOverlay::Popup,
+            ResumeOverlay::Settings,
+            ResumeOverlay::ContactCard,
+        ] {
+            let snap = snap(Some("login_account"), true, overlay);
+            assert_eq!(policy.decide(&snap, now), ResumeDecision::Skip);
+        }
+        assert_eq!(policy.clicks, 0);
+    }
+
+    #[test]
+    fn security_popup_trips_kill_switch_without_click_or_budget() {
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        let snap = snap(Some("login_account"), true, ResumeOverlay::Security);
+        assert_eq!(policy.decide(&snap, now), ResumeDecision::TripSecurity);
+        assert_eq!(policy.clicks, 0);
+        let from_tree = LoginResumeSnapshot::from_identified(
+            &identified(Some("login_account"), Some("popup_security"), false, false),
+            true,
+        );
+        assert_eq!(from_tree.overlay, ResumeOverlay::Security);
+        assert!(!from_tree.is_bare_login_account());
+    }
+
+    #[test]
+    fn from_identified_maps_ordinary_overlays() {
+        let popup = LoginResumeSnapshot::from_identified(
+            &identified(Some("login_account"), Some("popup_confirm"), false, false),
+            true,
+        );
+        assert_eq!(popup.overlay, ResumeOverlay::Popup);
+        let settings = LoginResumeSnapshot::from_identified(
+            &identified(Some("login_account"), None, true, false),
+            true,
+        );
+        assert_eq!(settings.overlay, ResumeOverlay::Settings);
+        let card = LoginResumeSnapshot::from_identified(
+            &identified(Some("login_account"), None, false, true),
+            true,
+        );
+        assert_eq!(card.overlay, ResumeOverlay::ContactCard);
+        let bare = LoginResumeSnapshot::from_identified(
+            &identified(Some("login_account"), None, false, false),
+            true,
+        );
+        assert!(bare.is_bare_login_account());
     }
 }

@@ -2064,6 +2064,26 @@ fn consume_persistence_failure(slot: &OnceLock<Mutex<Option<String>>>, key: &str
     }
 }
 
+#[cfg(test)]
+fn clear_persistence_faults() {
+    for slot in [
+        &FAIL_SENDING_PERSISTENCE_FOR,
+        &FAIL_RESULT_PERSISTENCE_FOR,
+        &FAIL_REJECTION_PERSISTENCE_FOR,
+        &FAIL_RECONCILE_PERSISTENCE_FOR,
+    ] {
+        if let Some(mutex) = slot.get() {
+            *mutex.lock().expect("persistence fault slot poisoned") = None;
+        }
+    }
+    if let Some(mutex) = FAIL_CLAIM_WITH_HOSTILE_ERROR.get() {
+        *mutex.lock().expect("claim fault slot poisoned") = false;
+    }
+    if let Some(mutex) = FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR.get() {
+        *mutex.lock().expect("reconcile fault slot poisoned") = false;
+    }
+}
+
 fn mark_needs_reconciliation(
     key: &str,
     generation: Option<i64>,
@@ -2337,6 +2357,7 @@ mod tests {
 
     fn clear_idempotency_rows() {
         init_test_db();
+        clear_persistence_faults();
     }
 
     fn test_executor() -> ExecuteSend {
@@ -4197,6 +4218,7 @@ mod p0c_tests {
 
     fn clear_idempotency_rows() {
         init_test_db();
+        super::clear_persistence_faults();
         let db = get_db();
         db.execute("DELETE FROM outbound_idempotency", []).unwrap();
     }
@@ -4613,7 +4635,10 @@ mod p0c_tests {
         let held_permit = Arc::clone(&sender.capacity).try_acquire_owned().unwrap();
 
         match sender
-            .send(test_params("second"), Some("queue-full".to_string()))
+            .send(
+                test_params("second"),
+                Some("p0c-queue-capacity-full".to_string()),
+            )
             .await
         {
             OutboundSendResponse::Rejected(error) => {
@@ -4622,7 +4647,7 @@ mod p0c_tests {
             }
             _ => panic!("expected queue full rejection"),
         }
-        let record = get_idempotency_status("queue-full").unwrap();
+        let record = get_idempotency_status("p0c-queue-capacity-full").unwrap();
         assert_eq!(record.state, OutboundIdempotencyState::Rejected);
         assert_eq!(
             record.result.unwrap().error_code.as_deref(),

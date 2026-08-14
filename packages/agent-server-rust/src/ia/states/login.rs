@@ -58,19 +58,12 @@ impl IAState for LoginAccountState {
     fn id(&self) -> &str { "login_account" }
 
     fn identify(&self, args: &IdentifyArgs) -> Result<IdentifyResult, String> {
-        let log_in_btn = query_selector(args.a11y, crate::ia::actions::SAVED_ACCOUNT_LOGIN_SELECTOR);
-        if log_in_btn.is_none() {
+        let Some(frame) = crate::ia::actions::find_saved_account_login_frame(args.a11y) else {
             return Ok(IdentifyResult { identified: false, frame: None });
-        }
-
-        let has_switch = query_selector(args.a11y, crate::ia::actions::SWITCH_ACCOUNT_SELECTOR).is_some();
-        if !has_switch {
-            return Ok(IdentifyResult { identified: false, frame: None });
-        }
-
+        };
         Ok(IdentifyResult {
             identified: true,
-            frame: find_frame_for(args.a11y, crate::ia::actions::SWITCH_ACCOUNT_SELECTOR),
+            frame: crate::ia::helpers::frame_hint_from_node(frame),
         })
     }
 
@@ -198,7 +191,9 @@ pub static LOGIN_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync:
 #[cfg(test)]
 mod tests {
     use crate::ia::actions::{
-        click_login, click_switch_account, SAVED_ACCOUNT_LOGIN_SELECTOR, SWITCH_ACCOUNT_SELECTOR,
+        click_login, click_switch_account, saved_account_login_click,
+        SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR, SAVED_ACCOUNT_LOGIN_SELECTOR,
+        SWITCH_ACCOUNT_SELECTOR,
     };
     use crate::ia::identify_states;
     use crate::ia::selectors::query_selector;
@@ -241,6 +236,56 @@ mod tests {
         )
     }
 
+    fn ghost_then_wechat_tree(ghost_login: bool, wechat_login: bool, wechat_switch: bool) -> A11yNode {
+        let mut wechat_kids = vec![node("label", "Current User Test", None)];
+        if wechat_login {
+            wechat_kids.push(A11yNode {
+                role: "push-button".into(),
+                name: "Log In".into(),
+                bounds: Some(Bounds {
+                    x: 640.0,
+                    y: 480.0,
+                    width: 80.0,
+                    height: 32.0,
+                }),
+                children: None,
+                parent_index: None,
+                window: None,
+                states: None,
+            });
+        }
+        if wechat_switch {
+            wechat_kids.push(node("push-button", "Switch Account", None));
+        }
+        let ghost = if ghost_login {
+            node(
+                "frame",
+                "OtherApp",
+                Some(vec![A11yNode {
+                    role: "push-button".into(),
+                    name: "Log In".into(),
+                    bounds: Some(Bounds {
+                        x: 10.0,
+                        y: 10.0,
+                        width: 40.0,
+                        height: 20.0,
+                    }),
+                    children: None,
+                    parent_index: None,
+                    window: None,
+                    states: None,
+                }]),
+            )
+        } else {
+            node("frame", "OtherApp", None)
+        };
+        node(
+            "desktop-frame",
+            "main",
+            Some(vec![ghost, node("frame", "WeChat", Some(wechat_kids))]),
+        )
+    }
+
     fn identified_main_id(tree: &A11yNode) -> Option<String> {
         identify_states(tree, "").main_window.map(|s| s.state_id)
     }
@@ -280,22 +325,41 @@ mod tests {
     }
 
     #[test]
-    fn click_login_selector_matches_en_and_zh_not_switch() {
+    fn click_login_selector_is_frame_scoped_and_skips_switch() {
         let Action::ClickSelector { selector } = click_login() else {
             panic!("click_login must be ClickSelector");
         };
-        assert_eq!(selector, SAVED_ACCOUNT_LOGIN_SELECTOR);
+        assert_eq!(selector, SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR);
 
         for name in ["Log In", "Open WeChat", "登录", "打开微信"] {
             let tree = node("push-button", name, None);
-            assert!(
-                query_selector(&tree, &selector).is_some(),
-                "login selector should match {name}"
-            );
+            assert!(query_selector(&tree, SAVED_ACCOUNT_LOGIN_SELECTOR).is_some());
         }
 
         let switch = node("push-button", "Switch Account", None);
+        assert!(query_selector(&switch, SAVED_ACCOUNT_LOGIN_SELECTOR).is_none());
         assert!(query_selector(&switch, &selector).is_none());
+    }
+
+    #[test]
+    fn ghost_log_in_without_paired_wechat_controls_is_not_login_account() {
+        let tree = ghost_then_wechat_tree(true, false, true);
+        assert_ne!(identified_main_id(&tree).as_deref(), Some("login_account"));
+    }
+
+    #[test]
+    fn paired_wechat_controls_win_over_earlier_ghost_log_in() {
+        let tree = ghost_then_wechat_tree(true, true, true);
+        let states = identify_states(&tree, "");
+        assert_eq!(
+            states.main_window.as_ref().map(|s| s.state_id.as_str()),
+            Some("login_account")
+        );
+        let action = saved_account_login_click(&tree).expect("paired login click");
+        let Action::ClickCoords { x, y } = action else {
+            panic!("expected exact bounds click");
+        };
+        assert_eq!((x, y), (680.0, 496.0));
     }
 
     #[test]

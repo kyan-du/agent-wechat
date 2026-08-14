@@ -50,9 +50,47 @@ pub const SAVED_ACCOUNT_LOGIN_SELECTOR: &str =
 pub const SWITCH_ACCOUNT_SELECTOR: &str =
     r#"push-button[name=/^(Switch Account|切换账号|切换帐号)$/]"#;
 
+/// Frame-scoped login click so a ghost "Log In" outside WeChat is ignored.
+pub const SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR: &str = concat!(
+    r#"frame[name=/^(WeChat|Weixin)$/] "#,
+    r#"push-button[name=/^(Log In|Open WeChat|登录|打开微信)$/]"#,
+);
+
+pub fn is_supported_wechat_frame(node: &super::types::A11yNode) -> bool {
+    node.role == "frame" && (node.name == "WeChat" || node.name == "Weixin")
+}
+
+/// WeChat/Weixin frame that contains both Log In and Switch Account.
+pub fn find_saved_account_login_frame(a11y: &super::types::A11yNode) -> Option<&super::types::A11yNode> {
+    if is_supported_wechat_frame(a11y)
+        && crate::ia::selectors::query_selector(a11y, SAVED_ACCOUNT_LOGIN_SELECTOR).is_some()
+        && crate::ia::selectors::query_selector(a11y, SWITCH_ACCOUNT_SELECTOR).is_some()
+    {
+        return Some(a11y);
+    }
+    let children = a11y.children.as_ref()?;
+    for child in children {
+        if let Some(found) = find_saved_account_login_frame(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Click the Log In control inside the paired saved-account frame.
+pub fn saved_account_login_click(a11y: &super::types::A11yNode) -> Option<Action> {
+    let frame = find_saved_account_login_frame(a11y)?;
+    let button = crate::ia::selectors::query_selector(frame, SAVED_ACCOUNT_LOGIN_SELECTOR)?;
+    let bounds = button.bounds.as_ref()?;
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return None;
+    }
+    Some(click_bounds(bounds))
+}
+
 pub fn click_login() -> Action {
     Action::ClickSelector {
-        selector: SAVED_ACCOUNT_LOGIN_SELECTOR.to_string(),
+        selector: SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR.to_string(),
     }
 }
 
