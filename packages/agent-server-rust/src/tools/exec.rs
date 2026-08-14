@@ -1,5 +1,5 @@
 use crate::ia::types::Session;
-use std::{collections::HashMap, process::Stdio, time::Duration};
+use std::{collections::HashMap, process::Stdio, sync::OnceLock, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
@@ -8,6 +8,30 @@ use tokio::{
 
 const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
 const TERMINATE_GRACE: Duration = Duration::from_millis(250);
+
+#[cfg(target_os = "linux")]
+static SUBREAPER_ENABLED: OnceLock<Result<(), i32>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn ensure_subreaper() -> Result<(), ()> {
+    SUBREAPER_ENABLED
+        .get_or_init(|| {
+            let result = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(1))
+            }
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|_| ())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_subreaper() -> Result<(), ()> {
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct CommandResult {
@@ -56,10 +80,6 @@ impl SupervisedChild {
             terminate_child_group(child, self.process_group).await;
         }
     }
-
-    fn disarm(&mut self) {
-        self.child = None;
-    }
 }
 
 impl Drop for SupervisedChild {
@@ -68,6 +88,7 @@ impl Drop for SupervisedChild {
             return;
         };
         let process_group = self.process_group;
+        signal_process(-process_group, libc::SIGTERM);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(terminate_child_group(child, process_group));
         } else {
@@ -112,33 +133,43 @@ fn process_group_members(_process_group: i32) -> Vec<i32> {
     Vec::new()
 }
 
-async fn terminate_child_group(mut child: Child, process_group: i32) {
-    // Stop descendants first so the direct child can reap them before it exits.
-    // This avoids leaving zombies behind under minimal container PID 1s.
-    let descendants = process_group_members(process_group);
-    for pid in &descendants {
-        signal_process(*pid, libc::SIGTERM);
+#[cfg(target_os = "linux")]
+fn reap_adopted_children(process_group: i32) {
+    loop {
+        let mut status = 0;
+        let reaped = unsafe { libc::waitpid(-process_group, &mut status, libc::WNOHANG) };
+        if reaped <= 0 {
+            break;
+        }
     }
-    tokio::time::sleep(TERMINATE_GRACE).await;
-    for pid in &descendants {
-        signal_process(*pid, libc::SIGKILL);
-    }
+}
 
+#[cfg(not(target_os = "linux"))]
+fn reap_adopted_children(_process_group: i32) {}
+
+async fn terminate_child_group(mut child: Child, process_group: i32) {
+    signal_process(-process_group, libc::SIGTERM);
     if tokio::time::timeout(TERMINATE_GRACE, child.wait())
         .await
         .is_err()
     {
-        signal_process(-process_group, libc::SIGTERM);
-        if tokio::time::timeout(TERMINATE_GRACE, child.wait())
-            .await
-            .is_err()
-        {
-            signal_process(-process_group, libc::SIGKILL);
-            let _ = child.wait().await;
-        }
+        signal_process(-process_group, libc::SIGKILL);
+        let _ = child.wait().await;
     }
-    // Catch any late fork in the group after the direct child was reaped.
+
+    // As a Linux subreaper, this process adopts descendants whose direct parent
+    // exited without waiting. Kill late forks, then reap every adopted group child.
     signal_process(-process_group, libc::SIGKILL);
+    let deadline = std::time::Instant::now() + TERMINATE_GRACE;
+    loop {
+        reap_adopted_children(process_group);
+        if process_group_members(process_group).is_empty() || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    reap_adopted_children(process_group);
 }
 
 async fn read_bounded(mut stream: impl AsyncRead + Unpin) -> Vec<u8> {
@@ -188,6 +219,10 @@ pub async fn exec_command(command: &str, args: &[&str], options: &ExecOptions) -
         env.entry("DISPLAY".into()).or_insert_with(|| ":99".into());
     }
 
+    if ensure_subreaper().is_err() {
+        return command_result(Vec::new(), b"Command failed to start".to_vec(), 1);
+    }
+
     let mut command_builder = Command::new(command);
     command_builder
         .args(args)
@@ -218,9 +253,8 @@ pub async fn exec_command(command: &str, args: &[&str], options: &ExecOptions) -
     let timeout = Duration::from_millis(options.timeout_ms);
     match tokio::time::timeout(timeout, child_ref.wait()).await {
         Ok(Ok(status)) => {
-            // A command must not leave background descendants holding pipes/hooks.
-            child.signal_group(libc::SIGKILL);
-            child.disarm();
+            // A successful direct child must not leave background descendants or pipe holders.
+            child.terminate_and_reap().await;
             command_result(
                 captured(stdout_task).await,
                 captured(stderr_task).await,
@@ -274,6 +308,14 @@ mod tests {
         (fields.next().unwrap(), fields.next().unwrap())
     }
 
+    fn non_waiting_parent_script(pids: &Path) -> String {
+        let code = format!(
+            "import os, subprocess, time; child=subprocess.Popen(['sleep','30']); open({:?},'w').write(f'{{os.getpid()}} {{child.pid}}'); time.sleep(30)",
+            pids.to_string_lossy()
+        );
+        format!("exec python3 -c {code:?}")
+    }
+
     #[tokio::test]
     async fn timeout_kills_and_reaps_parent_and_descendant() {
         let dir = TempDir::new().unwrap();
@@ -295,6 +337,45 @@ mod tests {
         assert_eq!(result.stderr, "Command timed out");
         let (parent, descendant) = pid_pair(&pids);
         wait_dead(parent).await;
+        wait_dead(descendant).await;
+    }
+
+    #[tokio::test]
+    async fn timeout_reaps_descendant_when_parent_never_waits() {
+        let dir = TempDir::new().unwrap();
+        let pids = dir.path().join("pids");
+        let script = non_waiting_parent_script(&pids);
+        let result = exec_command(
+            "sh",
+            &["-c", &script],
+            &ExecOptions {
+                session: None,
+                timeout_ms: 500,
+            },
+        )
+        .await;
+        assert_eq!(result.stderr, "Command timed out");
+        assert!(
+            pids.exists(),
+            "non-waiting parent did not publish child pid"
+        );
+        let (parent, descendant) = pid_pair(&pids);
+        wait_dead(parent).await;
+        wait_dead(descendant).await;
+    }
+
+    #[tokio::test]
+    async fn successful_parent_exit_still_reaps_background_descendant() {
+        let dir = TempDir::new().unwrap();
+        let pids = dir.path().join("pids");
+        let code = format!(
+            "import subprocess; child=subprocess.Popen(['sleep','30']); open({:?},'w').write(str(child.pid))",
+            pids.to_string_lossy()
+        );
+        let script = format!("exec python3 -c {code:?}");
+        let result = exec_command("sh", &["-c", &script], &ExecOptions::default()).await;
+        assert_eq!(result.exit_code, 0);
+        let descendant = fs::read_to_string(&pids).unwrap().parse().unwrap();
         wait_dead(descendant).await;
     }
 
@@ -330,10 +411,7 @@ mod tests {
     async fn cancellation_kills_and_reaps_parent_and_descendant() {
         let dir = TempDir::new().unwrap();
         let pids = dir.path().join("pids");
-        let script = format!(
-            "sleep 30 & child=$!; echo $$ $child > {}; wait $child",
-            pids.display()
-        );
+        let script = non_waiting_parent_script(&pids);
         let task = tokio::spawn(async move {
             exec_command(
                 "sh",
