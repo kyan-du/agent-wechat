@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::create_context;
 use crate::db::get_db;
-use crate::execution::run_execution_loop;
+use crate::execution::{run_execution_loop, ExecutionResult};
 use crate::ia::types::*;
 use crate::ia::{find_state_by_id, identify_states};
 use crate::outbound::outbound_sender;
@@ -287,12 +287,7 @@ pub async fn logout() -> Json<serde_json::Value> {
         &mut context,
         emit,
         cancel,
-        |_context, result| {
-            if result.success {
-                let db = get_db();
-                crate::db::queries::update_session_logged_in_user(&db, &session_id, None);
-            }
-        },
+        |_context, result| apply_logout_user_clear(result, &session_id),
     )
     .await;
 
@@ -528,5 +523,69 @@ fn subscription_event_to_login_event(event: SubscriptionEvent) -> LoginSubscript
         _ => LoginSubscriptionEvent::Status {
             message: format!("Unknown event: {}", event.event_type),
         },
+    }
+}
+
+/// Clear the saved user after a successful logout while PLAN_LOCK is still held.
+/// A failed or no-op update must not report logout success.
+pub(crate) fn apply_logout_user_clear(result: &mut ExecutionResult, session_id: &str) {
+    apply_logout_clear_result(result, || {
+        let db = get_db();
+        crate::db::queries::update_session_logged_in_user(&db, session_id, None)
+    });
+}
+
+pub(crate) fn apply_logout_clear_result(
+    result: &mut ExecutionResult,
+    clear: impl FnOnce() -> Result<(), &'static str>,
+) {
+    if !result.success {
+        return;
+    }
+    if clear().is_err() {
+        result.success = false;
+        result.error = Some("LOGOUT_USER_CLEAR_FAILED".to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logout_reports_failure_when_saved_user_clear_fails() {
+        let mut result = ExecutionResult {
+            success: true,
+            error: None,
+        };
+        apply_logout_clear_result(&mut result, || Err("SESSION_USER_UPDATE_MISMATCH"));
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("LOGOUT_USER_CLEAR_FAILED"));
+    }
+
+    #[test]
+    fn logout_keeps_success_when_saved_user_clear_persists() {
+        let mut result = ExecutionResult {
+            success: true,
+            error: None,
+        };
+        apply_logout_clear_result(&mut result, || Ok(()));
+        assert!(result.success);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn failed_logout_does_not_attempt_user_clear() {
+        let mut result = ExecutionResult {
+            success: false,
+            error: Some("Aborted".into()),
+        };
+        let mut called = false;
+        apply_logout_clear_result(&mut result, || {
+            called = true;
+            Ok(())
+        });
+        assert!(!called);
+        assert!(!result.success);
     }
 }

@@ -70,12 +70,12 @@ where
     P: crate::plans::Plan<PlanState = PS, Params = PA>,
     PS: Send,
     PA: Send,
-    F: FnOnce(&mut Context, &ExecutionResult),
+    F: FnOnce(&mut Context, &mut ExecutionResult),
 {
     let _plan_guard = PLAN_LOCK.lock().await;
-    let (result, plan_state) =
+    let (mut result, plan_state) =
         run_execution_loop_holding_plan_lock(plan, params, context, emit, cancel).await;
-    finish(context, &result);
+    finish(context, &mut result);
     (result, plan_state)
 }
 

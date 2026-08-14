@@ -263,7 +263,11 @@ async fn handle_detecting_user(
             if previous.as_ref().filter(|p| *p != &acct).is_some() {
                 queries::clear_session_data(&db, session_id);
             }
-            queries::update_session_logged_in_user(&db, session_id, Some(&acct));
+            if let Err(error) =
+                queries::update_session_logged_in_user(&db, session_id, Some(&acct))
+            {
+                tracing::error!("[login] persist logged_in_user failed code={error}");
+            }
 
             if !needs_key_extraction(&db, session_id, &acct) {
                 plan_state.phase = LoginPhase::Done;

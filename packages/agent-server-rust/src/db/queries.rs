@@ -674,18 +674,23 @@ pub fn update_session_logged_in_user(
     conn: &Connection,
     session_id: &str,
     logged_in_user: Option<&str>,
-) {
+) -> Result<(), &'static str> {
     let now = chrono::Utc::now().to_rfc3339();
     let login_state = if logged_in_user.is_some() {
         "logged_in"
     } else {
         "logged_out"
     };
-    conn.execute(
-        "UPDATE sessions SET logged_in_user = ?1, login_state = ?2, updated_at = ?3 WHERE id = ?4",
-        params![logged_in_user, login_state, now, session_id],
-    )
-    .ok();
+    let updated = conn
+        .execute(
+            "UPDATE sessions SET logged_in_user = ?1, login_state = ?2, updated_at = ?3 WHERE id = ?4",
+            params![logged_in_user, login_state, now, session_id],
+        )
+        .map_err(|_| "SESSION_USER_UPDATE_FAILED")?;
+    if updated != 1 {
+        return Err("SESSION_USER_UPDATE_MISMATCH");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1227,6 +1232,33 @@ mod tests {
             .unwrap();
         assert!(claimed >= second);
         assert_eq!(count_outbound_generation_clock(&restarted), 1);
+    }
+
+    #[test]
+    fn clearing_missing_session_user_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(dir.path().join("session-user.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                logged_in_user TEXT,
+                login_state TEXT,
+                updated_at TEXT
+             );",
+        )
+        .unwrap();
+        assert_eq!(
+            update_session_logged_in_user(&conn, "missing", None),
+            Err("SESSION_USER_UPDATE_MISMATCH")
+        );
+        conn.execute(
+            "INSERT INTO sessions (id, logged_in_user, login_state, updated_at)
+             VALUES ('s1', 'user', 'logged_in', 't')",
+            [],
+        )
+        .unwrap();
+        assert!(update_session_logged_in_user(&conn, "s1", None).is_ok());
+        assert!(get_session_logged_in_user(&conn, "s1").is_none());
     }
 }
 
