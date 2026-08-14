@@ -1,7 +1,9 @@
 use super::exec::{exec_command, ExecOptions};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const CURRENT_CHAT_PATH: &str = "/tmp/agent-wechat-current-chat";
+const CHAT_SELECT_TIMEOUT_MS: u64 = 50_000;
 
 pub fn cached_current_chat() -> Option<String> {
     std::fs::read_to_string(CURRENT_CHAT_PATH)
@@ -15,6 +17,7 @@ pub fn remember_current_chat(chat_id: &str) {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OpenChatResult {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,7 +29,48 @@ pub struct OpenChatResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_frida: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frida_attach_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSelectDiagnostics {
+    pub fallback_total: u64,
+    pub attach_total: u64,
+    pub timeout_total: u64,
+    pub failure_total: u64,
+    pub open_total: u64,
+    pub verify_total: u64,
+    pub last_duration_ms: u64,
+}
+
+static FALLBACK_TOTAL: AtomicU64 = AtomicU64::new(0);
+static ATTACH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static FAILURE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static OPEN_TOTAL: AtomicU64 = AtomicU64::new(0);
+static VERIFY_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_DURATION_MS: AtomicU64 = AtomicU64::new(0);
+
+pub fn diagnostics() -> ChatSelectDiagnostics {
+    let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+    ChatSelectDiagnostics {
+        fallback_total: load(&FALLBACK_TOTAL),
+        attach_total: load(&ATTACH_TOTAL),
+        timeout_total: load(&TIMEOUT_TOTAL),
+        failure_total: load(&FAILURE_TOTAL),
+        open_total: load(&OPEN_TOTAL),
+        verify_total: load(&VERIFY_TOTAL),
+        last_duration_ms: load(&LAST_DURATION_MS),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,7 +135,11 @@ pub fn confirm_opened_name(
     Ok(())
 }
 
-pub fn identity_needs_frida(opened_name: Option<&str>, target: &str, matching_usernames: &[String]) -> bool {
+pub fn identity_needs_frida(
+    opened_name: Option<&str>,
+    target: &str,
+    matching_usernames: &[String],
+) -> bool {
     confirm_opened_name(opened_name, target, matching_usernames).is_err()
 }
 
@@ -123,28 +171,78 @@ fn positional_chat_id<'a>(args: &[&'a str]) -> Option<&'a str> {
 }
 
 async fn run_chat_select(args: &[&str]) -> OpenChatResult {
-    let result = exec_command("chat-select", args, &ExecOptions::default()).await;
+    let verify_only = args.contains(&"--verify-only");
+    if verify_only {
+        VERIFY_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        OPEN_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let result = exec_command(
+        "chat-select",
+        args,
+        &ExecOptions {
+            session: None,
+            timeout_ms: CHAT_SELECT_TIMEOUT_MS,
+        },
+    )
+    .await;
 
     // Result JSON is on stdout regardless of exit code.
     if let Ok(parsed) = serde_json::from_str::<OpenChatResult>(&result.stdout) {
+        let attach_count = parsed.frida_attach_count.unwrap_or(0);
+        if parsed.used_frida == Some(true) || attach_count > 0 {
+            FALLBACK_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        ATTACH_TOTAL.fetch_add(attach_count, Ordering::Relaxed);
+        LAST_DURATION_MS.store(parsed.duration_ms.unwrap_or(0), Ordering::Relaxed);
+        if matches!(
+            parsed.error_code.as_deref(),
+            Some("FRIDA_ATTACH_TIMEOUT" | "CHAT_SELECT_TIMEOUT")
+        ) {
+            TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        if !parsed.ok {
+            FAILURE_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
         if parsed.ok {
-            if let Some(chat_id) = parsed.username.as_deref().or_else(|| positional_chat_id(args)) {
+            if let Some(chat_id) = parsed
+                .username
+                .as_deref()
+                .or_else(|| positional_chat_id(args))
+            {
                 remember_current_chat(chat_id);
             }
         }
         return parsed;
     }
 
+    FAILURE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let timed_out = result.stderr == "Command timed out";
+    if timed_out {
+        TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
     OpenChatResult {
         ok: false,
         username: None,
         index: None,
         skipped: None,
         verified: None,
-        error: Some(if result.stderr.is_empty() {
-            format!("chat-select exited with code {}", result.exit_code)
+        used_frida: None,
+        frida_attach_count: None,
+        duration_ms: None,
+        error_code: Some(
+            if timed_out {
+                "CHAT_SELECT_TIMEOUT"
+            } else {
+                "CHAT_SELECT_INVALID_RESPONSE"
+            }
+            .to_string(),
+        ),
+        error: Some(if timed_out {
+            "Chat selection timed out".to_string()
         } else {
-            result.stderr
+            "Chat selection failed without a valid diagnostic response".to_string()
         }),
     }
 }
@@ -160,6 +258,10 @@ mod tests {
             index: Some(1),
             skipped: Some(true),
             verified,
+            used_frida: Some(false),
+            frida_attach_count: Some(0),
+            duration_ms: Some(0),
+            error_code: None,
             error: None,
         }
     }

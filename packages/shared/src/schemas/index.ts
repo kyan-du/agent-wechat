@@ -154,6 +154,12 @@ export const openChatResultSchema = z.object({
   ok: z.boolean(),
   username: z.string().optional(),
   index: z.number().int().optional(),
+  skipped: z.boolean().optional(),
+  verified: z.boolean().optional(),
+  usedFrida: z.boolean().optional(),
+  fridaAttachCount: z.number().int().nonnegative().optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  errorCode: z.string().optional(),
   error: z.string().optional(),
 });
 

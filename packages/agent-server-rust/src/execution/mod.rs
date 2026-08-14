@@ -184,10 +184,7 @@ where
         if let Some(popup) = &context.state.popup {
             if crate::risk::is_security_popup(popup) {
                 crate::outbound::outbound_sender().trip_kill_switch("security_popup");
-                tracing::warn!(
-                    "[exec] security popup — outbound frozen: {:?}",
-                    popup.message.as_deref()
-                );
+                tracing::warn!("[exec] outbound frozen code=SECURITY_POPUP");
             }
         }
 
@@ -259,10 +256,9 @@ where
             let fail_on_error = plan.action_executed(&mut plan_state, &action_result);
             if let Err(error) = action_result {
                 tracing::warn!(
-                    "[exec] action failed ({}; commit_attempted={}): {}",
+                    "[exec] action failed code={} commit_attempted={}",
                     error.diagnostic,
-                    error.commit_attempted,
-                    error.detail
+                    error.commit_attempted
                 );
                 if fail_on_error {
                     return (

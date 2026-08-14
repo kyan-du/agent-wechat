@@ -1,12 +1,12 @@
 use super::Plan;
+use crate::db::get_db;
 use crate::execution::actions::ActionExecutionResult;
 use crate::ia::actions;
 use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
-use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
 use crate::sessions::manager::get_session;
-use crate::db::get_db;
+use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
 use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
@@ -53,6 +53,10 @@ fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResul
         index: None,
         skipped: Some(true),
         verified: Some(true),
+        used_frida: Some(false),
+        frida_attach_count: Some(0),
+        duration_ms: Some(0),
+        error_code: None,
         error: None,
     })
 }
@@ -74,6 +78,14 @@ fn load_matching_usernames(opened_name: Option<&str>) -> Option<Vec<String>> {
 }
 
 fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<String> {
+    if !result.ok {
+        return Some(
+            result
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "CHAT_SELECT_FAILED".to_string()),
+        );
+    }
     confirm_target(result, chat_id)
         .err()
         .map(|error| format!("target_confirmation_{}", error.code()))
@@ -190,14 +202,19 @@ impl Plan for SendMessagePlan {
 
                     let chat_list_item = query_selector(a11y, r#"list[name="Chats"] > list-item"#);
                     let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| crate::ia::actions::jittered_point(b))
+                        item.bounds
+                            .as_ref()
+                            .map(|b| crate::ia::actions::jittered_point(b))
                     });
 
                     // Always select, then require chat-select's live session
                     // rescan to prove the selected username equals the target.
                     let result = open_chat(&params.chat_id, true, click_xy).await;
                     if let Some(error) = target_confirmation_error(&result, &params.chat_id) {
-                        tracing::warn!("[send] target confirmation failed: {error}");
+                        tracing::warn!("[send] target confirmation failed code={error}");
+                        if error == "FRIDA_ATTACH_TIMEOUT" || error == "FRIDA_ATTACH_FAILED" {
+                            crate::outbound::outbound_sender().trip_kill_switch(&error);
+                        }
                         plan_state.diagnostic_error = Some(error);
                         plan_state.open_result = Some(result);
                         return None;
@@ -285,9 +302,11 @@ impl Plan for SendMessagePlan {
                         if let Some(error) =
                             target_confirmation_error(&live_target, &params.chat_id)
                         {
-                            tracing::warn!("[send] pre-send target rescan failed: {error}");
-                            plan_state.diagnostic_error =
-                                Some("pre_send_target_confirmation_failed".to_string());
+                            tracing::warn!("[send] pre-send target rescan failed code={error}");
+                            if error == "FRIDA_ATTACH_TIMEOUT" || error == "FRIDA_ATTACH_FAILED" {
+                                crate::outbound::outbound_sender().trip_kill_switch(&error);
+                            }
+                            plan_state.diagnostic_error = Some(error);
                             return None;
                         }
                     }
@@ -427,6 +446,10 @@ mod tests {
             index: Some(1),
             skipped: Some(false),
             verified,
+            used_frida: Some(false),
+            frida_attach_count: Some(0),
+            duration_ms: Some(0),
+            error_code: None,
             error: None,
         }
     }

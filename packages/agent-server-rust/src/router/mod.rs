@@ -124,6 +124,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn outbound_status_contains_only_redacted_diagnostics() {
+        init_test_server_state().await;
+        let response = build_router()
+            .oneshot(authed("GET", "/api/status/outbound", Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert!(body["diagnostics"].is_object());
+        assert!(body["chatSelectDiagnostics"].is_object());
+        let serialized = serde_json::to_string(&body).unwrap();
+        for sensitive in [
+            "message text",
+            "contact display name",
+            "/tmp/send_file_secret.pdf",
+            "Bearer secret-token",
+            "data:image/png;base64",
+            "qrData",
+        ] {
+            assert!(!serialized.contains(sensitive));
+        }
+    }
+
+    #[tokio::test]
     async fn authenticated_outbound_pause_rejects_queued_send_until_explicit_resume() {
         init_test_server_state().await;
         let app = build_router();
