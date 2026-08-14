@@ -224,6 +224,33 @@ pub fn execute_action<'a>(
                 }
                 Ok(commit_attempted)
             }
+
+            Action::PreCommitSequence { actions, cleanup } => {
+                let mut commit_attempted = false;
+                for action in actions {
+                    match execute_action(action, frame, options, a11y, emit).await {
+                        Ok(attempted) => commit_attempted |= attempted,
+                        Err(error) => {
+                            if !commit_attempted && !error.commit_attempted {
+                                for cleanup_action in cleanup {
+                                    if execute_action(cleanup_action, frame, options, a11y, emit)
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Err(ActionExecutionError {
+                                            diagnostic: "draft_cleanup_failed",
+                                            commit_attempted: false,
+                                            detail: "failed to clear pre-commit draft".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok(commit_attempted)
+            }
         }
     })
 }
@@ -381,6 +408,149 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.diagnostic, "message_input_failed");
         assert!(!error.commit_attempted);
+    }
+
+    #[tokio::test]
+    async fn chunk_failure_clears_partial_draft_before_returning() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("keys.log");
+        let count_path = dir.path().join("input-count");
+        write_tool(
+            &dir,
+            "input",
+            &format!(
+                "count=$(cat '{}' 2>/dev/null || echo 0); count=$((count + 1)); echo $count > '{}'; [ $count -eq 1 ]",
+                count_path.display(),
+                count_path.display()
+            ),
+        );
+        write_tool(
+            &dir,
+            "key",
+            &format!("echo \"$1\" >> '{}'", log_path.display()),
+        );
+        let old_path = with_test_path(&dir);
+        let action = Action::PreCommitSequence {
+            actions: vec![
+                Action::Type {
+                    text: "first chunk".to_string(),
+                    selector: None,
+                },
+                Action::Type {
+                    text: "second chunk".to_string(),
+                    selector: None,
+                },
+                Action::CommitKey {
+                    combo: "Return".to_string(),
+                },
+            ],
+            cleanup: vec![
+                Action::Key {
+                    combo: "ctrl+a".to_string(),
+                },
+                Action::Key {
+                    combo: "BackSpace".to_string(),
+                },
+            ],
+        };
+
+        let result = execute_action(
+            &action,
+            None,
+            &ExecOptions::default(),
+            &empty_a11y(),
+            &|_| {},
+        )
+        .await;
+        std::env::set_var("PATH", old_path);
+
+        let error = result.unwrap_err();
+        assert_eq!(error.diagnostic, "message_input_failed");
+        assert!(!error.commit_attempted);
+        assert_eq!(fs::read_to_string(log_path).unwrap(), "ctrl+a\nBackSpace\n");
+    }
+
+    #[tokio::test]
+    async fn failed_draft_cleanup_is_reported_fail_closed() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        write_tool(&dir, "input", "exit 24");
+        write_tool(&dir, "key", "exit 25");
+        let old_path = with_test_path(&dir);
+        let action = Action::PreCommitSequence {
+            actions: vec![Action::Type {
+                text: "partial".to_string(),
+                selector: None,
+            }],
+            cleanup: vec![Action::Key {
+                combo: "ctrl+a".to_string(),
+            }],
+        };
+
+        let result = execute_action(
+            &action,
+            None,
+            &ExecOptions::default(),
+            &empty_a11y(),
+            &|_| {},
+        )
+        .await;
+        std::env::set_var("PATH", old_path);
+
+        let error = result.unwrap_err();
+        assert_eq!(error.diagnostic, "draft_cleanup_failed");
+        assert!(!error.commit_attempted);
+    }
+
+    #[tokio::test]
+    async fn uncertain_commit_never_runs_draft_cleanup() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("keys.log");
+        write_tool(&dir, "input", "exit 0");
+        write_tool(
+            &dir,
+            "key",
+            &format!(
+                "echo \"$1\" >> '{}'; [ \"$1\" != Return ]",
+                log_path.display()
+            ),
+        );
+        let old_path = with_test_path(&dir);
+        let action = Action::PreCommitSequence {
+            actions: vec![
+                Action::Type {
+                    text: "complete draft".to_string(),
+                    selector: None,
+                },
+                Action::CommitKey {
+                    combo: "Return".to_string(),
+                },
+            ],
+            cleanup: vec![
+                Action::Key {
+                    combo: "ctrl+a".to_string(),
+                },
+                Action::Key {
+                    combo: "BackSpace".to_string(),
+                },
+            ],
+        };
+
+        let result = execute_action(
+            &action,
+            None,
+            &ExecOptions::default(),
+            &empty_a11y(),
+            &|_| {},
+        )
+        .await;
+        std::env::set_var("PATH", old_path);
+
+        let error = result.unwrap_err();
+        assert!(error.commit_attempted);
+        assert_eq!(fs::read_to_string(log_path).unwrap(), "Return\n");
     }
 
     #[tokio::test]

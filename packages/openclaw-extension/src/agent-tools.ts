@@ -1,6 +1,56 @@
 import type { ResolvedWeChatAccount } from "./types.js";
 import { WeChatClient } from "@agent-wechat/shared";
 import { loginStart, getActiveLoginState } from "./login.js";
+import { buildOpenClawConfirmedSend } from "./confirmed-send.js";
+
+export function createWeChatConfirmedSendTool(account: ResolvedWeChatAccount) {
+  const client = new WeChatClient({
+    baseUrl: account.serverUrl,
+    token: account.token,
+  });
+
+  return {
+    label: "WeChat Confirmed Send",
+    name: "wechat_send_confirmed",
+    description:
+      "Send one operator-reviewed text after a SIMILAR_CONTENT_CONFIRMATION_REQUIRED warning. Use only after the user explicitly confirms the exact recipient and text; never call automatically.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        chatId: { type: "string" },
+        text: { type: "string" },
+        confirmed: {
+          type: "boolean",
+          description: "Must be true only after explicit operator confirmation.",
+        },
+      },
+      required: ["chatId", "text", "confirmed"],
+    },
+    execute: async (_toolCallId: string, params: unknown) => {
+      const args = params as Record<string, unknown>;
+      const sendParams = buildOpenClawConfirmedSend({
+        chatId: String(args.chatId ?? ""),
+        text: String(args.text ?? ""),
+        confirmed: args.confirmed === true,
+      });
+      if (!sendParams) {
+        return {
+          content: [{ type: "text" as const, text: "Explicit operator confirmation is required." }],
+          details: { success: false, errorCode: "EXPLICIT_CONFIRMATION_REQUIRED" },
+        };
+      }
+      const result = await client.sendMessage(sendParams);
+      return {
+        content: [{
+          type: "text" as const,
+          text: result.success ? "Confirmed WeChat message sent." : (result.error ?? "Send failed"),
+        }],
+        details: result,
+      };
+    },
+  };
+}
 
 export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
   const client = new WeChatClient({

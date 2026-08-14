@@ -37,6 +37,8 @@ wx chats list
 
 # Send a message
 wx messages send <chatId> --text "Hello"
+# Only after reviewing a SIMILAR_CONTENT_CONFIRMATION_REQUIRED response:
+wx messages send <chatId> --text "Reviewed text" --confirm-similar
 ```
 
 ## Commands

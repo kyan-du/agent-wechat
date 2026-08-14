@@ -88,6 +88,12 @@ pub enum Action {
     Emit { event: SubscriptionEvent },
     #[serde(rename = "sequence")]
     Sequence { actions: Vec<Action> },
+    /// Runs cleanup only when a preparation action fails before the commit boundary.
+    #[serde(rename = "pre_commit_sequence")]
+    PreCommitSequence {
+        actions: Vec<Action>,
+        cleanup: Vec<Action>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

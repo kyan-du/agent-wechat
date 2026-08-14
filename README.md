@@ -152,11 +152,16 @@ Outbound text requests are scheduled with round-robin fairness across both
 `source` and chat. OpenClaw and Wechaty set their source automatically; direct
 API callers may use a 1-64 character ASCII `source`. Long text is pasted in
 Unicode-safe chunks with bounded pauses (texts above 4096 characters use one
-paste to keep the action plan bounded), while image/file sends remain unchanged.
+paste to keep the action plan bounded). Any pre-commit text-input failure clears
+the partial composer draft; cleanup is never attempted after an uncertain commit.
+Image/file sends remain unchanged.
 If a text-only request resembles another recent outbound message, the API
-returns `SIMILAR_CONTENT_CONFIRMATION_REQUIRED`; an operator-reviewed retry may
-set `similarityConfirmed: true`. Similarity history is memory-only and retains
-fingerprints, not message text.
+returns `SIMILAR_CONTENT_CONFIRMATION_REQUIRED`; after reviewing the exact
+recipient and text, an operator can rerun CLI with `--confirm-similar`, call the
+OpenClaw `wechat_send_confirmed` tool with `confirmed: true`, use Wechaty's
+`messageSendTextConfirmed(..., true)`, or set raw REST `similarityConfirmed:
+true`. None of the normal automation paths confirms or retries automatically.
+Similarity history is memory-only and retains fingerprints, not message text.
 
 ## Development
 

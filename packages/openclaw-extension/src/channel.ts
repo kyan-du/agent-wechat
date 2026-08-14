@@ -10,7 +10,7 @@ import { collectWeChatStatusIssues } from "./status.js";
 import { WeChatClient } from "@agent-wechat/shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
-import { createWeChatLoginTool } from "./agent-tools.js";
+import { createWeChatConfirmedSendTool, createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 import { sendLogicalMediaTask } from "./outbound.js";
 
@@ -19,7 +19,14 @@ async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<s
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   const result = await client.sendMessage({ chatId: to, text, source: "openclaw" });
-  if (!result.success) throw new Error(result.error ?? "Send failed");
+  if (!result.success) {
+    if (result.errorCode === "SIMILAR_CONTENT_CONFIRMATION_REQUIRED") {
+      throw new Error(
+        "Similar WeChat text requires explicit operator review via wechat_send_confirmed; it was not retried automatically.",
+      );
+    }
+    throw new Error(result.error ?? "Send failed");
+  }
   return `wechat:${to}:${Date.now()}`;
 }
 
@@ -437,7 +444,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   agentTools: (({ cfg }: { cfg?: any }) => {
     const account = resolveWeChatAccount(cfg as Record<string, unknown>);
     if (!account?.serverUrl) return [];
-    return [createWeChatLoginTool(account)];
+    return [createWeChatLoginTool(account), createWeChatConfirmedSendTool(account)];
   }) as any,
 
   // ---- Directory adapter ----

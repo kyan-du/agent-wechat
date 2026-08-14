@@ -14,6 +14,7 @@ import qrTerminal from "qrcode-terminal";
 import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
+import { buildCliSendParams } from "./send-options.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
@@ -412,7 +413,14 @@ messagesCmd
   .option("--text <text>", "Text message to send")
   .option("--image <path>", "Image file to send")
   .option("--file <path>", "File to send")
-  .action(async (chatId: string, opts: { text?: string; image?: string; file?: string }) => {
+  .option(
+    "--confirm-similar",
+    "Confirm this operator-reviewed text despite the similar-content warning",
+  )
+  .action(async (
+    chatId: string,
+    opts: { text?: string; image?: string; file?: string; confirmSimilar?: boolean },
+  ) => {
     if (!opts.text && !opts.image && !opts.file) {
       console.error("Must provide --text, --image, or --file");
       process.exit(1);
@@ -441,7 +449,7 @@ messagesCmd
       file = { data: data.toString("base64"), filename: path.basename(opts.file) };
     }
 
-    await cmdSend(getClient(), chatId, opts.text, image, file);
+    await cmdSend(getClient(), chatId, opts.text, image, file, opts.confirmSimilar === true);
   });
 
 // ============================================
@@ -867,22 +875,30 @@ async function cmdContactsFind(client: WeChatClient, name: string, json: boolean
   }
 }
 
-async function cmdSend(client: WeChatClient, chatId: string, text?: string, image?: { data: string; mimeType: string }, file?: { data: string; filename: string }) {
+async function cmdSend(
+  client: WeChatClient,
+  chatId: string,
+  text?: string,
+  image?: { data: string; mimeType: string },
+  file?: { data: string; filename: string },
+  confirmSimilar: boolean = false,
+) {
   const what = file ? `file "${file.filename}"` : image ? "image" : "message";
   console.log(`Sending ${what} to ${chatId}...`);
-  const result = await client.sendMessage({
-    chatId,
-    ...(text ? { text } : {}),
-    ...(image ? { image } : {}),
-    ...(file ? { file } : {}),
-    source: "cli",
-  });
+  const result = await client.sendMessage(
+    buildCliSendParams({ chatId, text, image, file, confirmSimilar }),
+  );
 
   if (result.success) {
     console.log("Message sent successfully!");
     if (result.messageId) {
       console.log(`Message ID: ${result.messageId}`);
     }
+  } else if (result.errorCode === "SIMILAR_CONTENT_CONFIRMATION_REQUIRED") {
+    console.error(
+      "Similar text requires operator review. Review the recipient and content, then rerun with --confirm-similar.",
+    );
+    process.exit(1);
   } else if (result.error === "NOT_LOGGED_IN") {
     console.error("Not logged in. Run: pnpm cli auth login");
     process.exit(1);

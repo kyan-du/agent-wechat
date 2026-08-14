@@ -434,7 +434,17 @@ impl Plan for SendMessagePlan {
                             combo: "Return".to_string(),
                         });
                         return Some(SelectedAction {
-                            action: actions::sequence(input),
+                            action: Action::PreCommitSequence {
+                                actions: input,
+                                cleanup: vec![
+                                    Action::Key {
+                                        combo: "ctrl+a".to_string(),
+                                    },
+                                    Action::Key {
+                                        combo: "BackSpace".to_string(),
+                                    },
+                                ],
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
