@@ -29,7 +29,7 @@ Authorization: Bearer <token>
 | `POST` | `/api/messages/send` | Send a message (text, image, or file) |
 | `GET` | `/api/messages/:chatId/media/:localId` | Download a media attachment |
 
-`POST /api/messages/send` is processed through the server-side outbound safety queue. The request body accepts text, image, or file payloads and an optional `idempotencyKey` string. Reusing the same `idempotencyKey` while the first request is pending returns `429 Too Many Requests`; reusing it after completion returns the cached result for a short TTL so clients can retry safely after uncertain network outcomes without creating a second send.
+`POST /api/messages/send` is processed through the server-side outbound safety queue. The request body accepts text, image, or file payloads and an optional `idempotencyKey` string. `idempotencyKey` must be 1-128 bytes of ASCII letters, digits, `.`, `_`, `:`, or `-`; the server validates and claims it before decoding media. Reusing the same `idempotencyKey` while the first request is pending returns `429 Too Many Requests`; reusing it after completion returns the persisted result for a short TTL so clients can retry safely after uncertain network outcomes without creating a second send.
 
 If the outbound queue is full, the server returns `429 Too Many Requests` with a `Retry-After` header and a JSON body such as:
 
@@ -41,6 +41,8 @@ If the outbound queue is full, the server returns `429 Too Many Requests` with a
 }
 ```
 
+If protected idempotency evidence (`queued`, `sending`, `uncertain`, `needs_reconciliation`) already occupies `AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS`, a new unique `idempotencyKey` is not inserted and the endpoint returns `429 Too Many Requests` with `errorCode: "IDEMPOTENCY_CAPACITY"` and `Retry-After`. Existing in-progress keys still return `IDEMPOTENCY_IN_PROGRESS`; completed keys still replay. Clients should treat `IDEMPOTENCY_CAPACITY` as backpressure and retry later with the same key only after capacity is free, or use a new key after an operator has cleared protected rows. The shared `WeChatHttpError.errorCode` field exposes this code on `429` responses.
+
 If outbound sending is disabled by read-only mode, the endpoint returns `503 Service Unavailable` with `errorCode: "OUTBOUND_DISABLED"`.
 
 `GET /api/status/outbound` reports queue `queueDepth`, `queueCapacity`, `availableCapacity`, current read-only state, idempotency cache size, and configured spacing/TTL values for operational monitoring. Its `diagnostics` object contains monotonic counters for enqueue/completion/failure, `429`, TTL expiry, pause/resume, duplicate suppression, uncertain sends, and budget/quiet-hours rejection, plus queue-wait and actual-send-interval durations. `completedTotal` and `failedTotal` count worker executions that reached a terminal send result; cached idempotency replays and pre-execution rejections are excluded. `chatSelectDiagnostics` reports open/verify fallback, Frida attach, timeout, and failure counts.
@@ -49,11 +51,17 @@ These diagnostic objects intentionally contain only counters, durations, boolean
 
 Chat open and outbound send failures use stable `errorCode` values. Frida fallback failures are distinguishable as `FRIDA_ATTACH_FAILED`, `FRIDA_ATTACH_TIMEOUT`, `FRIDA_ENUMERATION_FAILED`, `FRIDA_HOOK_FAILED`, or `TARGET_CONFIRMATION_FAILED`; click-tool failures use `CHAT_CLICK_FAILED` or `CHAT_CLICK_TIMEOUT`. An unverifiable fallback, tool timeout/invalid response, or failed post-selection confirmation fails closed and pauses outbound before the send action. Unsupported builds and unknown targets remain ordinary pre-send rejections. Once the Return/send action may have been attempted, `commitAttempted: true` and an uncertain code such as `send_commit_uncertain` distinguish the terminal result from a safe pre-send failure.
 
+`GET /api/status/outbound/idempotency/:key` returns the authenticated status for one `idempotencyKey`. Possible states are `queued`, `sending`, `sent`, `uncertain`, `failed`, `rejected`, `expired`, `needs_reconciliation`, and `unknown`. The response contains only the key, state, coarse result metadata, and timestamps; it does not return message text, contacts, file paths, media data, QR data, or tokens.
+
+`POST /api/status/outbound/idempotency/:key/reconcile` is an authenticated manual recovery action for persisted `queued`, `sending`, or `needs_reconciliation` rows after a restart or persistence fault. It marks the key `uncertain` with `MANUAL_RECONCILIATION_REQUIRED` so future retries do not automatically resend. Operators must inspect WeChat/client-side evidence and decide whether to use a new key for any follow-up send.
+
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/status/outbound` | Inspect outbound send queue pressure and safety settings |
+| `GET` | `/api/status/outbound/idempotency/:key` | Look up an outbound send by idempotency key |
+| `POST` | `/api/status/outbound/idempotency/:key/reconcile` | Manually mark a stuck outbound idempotency key uncertain |
 | `GET` | `/api/auth/status` | Check login status |
 | `POST` | `/api/auth/logout` | Log out of WeChat |
 | `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |

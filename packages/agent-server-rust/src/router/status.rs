@@ -1,8 +1,9 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query,
+        Path, Query,
     },
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -42,6 +43,86 @@ pub async fn get_status() -> Json<serde_json::Value> {
 
 pub async fn outbound_status() -> Json<crate::outbound::OutboundStatus> {
     Json(outbound_sender().status())
+}
+
+pub async fn outbound_idempotency_status(Path(key): Path<String>) -> impl IntoResponse {
+    if crate::outbound::validate_idempotency_key(&key).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "key": "",
+                "state": "invalid",
+                "error": "INVALID_IDEMPOTENCY_KEY",
+            })),
+        );
+    }
+    match crate::outbound::get_idempotency_status(&key) {
+        Some(record) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "key": record.key,
+                "state": record.state.as_str(),
+                "result": record.result,
+                "expiresAt": record.expires_at,
+                "updatedAt": record.updated_at,
+            })),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "key": key,
+                "state": "unknown",
+            })),
+        ),
+    }
+}
+
+pub async fn reconcile_outbound_idempotency(Path(key): Path<String>) -> impl IntoResponse {
+    if crate::outbound::validate_idempotency_key(&key).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "INVALID_IDEMPOTENCY_KEY",
+            })),
+        );
+    }
+    match crate::outbound::manually_reconcile_idempotency(&key, std::time::Duration::from_secs(600))
+    {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "key": key,
+                "state": "uncertain",
+            })),
+        ),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "success": false,
+                "key": key,
+                "error": "IDEMPOTENCY_NOT_RECONCILABLE",
+            })),
+        ),
+        Err(error) => {
+            tracing::error!(
+                error_code = reconciliation_failure_log_code(&error),
+                "[status] outbound idempotency reconcile failed"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "IDEMPOTENCY_RECONCILE_FAILED",
+                })),
+            )
+        }
+    }
+}
+
+pub(crate) fn reconciliation_failure_log_code(_: &rusqlite::Error) -> &'static str {
+    "IDEMPOTENCY_RECONCILE_FAILED"
 }
 
 pub async fn pause_outbound() -> Json<crate::outbound::OutboundStatus> {

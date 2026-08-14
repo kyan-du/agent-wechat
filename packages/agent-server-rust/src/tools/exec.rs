@@ -197,9 +197,12 @@ pub fn exec_supervisor_entrypoint() -> Option<i32> {
         )
     };
 
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0
-        || set_nonblocking(libc::STDIN_FILENO).is_err()
-    {
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
+        return Some(126);
+    }
+
+    if set_nonblocking(libc::STDIN_FILENO).is_err() {
         return Some(126);
     }
 
@@ -352,14 +355,24 @@ pub async fn exec_command(command: &str, args: &[&str], options: &ExecOptions) -
         env.entry("DISPLAY".into()).or_insert_with(|| ":99".into());
     }
 
-    let executable = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(_) => return command_result(Vec::new(), b"Command failed to start".to_vec(), 1),
+    #[cfg(all(test, not(target_os = "linux")))]
+    let mut command_builder = {
+        let mut builder = Command::new(command);
+        builder.args(args);
+        builder
     };
-    let mut command_builder = Command::new(executable);
-    #[cfg(not(test))]
-    command_builder.arg(command).args(args);
-    #[cfg(test)]
+    #[cfg(any(not(test), target_os = "linux"))]
+    let mut command_builder = {
+        let executable = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(_) => return command_result(Vec::new(), b"Command failed to start".to_vec(), 1),
+        };
+        let mut builder = Command::new(executable);
+        #[cfg(not(test))]
+        builder.arg(command).args(args);
+        builder
+    };
+    #[cfg(all(test, target_os = "linux"))]
     command_builder
         .args([
             "--exact",

@@ -167,6 +167,11 @@ export const openChatResultSchema = z.object({
 // MESSAGES
 // ============================================
 
+export const idempotencyKeySchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+
 export const messageSchema = z.object({
   localId: z.number().int(),
   serverId: z.number(),
@@ -186,7 +191,7 @@ export const listMessagesParamsSchema = z.object({
 
 export const sendParamsSchema = z.object({
   chatId: z.string().min(1),
-  idempotencyKey: z.string().min(1).optional(),
+  idempotencyKey: idempotencyKeySchema.optional(),
   text: z.string().optional(),
   image: z.object({
     data: z.string(),

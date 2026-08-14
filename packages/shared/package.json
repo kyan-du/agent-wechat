@@ -23,7 +23,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/schemas/*.test.ts"
+    "test": "node --test --experimental-strip-types src/schemas/*.test.ts src/client.test.ts"
   },
   "dependencies": {
     "zod": "^3.24.2"

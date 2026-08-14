@@ -6,7 +6,10 @@ use serde::Deserialize;
 
 use crate::db::get_db;
 use crate::ia::types::{MediaResult, Message, SendParams, SendResult};
-use crate::outbound::{cleanup_temp_files, outbound_sender, OutboundSendResponse};
+use crate::outbound::{
+    cleanup_temp_files, outbound_sender, IdempotencyAdmission, IdempotencyClaimLease,
+    OutboundError, OutboundSendResponse,
+};
 use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
@@ -153,6 +156,26 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         });
     }
 
+    let mut idempotency_lease: Option<IdempotencyClaimLease> = None;
+    if let Some(key) = input.idempotency_key.as_deref() {
+        match outbound_sender().admit_idempotency_key(key) {
+            IdempotencyAdmission::Claimed(lease) => {
+                idempotency_lease = Some(lease);
+            }
+            IdempotencyAdmission::Completed(result) => {
+                return OutboundSendResponse::Result(result);
+            }
+            IdempotencyAdmission::InProgress => {
+                return OutboundSendResponse::Rejected(OutboundError::duplicate_in_progress(
+                    outbound_sender().retry_after(),
+                ));
+            }
+            IdempotencyAdmission::Rejected(error) => {
+                return OutboundSendResponse::Rejected(error);
+            }
+        }
+    }
+
     // Decode base64 image to temp file
     let mut image_path: Option<String> = None;
     let mut image_mime: Option<String> = None;
@@ -170,12 +193,40 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 .as_millis(),
             ext
         );
-        if let Ok(bytes) =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)
-        {
-            if std::fs::write(&path, &bytes).is_ok() {
-                image_mime = Some(img.mime_type.clone());
-                image_path = Some(path);
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+            Ok(bytes) => match std::fs::write(&path, &bytes) {
+                Ok(_) => {
+                    image_mime = Some(img.mime_type.clone());
+                    image_path = Some(path);
+                }
+                Err(e) => {
+                    if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                        &mut idempotency_lease,
+                        "TEMP_FILE_WRITE_FAILED",
+                    ) {
+                        return OutboundSendResponse::Rejected(error);
+                    }
+                    return OutboundSendResponse::Result(SendResult {
+                        success: false,
+                        error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
+                        error: Some(format!("Failed to write temp image: {e}")),
+                        commit_attempted: false,
+                    });
+                }
+            },
+            Err(e) => {
+                if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                    &mut idempotency_lease,
+                    "IMAGE_BASE64_DECODE_FAILED",
+                ) {
+                    return OutboundSendResponse::Rejected(error);
+                }
+                return OutboundSendResponse::Result(SendResult {
+                    success: false,
+                    error_code: Some("IMAGE_BASE64_DECODE_FAILED".to_string()),
+                    error: Some(format!("Failed to decode base64 image data: {e}")),
+                    commit_attempted: false,
+                });
             }
         }
     }
@@ -214,13 +265,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 }
                 Err(e) => {
                     cleanup_temp_files(&SendMessageParams {
-                        chat_id: input.chat_id,
-                        message: input.text,
-                        image_path,
-                        image_mime,
-                        file_path,
+                        chat_id: input.chat_id.clone(),
+                        message: input.text.clone(),
+                        image_path: image_path.clone(),
+                        image_mime: image_mime.clone(),
+                        file_path: file_path.clone(),
                         inbound_chars: None,
                     });
+                    if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                        &mut idempotency_lease,
+                        "TEMP_FILE_WRITE_FAILED",
+                    ) {
+                        return OutboundSendResponse::Rejected(error);
+                    }
                     return OutboundSendResponse::Result(SendResult {
                         success: false,
                         error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
@@ -231,13 +288,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
             },
             Err(e) => {
                 cleanup_temp_files(&SendMessageParams {
-                    chat_id: input.chat_id,
-                    message: input.text,
-                    image_path,
-                    image_mime,
-                    file_path,
+                    chat_id: input.chat_id.clone(),
+                    message: input.text.clone(),
+                    image_path: image_path.clone(),
+                    image_mime: image_mime.clone(),
+                    file_path: file_path.clone(),
                     inbound_chars: None,
                 });
+                if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                    &mut idempotency_lease,
+                    "FILE_BASE64_DECODE_FAILED",
+                ) {
+                    return OutboundSendResponse::Rejected(error);
+                }
                 return OutboundSendResponse::Result(SendResult {
                     success: false,
                     error_code: Some("FILE_BASE64_DECODE_FAILED".to_string()),
@@ -256,5 +319,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         file_path,
         inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
-    outbound_sender().send(params, input.idempotency_key).await
+    outbound_sender()
+        .send_claimed(params, idempotency_lease)
+        .await
 }

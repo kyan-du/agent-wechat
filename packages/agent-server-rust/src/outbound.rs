@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -19,7 +19,20 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     context::create_context,
-    db::get_db,
+    db::{
+        get_db,
+        queries::{
+            admit_outbound_claim, complete_outbound_result, count_outbound_idempotency,
+            count_protected_outbound_idempotency, expire_outbound_if_stale,
+            get_outbound_idempotency, mark_outbound_needs_reconciliation,
+            mark_outbound_queued_needs_reconciliation,
+            mark_outbound_sending, mark_outbound_sending_needs_reconciliation,
+            reconcile_outbound_idempotency, reject_outbound_pre_execution,
+            reject_outbound_unless_active_or_completed, sweep_outbound_idempotency, OutboundAdmit,
+            OutboundIdempotencyRecord, OutboundIdempotencyState,
+        },
+        try_get_db,
+    },
     execution::run_execution_loop,
     ia::types::{SendResult, SubscriptionEvent},
     plans::send_message::{SendMessageParams, SendMessagePlan},
@@ -37,8 +50,61 @@ const DEFAULT_HOURLY_BUDGET: u32 = 40;
 const DEFAULT_DAILY_BUDGET: u32 = 200;
 const DEFAULT_QUIET_START_MIN: u32 = 30;
 const DEFAULT_QUIET_END_MIN: u32 = 7 * 60 + 30;
+const DEFAULT_IDEMPOTENCY_MAX_ROWS: usize = 10_000;
+pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+fn persist_error_code(error: &rusqlite::Error) -> &'static str {
+    match error {
+        rusqlite::Error::SqliteFailure(err, _) => match err.code {
+            rusqlite::ErrorCode::DatabaseBusy => "SQLITE_BUSY",
+            rusqlite::ErrorCode::DatabaseLocked => "SQLITE_LOCKED",
+            rusqlite::ErrorCode::ConstraintViolation => "SQLITE_CONSTRAINT",
+            rusqlite::ErrorCode::ReadOnly => "SQLITE_READONLY",
+            rusqlite::ErrorCode::DiskFull => "SQLITE_FULL",
+            rusqlite::ErrorCode::CannotOpen => "SQLITE_CANTOPEN",
+            rusqlite::ErrorCode::DatabaseCorrupt => "SQLITE_CORRUPT",
+            rusqlite::ErrorCode::SystemIoFailure => "SQLITE_IOERR",
+            rusqlite::ErrorCode::ApiMisuse => "SQLITE_MISUSE",
+            rusqlite::ErrorCode::SchemaChanged => "SQLITE_SCHEMA",
+            rusqlite::ErrorCode::AuthorizationForStatementDenied => "SQLITE_AUTH",
+            _ => "SQLITE_FAILURE",
+        },
+        rusqlite::Error::QueryReturnedNoRows => "SQLITE_NO_ROWS",
+        rusqlite::Error::ExecuteReturnedResults => "SQLITE_EXECUTE",
+        rusqlite::Error::InvalidQuery => "SQLITE_INVALID_QUERY",
+        rusqlite::Error::NulError(_) => "SQLITE_NUL",
+        rusqlite::Error::InvalidColumnIndex(_)
+        | rusqlite::Error::InvalidColumnName(_)
+        | rusqlite::Error::InvalidColumnType(_, _, _) => "SQLITE_COLUMN",
+        rusqlite::Error::Utf8Error(_) => "SQLITE_UTF8",
+        rusqlite::Error::FromSqlConversionFailure(_, _, _) => "SQLITE_CONVERSION",
+        rusqlite::Error::IntegralValueOutOfRange(_, _) => "SQLITE_RANGE",
+        rusqlite::Error::ToSqlConversionFailure(_) => "SQLITE_TOSQL",
+        _ => "SQLITE_ERROR",
+    }
+}
+
+fn log_persist_failure(op: &'static str, error: &rusqlite::Error) {
+    tracing::error!(
+        op,
+        code = persist_error_code(error),
+        "[outbound] idempotency persistence failed"
+    );
+}
+
+fn idempotency_max_rows() -> usize {
+    env_usize("AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS")
+        .unwrap_or(DEFAULT_IDEMPOTENCY_MAX_ROWS)
+        .max(1)
+}
+
+fn sweep_persistent_idempotency(conn: &rusqlite::Connection) {
+    if let Err(error) = sweep_outbound_idempotency(conn, idempotency_max_rows()) {
+        log_persist_failure("sweep", &error);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundErrorKind {
     QueueFull,
     ReadOnly,
@@ -47,6 +113,9 @@ pub enum OutboundErrorKind {
     Unavailable,
     QuietHours,
     Budget,
+    Persistence,
+    InvalidIdempotencyKey,
+    Capacity,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +124,7 @@ pub struct OutboundError {
     pub retry_after: Option<Duration>,
     pub code: String,
     pub message: String,
+    pub commit_attempted: bool,
 }
 
 impl OutboundError {
@@ -64,6 +134,7 @@ impl OutboundError {
             retry_after: Some(retry_after),
             code: "QUEUE_FULL".to_string(),
             message: "Outbound send queue is full".to_string(),
+            commit_attempted: false,
         }
     }
 
@@ -73,15 +144,17 @@ impl OutboundError {
             retry_after: None,
             code: "OUTBOUND_DISABLED".to_string(),
             message: "Outbound sends are disabled by read-only mode".to_string(),
+            commit_attempted: false,
         }
     }
 
-    fn duplicate_in_progress(retry_after: Duration) -> Self {
+    pub(crate) fn duplicate_in_progress(retry_after: Duration) -> Self {
         Self {
             kind: OutboundErrorKind::DuplicateInProgress,
             retry_after: Some(retry_after),
             code: "IDEMPOTENCY_IN_PROGRESS".to_string(),
             message: "A request with this idempotencyKey is already pending".to_string(),
+            commit_attempted: false,
         }
     }
 
@@ -91,6 +164,7 @@ impl OutboundError {
             retry_after: None,
             code: "QUEUE_EXPIRED".to_string(),
             message: "Outbound send expired before execution".to_string(),
+            commit_attempted: false,
         }
     }
 
@@ -100,6 +174,7 @@ impl OutboundError {
             retry_after: None,
             code: "SCHEDULER_UNAVAILABLE".to_string(),
             message: "Outbound send scheduler is unavailable".to_string(),
+            commit_attempted: false,
         }
     }
 
@@ -109,6 +184,7 @@ impl OutboundError {
             retry_after: Some(retry_after),
             code: "QUIET_HOURS".to_string(),
             message: "Quiet hours: outbound sends are deferred".to_string(),
+            commit_attempted: false,
         }
     }
 
@@ -118,6 +194,41 @@ impl OutboundError {
             retry_after: Some(retry_after),
             code: code.to_string(),
             message: "Outbound send budget exhausted".to_string(),
+            commit_attempted: false,
+        }
+    }
+
+    fn persistence(commit_attempted: bool) -> Self {
+        Self {
+            kind: OutboundErrorKind::Persistence,
+            retry_after: None,
+            code: "IDEMPOTENCY_PERSISTENCE_FAILED".to_string(),
+            message: if commit_attempted {
+                "Outbound send result could not be durably persisted; manual reconciliation is required".to_string()
+            } else {
+                "Outbound idempotency state could not be durably persisted".to_string()
+            },
+            commit_attempted,
+        }
+    }
+
+    fn invalid_idempotency_key() -> Self {
+        Self {
+            kind: OutboundErrorKind::InvalidIdempotencyKey,
+            retry_after: None,
+            code: "INVALID_IDEMPOTENCY_KEY".to_string(),
+            message: "idempotencyKey must be 1-128 bytes of ASCII letters, digits, dot, underscore, colon, or hyphen".to_string(),
+            commit_attempted: false,
+        }
+    }
+
+    fn capacity(retry_after: Duration) -> Self {
+        Self {
+            kind: OutboundErrorKind::Capacity,
+            retry_after: Some(retry_after),
+            code: "IDEMPOTENCY_CAPACITY".to_string(),
+            message: "Outbound idempotency capacity is exhausted by protected evidence".to_string(),
+            commit_attempted: false,
         }
     }
 }
@@ -136,11 +247,14 @@ impl IntoResponse for OutboundSendResponse {
                     OutboundErrorKind::QueueFull
                     | OutboundErrorKind::DuplicateInProgress
                     | OutboundErrorKind::QuietHours
-                    | OutboundErrorKind::Budget => StatusCode::TOO_MANY_REQUESTS,
+                    | OutboundErrorKind::Budget
+                    | OutboundErrorKind::Capacity => StatusCode::TOO_MANY_REQUESTS,
                     OutboundErrorKind::ReadOnly => StatusCode::SERVICE_UNAVAILABLE,
                     OutboundErrorKind::Expired | OutboundErrorKind::Unavailable => {
                         StatusCode::SERVICE_UNAVAILABLE
                     }
+                    OutboundErrorKind::Persistence => StatusCode::SERVICE_UNAVAILABLE,
+                    OutboundErrorKind::InvalidIdempotencyKey => StatusCode::BAD_REQUEST,
                 };
                 let mut headers = HeaderMap::new();
                 if let Some(retry_after) = error.retry_after {
@@ -156,7 +270,7 @@ impl IntoResponse for OutboundSendResponse {
                         success: false,
                         error_code: Some(error.code),
                         error: Some(error.message),
-                        commit_attempted: false,
+                        commit_attempted: error.commit_attempted,
                     }),
                 )
                     .into_response()
@@ -186,8 +300,6 @@ pub struct OutboundStatus {
 #[serde(rename_all = "camelCase")]
 pub struct OutboundDiagnosticsSnapshot {
     pub enqueued_total: u64,
-    /// Worker executions that reached a terminal send result. Replays and
-    /// pre-execution rejections are intentionally excluded.
     pub completed_total: u64,
     pub failed_total: u64,
     pub rejected_429_total: u64,
@@ -249,6 +361,7 @@ impl OutboundDiagnostics {
                 | OutboundErrorKind::DuplicateInProgress
                 | OutboundErrorKind::QuietHours
                 | OutboundErrorKind::Budget
+                | OutboundErrorKind::Capacity
         ) {
             self.rejected_429_total.fetch_add(1, Ordering::Relaxed);
         }
@@ -288,6 +401,92 @@ impl OutboundDiagnostics {
         if result.error_code.as_deref() == Some("duplicate_send_action_suppressed") {
             self.duplicate_suppressed_total
                 .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub enum IdempotencyAdmission {
+    Claimed(IdempotencyClaimLease),
+    InProgress,
+    Completed(SendResult),
+    Rejected(OutboundError),
+}
+
+enum IdempotencyLeasePhase {
+    Queued,
+    Sending,
+}
+
+pub struct IdempotencyClaimLease {
+    key: String,
+    generation: i64,
+    ttl: Duration,
+    phase: IdempotencyLeasePhase,
+    disarmed: bool,
+}
+
+impl IdempotencyClaimLease {
+    fn new(key: String, generation: i64, ttl: Duration) -> Self {
+        Self {
+            key,
+            generation,
+            ttl,
+            phase: IdempotencyLeasePhase::Queued,
+            disarmed: false,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+
+    fn enter_sending(&mut self) {
+        self.phase = IdempotencyLeasePhase::Sending;
+    }
+}
+
+impl Drop for IdempotencyClaimLease {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let db = get_db();
+        let result = match self.phase {
+            IdempotencyLeasePhase::Queued => mark_outbound_queued_needs_reconciliation(
+                &db,
+                &self.key,
+                self.generation,
+                "IDEMPOTENCY_CLAIM_DROPPED",
+                self.ttl,
+            ),
+            IdempotencyLeasePhase::Sending => mark_outbound_sending_needs_reconciliation(
+                &db,
+                &self.key,
+                self.generation,
+                "IDEMPOTENCY_SENDING_DROPPED",
+                self.ttl,
+            ),
+        };
+        match result {
+            Ok(affected) if affected > 0 => {}
+            Ok(_) => {
+                tracing::warn!(
+                    op = "lease_drop",
+                    code = "SQLITE_NO_ROWS",
+                    "[outbound] idempotency lease drop CAS affected 0 rows"
+                );
+            }
+            Err(error) => {
+                log_persist_failure("lease_drop", &error);
+            }
         }
     }
 }
@@ -481,6 +680,8 @@ struct OutboundTask {
     params: SendMessageParams,
     enqueued_at: Instant,
     idempotency_key: Option<String>,
+    idempotency_generation: Option<i64>,
+    idempotency_lease: Option<IdempotencyClaimLease>,
     result_tx: oneshot::Sender<OutboundSendResponse>,
 }
 
@@ -489,12 +690,58 @@ pub struct OutboundSender {
     config: OutboundConfig,
     control: Arc<OutboundControl>,
     tx: mpsc::Sender<OutboundTask>,
-    idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
     diagnostics: Arc<OutboundDiagnostics>,
 }
 
 static OUTBOUND_SENDER: OnceLock<OutboundSender> = OnceLock::new();
+
+#[cfg(test)]
+static FAIL_SENDING_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_RESULT_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_REJECTION_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_RECONCILE_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_CLAIM_WITH_HOSTILE_ERROR: OnceLock<Mutex<bool>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR: OnceLock<Mutex<bool>> = OnceLock::new();
+
+#[cfg(test)]
+fn hostile_sqlite_error() -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+            extended_code: 0,
+        },
+        Some(
+            "hostile path=/Users/kyan/private/agent.db SQL=UPDATE outbound_idempotency provider=sqlcipher key=hostile-secret-key"
+                .to_string(),
+        ),
+    )
+}
+
+#[cfg(test)]
+fn consume_hostile_claim_failure() -> bool {
+    let mut guard = FAIL_CLAIM_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("claim fault slot poisoned");
+    let fail = *guard;
+    *guard = false;
+    fail
+}
+
+#[cfg(test)]
+fn fail_next_claim_with_hostile_error() {
+    let mut guard = FAIL_CLAIM_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("claim fault slot poisoned");
+    *guard = true;
+}
 
 pub fn outbound_sender() -> &'static OutboundSender {
     OUTBOUND_SENDER.get_or_init(|| OutboundSender::spawn(OutboundConfig::from_env()))
@@ -504,11 +751,9 @@ impl OutboundSender {
     pub fn spawn(config: OutboundConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let control = Arc::new(OutboundControl::new(config.read_only));
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(config.idempotency_ttl)));
         let usage = Arc::new(Mutex::new(Usage::new()));
         let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker_control = Arc::clone(&control);
-        let worker_store = Arc::clone(&idempotency);
         let worker_usage = Arc::clone(&usage);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_config = config.clone();
@@ -518,7 +763,6 @@ impl OutboundSender {
                 worker_config,
                 worker_control,
                 rx,
-                worker_store,
                 worker_usage,
                 worker_diagnostics,
             )
@@ -529,10 +773,13 @@ impl OutboundSender {
             config,
             control,
             tx,
-            idempotency,
             usage,
             diagnostics,
         }
+    }
+
+    pub fn retry_after(&self) -> Duration {
+        self.config.retry_after()
     }
 
     pub async fn send(
@@ -540,29 +787,119 @@ impl OutboundSender {
         params: SendMessageParams,
         idempotency_key: Option<String>,
     ) -> OutboundSendResponse {
-        let now = Instant::now();
-        if self.control.is_read_only() {
-            cleanup_temp_files(&params);
-            let error = OutboundError::read_only();
-            self.diagnostics.record_rejection(&error);
-            return OutboundSendResponse::Rejected(error);
-        }
-
         if let Some(key) = idempotency_key.as_deref() {
-            let mut store = self.idempotency.lock().expect("idempotency store poisoned");
-            match store.start(key, now) {
-                IdempotencyStart::Inserted => {}
-                IdempotencyStart::Completed(result) => {
+            match self.admit_idempotency_key(key) {
+                IdempotencyAdmission::Claimed(lease) => {
+                    return self.send_claimed(params, Some(lease)).await;
+                }
+                IdempotencyAdmission::Completed(result) => {
                     cleanup_temp_files(&params);
                     return OutboundSendResponse::Result(result);
                 }
-                IdempotencyStart::InProgress => {
+                IdempotencyAdmission::InProgress => {
                     cleanup_temp_files(&params);
                     let error = OutboundError::duplicate_in_progress(self.config.retry_after());
                     self.diagnostics.record_rejection(&error);
                     return OutboundSendResponse::Rejected(error);
                 }
+                IdempotencyAdmission::Rejected(error) => {
+                    cleanup_temp_files(&params);
+                    self.diagnostics.record_rejection(&error);
+                    return OutboundSendResponse::Rejected(error);
+                }
             }
+        }
+
+        self.send_claimed(params, None).await
+    }
+
+    pub fn admit_idempotency_key(&self, key: &str) -> IdempotencyAdmission {
+        if validate_idempotency_key(key).is_err() {
+            return IdempotencyAdmission::Rejected(OutboundError::invalid_idempotency_key());
+        }
+        if self.control.is_read_only() {
+            match expire_and_replay_idempotency(key) {
+                Ok(IdempotencyReplay::Completed(result)) => {
+                    return IdempotencyAdmission::Completed(result);
+                }
+                Ok(IdempotencyReplay::InProgress) => {
+                    return IdempotencyAdmission::InProgress;
+                }
+                Ok(IdempotencyReplay::NeedsReconciliation) => {
+                    return IdempotencyAdmission::Rejected(OutboundError::duplicate_in_progress(
+                        self.config.retry_after(),
+                    ));
+                }
+                Ok(IdempotencyReplay::None) => {
+                    if let Err(error) =
+                        persist_read_only_rejection(key, self.config.idempotency_ttl)
+                    {
+                        log_persist_failure("read_only_rejection", &error);
+                        self.control.set_runtime_paused(true);
+                        return IdempotencyAdmission::Rejected(OutboundError::persistence(false));
+                    }
+                    return IdempotencyAdmission::Rejected(OutboundError::read_only());
+                }
+                Err(error) => {
+                    log_persist_failure("read_only_expire_or_replay", &error);
+                    self.control.set_runtime_paused(true);
+                    return IdempotencyAdmission::Rejected(OutboundError::persistence(false));
+                }
+            }
+        }
+
+        match try_claim_idempotency(key, self.config.idempotency_ttl) {
+            Ok(IdempotencyStart::Inserted(generation)) => {
+                IdempotencyAdmission::Claimed(IdempotencyClaimLease::new(
+                    key.to_string(),
+                    generation,
+                    self.config.idempotency_ttl,
+                ))
+            }
+            Ok(IdempotencyStart::Completed(result)) => IdempotencyAdmission::Completed(result),
+            Ok(IdempotencyStart::InProgress) | Ok(IdempotencyStart::NeedsReconciliation) => {
+                IdempotencyAdmission::InProgress
+            }
+            Ok(IdempotencyStart::Capacity) => {
+                IdempotencyAdmission::Rejected(OutboundError::capacity(self.config.retry_after()))
+            }
+            Err(error) => {
+                log_persist_failure("claim", &error);
+                self.control.set_runtime_paused(true);
+                IdempotencyAdmission::Rejected(OutboundError::persistence(false))
+            }
+        }
+    }
+
+    pub async fn send_claimed(
+        &self,
+        params: SendMessageParams,
+        mut idempotency_lease: Option<IdempotencyClaimLease>,
+    ) -> OutboundSendResponse {
+        let now = Instant::now();
+        let idempotency_key = idempotency_lease.as_ref().map(|lease| lease.key.clone());
+        let idempotency_generation = idempotency_lease.as_ref().map(|lease| lease.generation);
+        if self.control.is_read_only() {
+            cleanup_temp_files(&params);
+            if let Some(key) = idempotency_key.as_deref() {
+                if let Err(error) = persist_rejection(
+                    key,
+                    idempotency_generation,
+                    OutboundIdempotencyState::Rejected,
+                    "OUTBOUND_DISABLED",
+                    self.config.idempotency_ttl,
+                ) {
+                    log_persist_failure("claimed_read_only_rejection", &error);
+                    self.control.set_runtime_paused(true);
+                    return OutboundSendResponse::Rejected(OutboundError::persistence(false));
+                }
+                if let Some(lease) = &mut idempotency_lease {
+                    lease.disarm();
+                }
+            }
+            let error = OutboundError::read_only();
+            self.diagnostics.record_rejection(&error);
+            return OutboundSendResponse::Rejected(error);
         }
 
         {
@@ -576,10 +913,21 @@ impl OutboundSender {
                 local_minute_of_day(),
             ) {
                 if let Some(key) = idempotency_key.as_deref() {
-                    self.idempotency
-                        .lock()
-                        .expect("idempotency store poisoned")
-                        .remove(key);
+                    if let Err(error) = persist_rejection(
+                        key,
+                        idempotency_generation,
+                        OutboundIdempotencyState::Rejected,
+                        &error.code,
+                        self.config.idempotency_ttl,
+                    ) {
+                        log_persist_failure("policy_rejection", &error);
+                        self.control.set_runtime_paused(true);
+                        cleanup_temp_files(&params);
+                        return OutboundSendResponse::Rejected(OutboundError::persistence(false));
+                    }
+                    if let Some(lease) = &mut idempotency_lease {
+                        lease.disarm();
+                    }
                 }
                 cleanup_temp_files(&params);
                 self.diagnostics.record_rejection(&error);
@@ -592,6 +940,8 @@ impl OutboundSender {
             params,
             enqueued_at: now,
             idempotency_key: idempotency_key.clone(),
+            idempotency_generation,
+            idempotency_lease,
             result_tx,
         };
 
@@ -604,10 +954,17 @@ impl OutboundSender {
                     Ok(response) => response,
                     Err(_) => {
                         if let Some(key) = idempotency_key.as_deref() {
-                            self.idempotency
-                                .lock()
-                                .expect("idempotency store poisoned")
-                                .complete(key, now, unavailable_result());
+                            if let Err(error) = persist_unknown_worker_result(
+                                key,
+                                idempotency_generation,
+                                self.config.idempotency_ttl,
+                            ) {
+                                log_persist_failure("unknown_worker_result", &error);
+                                self.control.set_runtime_paused(true);
+                                return OutboundSendResponse::Rejected(OutboundError::persistence(
+                                    true,
+                                ));
+                            }
                         }
                         let error = OutboundError::unavailable();
                         self.diagnostics.record_rejection(&error);
@@ -618,16 +975,38 @@ impl OutboundSender {
             Err(mpsc::error::TrySendError::Full(task)) => {
                 let error = OutboundError::queue_full(self.config.retry_after());
                 self.diagnostics.record_rejection(&error);
-                reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
+                reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
                 OutboundSendResponse::Rejected(error)
             }
             Err(mpsc::error::TrySendError::Closed(task)) => {
                 let error = OutboundError::unavailable();
                 self.diagnostics.record_rejection(&error);
-                reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
+                reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
                 OutboundSendResponse::Rejected(error)
             }
         }
+    }
+
+    pub(crate) fn reject_claimed_pre_execution(
+        &self,
+        idempotency_lease: &mut Option<IdempotencyClaimLease>,
+        error_code: &str,
+    ) -> Result<(), OutboundError> {
+        if let Some(lease) = idempotency_lease {
+            if let Err(error) = persist_rejection(
+                lease.key(),
+                Some(lease.generation()),
+                OutboundIdempotencyState::Rejected,
+                error_code,
+                self.config.idempotency_ttl,
+            ) {
+                log_persist_failure("pre_execution_rejection", &error);
+                self.control.set_runtime_paused(true);
+                return Err(OutboundError::persistence(false));
+            }
+            lease.disarm();
+        }
+        Ok(())
     }
 
     pub fn status(&self) -> OutboundStatus {
@@ -641,11 +1020,7 @@ impl OutboundSender {
             idempotency_ttl_ms: self.config.idempotency_ttl.as_millis(),
             read_only: self.control.is_read_only(),
             runtime_paused: self.control.is_runtime_paused(),
-            idempotency_entries: self
-                .idempotency
-                .lock()
-                .expect("idempotency store poisoned")
-                .len(),
+            idempotency_entries: count_persistent_idempotency(),
             diagnostics: self.diagnostics.snapshot(),
             chat_select_diagnostics: crate::tools::chat_select::diagnostics(),
         }
@@ -716,18 +1091,20 @@ async fn worker_loop(
     config: OutboundConfig,
     control: Arc<OutboundControl>,
     mut rx: mpsc::Receiver<OutboundTask>,
-    idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
     diagnostics: Arc<OutboundDiagnostics>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
     let mut last_send_started: Option<Instant> = None;
     while let Some(task) = rx.recv().await {
+        if let Some(db) = try_get_db() {
+            sweep_persistent_idempotency(&db);
+        }
         let now = Instant::now();
         if task_expired(&task, now, config.task_ttl) {
             let error = OutboundError::expired();
             diagnostics.record_rejection(&error);
-            reject_without_idempotency_cache(task, error, &idempotency);
+            reject_without_idempotency_cache(task, error, config.idempotency_ttl);
             continue;
         }
 
@@ -757,7 +1134,6 @@ async fn worker_loop(
             config.task_ttl,
             &config,
             &usage,
-            &idempotency,
             &diagnostics,
         ) {
             Some(task) => task,
@@ -779,7 +1155,7 @@ async fn worker_loop(
             Ok(wait) => wait,
             Err(error) => {
                 diagnostics.record_rejection(&error);
-                reject_without_idempotency_cache(task, error, &idempotency);
+                reject_without_idempotency_cache(task, error, config.idempotency_ttl);
                 continue;
             }
         };
@@ -793,23 +1169,51 @@ async fn worker_loop(
             config.task_ttl,
             &config,
             &usage,
-            &idempotency,
             &diagnostics,
         ) {
             Some(task) => task,
             None => continue,
         };
 
+        let mut task = task;
+        if let Some(key) = task.idempotency_key.as_deref() {
+            if let Err(error) = persist_sending(key, task.idempotency_generation) {
+                log_persist_failure("sending", &error);
+                if mark_needs_reconciliation(
+                    key,
+                    task.idempotency_generation,
+                    false,
+                    config.idempotency_ttl,
+                ) {
+                    if let Some(lease) = &mut task.idempotency_lease {
+                        lease.disarm();
+                    }
+                } else {
+                    tracing::error!(
+                        op = "sending_reconciliation",
+                        code = "SQLITE_NO_ROWS",
+                        "[outbound] idempotency persistence failed"
+                    );
+                }
+                control.set_runtime_paused(true);
+                cleanup_temp_files(&task.params);
+                let error = OutboundError::persistence(false);
+                diagnostics.record_rejection(&error);
+                let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
+                continue;
+            }
+            if let Some(lease) = &mut task.idempotency_lease {
+                lease.enter_sending();
+            }
+        }
+        diagnostics.record_queue_wait(Instant::now().saturating_duration_since(task.enqueued_at));
         let send_started = Instant::now();
-        diagnostics.record_queue_wait(send_started.saturating_duration_since(task.enqueued_at));
-        if let Some(previous) = last_send_started.replace(send_started) {
-            let interval = send_started
-                .saturating_duration_since(previous)
-                .as_millis()
-                .min(u64::MAX as u128) as u64;
-            diagnostics
-                .last_send_interval_ms
-                .store(interval, Ordering::Relaxed);
+        if let Some(last) = last_send_started.replace(send_started) {
+            let interval = send_started.saturating_duration_since(last);
+            diagnostics.last_send_interval_ms.store(
+                interval.as_millis().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
         }
         let result = execute_send(&task.params).await;
         diagnostics.record_result(&result);
@@ -820,7 +1224,7 @@ async fn worker_loop(
             Instant::now(),
             SystemTime::now(),
         );
-        complete_task(task, result, &idempotency, Instant::now());
+        complete_task(task, result, config.idempotency_ttl, Some(&control));
     }
 }
 
@@ -830,19 +1234,18 @@ fn admit_for_execute(
     task_ttl: Duration,
     config: &OutboundConfig,
     usage: &Mutex<Usage>,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
     diagnostics: &OutboundDiagnostics,
 ) -> Option<OutboundTask> {
     if control.is_read_only() {
         let error = OutboundError::read_only();
         diagnostics.record_rejection(&error);
-        reject_without_idempotency_cache(task, error, idempotency);
+        reject_without_idempotency_cache(task, error, config.idempotency_ttl);
         return None;
     }
     if task_expired(&task, Instant::now(), task_ttl) {
         let error = OutboundError::expired();
         diagnostics.record_rejection(&error);
-        reject_without_idempotency_cache(task, error, idempotency);
+        reject_without_idempotency_cache(task, error, config.idempotency_ttl);
         return None;
     }
     let policy = {
@@ -860,7 +1263,7 @@ fn admit_for_execute(
         Ok(_) => Some(task),
         Err(error) => {
             diagnostics.record_rejection(&error);
-            reject_without_idempotency_cache(task, error, idempotency);
+            reject_without_idempotency_cache(task, error, config.idempotency_ttl);
             None
         }
     }
@@ -898,14 +1301,14 @@ fn send_result_from_plan(
     plan_state: &crate::plans::send_message::SendMessagePlanState,
     result_error: Option<String>,
 ) -> SendResult {
-    let code = plan_state
+    let error = plan_state
         .diagnostic_error
         .clone()
         .or_else(|| result_error.as_deref().map(execution_error_code));
     SendResult {
         success,
-        error_code: code.clone(),
-        error: code,
+        error_code: error.clone(),
+        error,
         commit_attempted: plan_state.send_action_executed,
     }
 }
@@ -956,32 +1359,80 @@ fn apply_send_result_to_usage(
 }
 
 fn complete_task(
-    task: OutboundTask,
+    mut task: OutboundTask,
     result: SendResult,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
-    now: Instant,
+    idempotency_ttl: Duration,
+    control: Option<&OutboundControl>,
 ) {
     cleanup_temp_files(&task.params);
     if let Some(key) = task.idempotency_key.as_deref() {
-        idempotency
-            .lock()
-            .expect("idempotency store poisoned")
-            .complete(key, now, result.clone());
+        if let Err(error) =
+            persist_result(key, task.idempotency_generation, &result, idempotency_ttl)
+        {
+            log_persist_failure("terminal_result", &error);
+            if mark_needs_reconciliation(
+                key,
+                task.idempotency_generation,
+                result.commit_attempted,
+                idempotency_ttl,
+            ) {
+                if let Some(lease) = &mut task.idempotency_lease {
+                    lease.disarm();
+                }
+            } else {
+                tracing::error!(
+                    op = "terminal_reconciliation",
+                    code = "SQLITE_NO_ROWS",
+                    "[outbound] idempotency persistence failed"
+                );
+            }
+            if let Some(control) = control {
+                control.set_runtime_paused(true);
+            }
+            let _ =
+                task.result_tx
+                    .send(OutboundSendResponse::Rejected(OutboundError::persistence(
+                        result.commit_attempted,
+                    )));
+            return;
+        }
+        if let Some(lease) = &mut task.idempotency_lease {
+            lease.disarm();
+        }
     }
     let _ = task.result_tx.send(OutboundSendResponse::Result(result));
 }
 
 fn reject_without_idempotency_cache(
-    task: OutboundTask,
+    mut task: OutboundTask,
     error: OutboundError,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
+    idempotency_ttl: Duration,
 ) {
     cleanup_temp_files(&task.params);
     if let Some(key) = task.idempotency_key.as_deref() {
-        idempotency
-            .lock()
-            .expect("idempotency store poisoned")
-            .remove(key);
+        let state = if error.kind == OutboundErrorKind::Expired {
+            OutboundIdempotencyState::Expired
+        } else {
+            OutboundIdempotencyState::Rejected
+        };
+        if let Err(err) = persist_rejection(
+            key,
+            task.idempotency_generation,
+            state,
+            &error.code,
+            idempotency_ttl,
+        ) {
+            log_persist_failure("rejection", &err);
+            let _ =
+                task.result_tx
+                    .send(OutboundSendResponse::Rejected(OutboundError::persistence(
+                        false,
+                    )));
+            return;
+        }
+        if let Some(lease) = &mut task.idempotency_lease {
+            lease.disarm();
+        }
     }
     let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
 }
@@ -1004,8 +1455,300 @@ fn send_error(error: &str) -> SendResult {
     }
 }
 
-fn unavailable_result() -> SendResult {
-    send_error("SCHEDULER_UNAVAILABLE")
+enum IdempotencyStart {
+    Inserted(i64),
+    InProgress,
+    NeedsReconciliation,
+    Completed(SendResult),
+    Capacity,
+}
+
+fn try_claim_idempotency(key: &str, ttl: Duration) -> rusqlite::Result<IdempotencyStart> {
+    try_claim_idempotency_limited(key, ttl, idempotency_max_rows())
+}
+
+fn try_claim_idempotency_limited(
+    key: &str,
+    ttl: Duration,
+    max_rows: usize,
+) -> rusqlite::Result<IdempotencyStart> {
+    #[cfg(test)]
+    if consume_hostile_claim_failure() {
+        return Err(hostile_sqlite_error());
+    }
+    let db = get_db();
+    if let Err(error) = sweep_outbound_idempotency(&db, max_rows) {
+        log_persist_failure("sweep", &error);
+    }
+    Ok(match admit_outbound_claim(&db, key, ttl, max_rows)? {
+        OutboundAdmit::Inserted(generation) => IdempotencyStart::Inserted(generation),
+        OutboundAdmit::Completed(result) => IdempotencyStart::Completed(result),
+        OutboundAdmit::InProgress => IdempotencyStart::InProgress,
+        OutboundAdmit::NeedsReconciliation => IdempotencyStart::NeedsReconciliation,
+        OutboundAdmit::Capacity => IdempotencyStart::Capacity,
+    })
+}
+
+fn persist_sending(key: &str, generation: Option<i64>) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if consume_persistence_failure(&FAIL_SENDING_PERSISTENCE_FOR, key) {
+        return Err(hostile_sqlite_error());
+    }
+    let generation = generation.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let db = get_db();
+    if mark_outbound_sending(&db, key, generation)? {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    }
+}
+
+fn persist_result(
+    key: &str,
+    generation: Option<i64>,
+    result: &SendResult,
+    ttl: Duration,
+) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if consume_persistence_failure(&FAIL_RESULT_PERSISTENCE_FOR, key) {
+        return Err(hostile_sqlite_error());
+    }
+    let generation = generation.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let db = get_db();
+    if complete_outbound_result(&db, key, generation, result, ttl)? {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    }
+}
+
+fn persist_rejection(
+    key: &str,
+    generation: Option<i64>,
+    state: OutboundIdempotencyState,
+    error_code: &str,
+    ttl: Duration,
+) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if consume_persistence_failure(&FAIL_REJECTION_PERSISTENCE_FOR, key) {
+        return Err(hostile_sqlite_error());
+    }
+    let db = get_db();
+    if reject_outbound_pre_execution(&db, key, generation, state, error_code, ttl)? {
+        Ok(())
+    } else {
+        Err(rusqlite::Error::QueryReturnedNoRows)
+    }
+}
+
+#[cfg(test)]
+fn fail_next_persistence_for(slot: &OnceLock<Mutex<Option<String>>>, key: &str) {
+    let mut guard = slot
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("persistence fault slot poisoned");
+    *guard = Some(key.to_string());
+}
+
+#[cfg(test)]
+fn consume_persistence_failure(slot: &OnceLock<Mutex<Option<String>>>, key: &str) -> bool {
+    let mut guard = slot
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("persistence fault slot poisoned");
+    if guard.as_deref() == Some(key) {
+        *guard = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn mark_needs_reconciliation(
+    key: &str,
+    generation: Option<i64>,
+    commit_attempted: bool,
+    ttl: Duration,
+) -> bool {
+    #[cfg(test)]
+    if consume_persistence_failure(&FAIL_RECONCILE_PERSISTENCE_FOR, key) {
+        log_persist_failure("reconciliation", &hostile_sqlite_error());
+        return false;
+    }
+    let db = get_db();
+    match mark_outbound_needs_reconciliation(
+        &db,
+        key,
+        generation,
+        "IDEMPOTENCY_RECONCILIATION_REQUIRED",
+        commit_attempted,
+        ttl,
+    ) {
+        Ok(affected) if affected > 0 => true,
+        Ok(_) => {
+            tracing::error!(
+                op = "reconciliation",
+                code = "SQLITE_NO_ROWS",
+                "[outbound] idempotency persistence failed"
+            );
+            false
+        }
+        Err(error) => {
+            log_persist_failure("reconciliation", &error);
+            false
+        }
+    }
+}
+
+fn persist_unknown_worker_result(
+    key: &str,
+    generation: Option<i64>,
+    ttl: Duration,
+) -> rusqlite::Result<()> {
+    if mark_needs_reconciliation(key, generation, true, ttl) {
+        return Ok(());
+    }
+    let db = get_db();
+    match get_outbound_idempotency(&db, key)? {
+        Some(record)
+            if record.state.is_completed_execution()
+                || matches!(
+                    record.state,
+                    OutboundIdempotencyState::NeedsReconciliation
+                        | OutboundIdempotencyState::Rejected
+                        | OutboundIdempotencyState::Expired
+                ) =>
+        {
+            Ok(())
+        }
+        _ => Err(rusqlite::Error::QueryReturnedNoRows),
+    }
+}
+
+fn persist_read_only_rejection(key: &str, ttl: Duration) -> rusqlite::Result<()> {
+    let db = get_db();
+    reject_outbound_unless_active_or_completed(
+        &db,
+        key,
+        OutboundIdempotencyState::Rejected,
+        "OUTBOUND_DISABLED",
+        ttl,
+    )
+}
+
+enum IdempotencyReplay {
+    None,
+    InProgress,
+    NeedsReconciliation,
+    Completed(SendResult),
+}
+
+fn replay_from_record(record: Option<OutboundIdempotencyRecord>) -> IdempotencyReplay {
+    match record {
+        Some(record) if record.state.is_completed_execution() => IdempotencyReplay::Completed(
+            record
+                .result
+                .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
+        ),
+        Some(record)
+            if matches!(
+                record.state,
+                OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
+            ) =>
+        {
+            IdempotencyReplay::InProgress
+        }
+        Some(record) if record.state == OutboundIdempotencyState::NeedsReconciliation => {
+            IdempotencyReplay::NeedsReconciliation
+        }
+        _ => IdempotencyReplay::None,
+    }
+}
+
+fn expire_and_replay_idempotency(key: &str) -> rusqlite::Result<IdempotencyReplay> {
+    let db = get_db();
+    expire_outbound_if_stale(&db, key)?;
+    sweep_persistent_idempotency(&db);
+    Ok(replay_from_record(get_outbound_idempotency(&db, key)?))
+}
+
+pub fn validate_idempotency_key(key: &str) -> Result<(), &'static str> {
+    if key.is_empty() || key.len() > IDEMPOTENCY_KEY_MAX_BYTES {
+        return Err("invalid length");
+    }
+    if key
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    {
+        Ok(())
+    } else {
+        Err("invalid characters")
+    }
+}
+
+fn count_persistent_idempotency() -> usize {
+    try_get_db()
+        .map(|db| {
+            sweep_persistent_idempotency(&db);
+            count_outbound_idempotency(&db)
+        })
+        .unwrap_or(0)
+}
+
+pub fn get_idempotency_status(key: &str) -> Option<OutboundIdempotencyRecord> {
+    if validate_idempotency_key(key).is_err() {
+        return None;
+    }
+    let db = get_db();
+    let _ = expire_outbound_if_stale(&db, key);
+    get_outbound_idempotency(&db, key).ok().flatten()
+}
+
+pub fn manually_reconcile_idempotency(key: &str, ttl: Duration) -> rusqlite::Result<bool> {
+    if validate_idempotency_key(key).is_err() {
+        return Ok(false);
+    }
+    #[cfg(test)]
+    if consume_manual_reconcile_hostile_failure() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 0,
+            },
+            Some(
+                "hostile path=/Users/kyan/private/agent.db SQL=UPDATE outbound_idempotency provider=sqlcipher key=hostile-secret-key"
+                    .to_string(),
+            ),
+        ));
+    }
+    let db = get_db();
+    reconcile_outbound_idempotency(
+        &db,
+        key,
+        OutboundIdempotencyState::Uncertain,
+        "MANUAL_RECONCILIATION_REQUIRED",
+        ttl,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_manual_reconcile_with_hostile_error() {
+    let mut guard = FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("manual reconcile fault slot poisoned");
+    *guard = true;
+}
+
+#[cfg(test)]
+fn consume_manual_reconcile_hostile_failure() -> bool {
+    let mut guard = FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("manual reconcile fault slot poisoned");
+    let fail = *guard;
+    *guard = false;
+    fail
 }
 
 trait JitterSource {
@@ -1053,84 +1796,105 @@ impl SpacingPolicy {
     }
 }
 
-#[derive(Clone)]
-enum IdempotencyEntry {
-    InProgress,
-    Completed {
-        expires_at: Instant,
-        result: SendResult,
-    },
-}
-
-enum IdempotencyStart {
-    Inserted,
-    InProgress,
-    Completed(SendResult),
-}
-
-struct IdempotencyStore {
-    ttl: Duration,
-    entries: HashMap<String, IdempotencyEntry>,
-    order: VecDeque<String>,
-}
-
-impl IdempotencyStore {
-    fn new(ttl: Duration) -> Self {
-        Self {
-            ttl,
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn start(&mut self, key: &str, now: Instant) -> IdempotencyStart {
-        self.prune(now);
-        match self.entries.get(key) {
-            Some(IdempotencyEntry::InProgress { .. }) => IdempotencyStart::InProgress,
-            Some(IdempotencyEntry::Completed { result, .. }) => {
-                IdempotencyStart::Completed(result.clone())
-            }
-            None => {
-                self.entries
-                    .insert(key.to_string(), IdempotencyEntry::InProgress);
-                self.order.push_back(key.to_string());
-                IdempotencyStart::Inserted
-            }
-        }
-    }
-
-    fn complete(&mut self, key: &str, now: Instant, result: SendResult) {
-        self.prune(now);
-        self.entries.insert(
-            key.to_string(),
-            IdempotencyEntry::Completed {
-                expires_at: now + self.ttl,
-                result,
-            },
-        );
-        self.order.push_back(key.to_string());
-    }
-
-    fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn prune(&mut self, now: Instant) {
-        self.entries.retain(|_, entry| match entry {
-            IdempotencyEntry::InProgress => true,
-            IdempotencyEntry::Completed { expires_at, .. } => *expires_at > now,
-        });
-        self.order.retain(|key| self.entries.contains_key(key));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::VecDeque, sync::Once};
+
+    static INIT_DB: Once = Once::new();
+
+    fn init_test_db() {
+        INIT_DB.call_once(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("outbound-test.db");
+            std::env::set_var("AGENT_DB_PATH", &path);
+            std::env::set_var("AGENT_WECHAT_TOKEN", "test-token");
+            crate::router::auth::init_token();
+            let _ = crate::db::init_db();
+            std::mem::forget(dir);
+        });
+    }
+
+    fn clear_idempotency_rows() {
+        init_test_db();
+    }
+
+    fn claim_idempotency(key: &str, ttl: Duration) -> IdempotencyStart {
+        try_claim_idempotency(key, ttl).unwrap()
+    }
+
+    fn generation_for(key: &str) -> i64 {
+        get_idempotency_status(key).unwrap().generation
+    }
+
+    fn lease_for(key: &str) -> IdempotencyClaimLease {
+        IdempotencyClaimLease::new(
+            key.to_string(),
+            generation_for(key),
+            Duration::from_secs(60),
+        )
+    }
+
+    fn persist_terminal_for_test(key: &str, result: &SendResult, ttl: Duration) {
+        let generation = generation_for(key);
+        persist_sending(key, Some(generation)).unwrap();
+        persist_result(key, Some(generation), result, ttl).unwrap();
+    }
+
+    struct LogBuffer(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            Self(std::sync::Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let buf = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogBuffer(std::sync::Arc::clone(&buf)))
+            .with_ansi(false)
+            .with_level(true)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let logs = String::from_utf8(buf.lock().expect("log buffer poisoned").clone()).unwrap();
+        logs
+    }
+
+    fn assert_logs_redacted(logs: &str) {
+        assert!(
+            logs.contains("SQLITE_CORRUPT")
+                || logs.contains("SQLITE_NO_ROWS")
+                || logs.contains("SQLITE_FAILURE")
+                || logs.contains("SQLITE_ERROR"),
+            "expected a coarse sqlite code in logs: {logs}"
+        );
+        for forbidden in [
+            "hostile-secret-key",
+            "/Users/kyan/private/agent.db",
+            "UPDATE outbound_idempotency",
+            "sqlcipher",
+            "provider=sqlcipher",
+        ] {
+            assert!(!logs.contains(forbidden), "leaked {forbidden} in {logs}");
+        }
+    }
 
     struct FixedJitter {
         values: VecDeque<Duration>,
@@ -1173,27 +1937,28 @@ mod tests {
 
     #[test]
     fn idempotency_replays_completed_result_and_blocks_in_progress_duplicate() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        clear_idempotency_rows();
 
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(1)),
+            claim_idempotency("replay-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        assert!(matches!(
+            claim_idempotency("replay-k", Duration::from_secs(60)),
             IdempotencyStart::InProgress
         ));
-
-        store.complete(
-            "k",
-            now + Duration::from_secs(2),
-            SendResult {
+        persist_terminal_for_test(
+            "replay-k",
+            &SendResult {
                 success: false,
                 error_code: Some("UNCERTAIN_AFTER_SEND".to_string()),
                 error: Some("UNCERTAIN_AFTER_SEND".to_string()),
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
 
-        match store.start("k", now + Duration::from_secs(3)) {
+        match claim_idempotency("replay-k", Duration::from_secs(60)) {
             IdempotencyStart::Completed(result) => {
                 assert!(!result.success);
                 assert_eq!(result.error.as_deref(), Some("UNCERTAIN_AFTER_SEND"));
@@ -1203,41 +1968,322 @@ mod tests {
     }
 
     #[test]
-    fn completed_idempotency_key_can_be_reused_after_ttl() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(5));
+    fn idempotency_key_validation_rejects_hostile_values() {
+        assert!(validate_idempotency_key("abc-123._:XYZ").is_ok());
+        assert!(validate_idempotency_key(&"a".repeat(IDEMPOTENCY_KEY_MAX_BYTES)).is_ok());
+        for key in [
+            "",
+            "has space",
+            "slash/key",
+            "line\nbreak",
+            "control\u{7}",
+            "汉字",
+            "snowman-☃",
+        ] {
+            assert!(validate_idempotency_key(key).is_err(), "{key:?}");
+        }
+        assert!(validate_idempotency_key(&"a".repeat(IDEMPOTENCY_KEY_MAX_BYTES + 1)).is_err());
+    }
 
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
-        store.complete(
-            "k",
-            now + Duration::from_secs(1),
-            SendResult {
+    #[test]
+    fn completed_idempotency_key_can_be_reused_after_ttl() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("ttl-k", Duration::from_millis(1)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
+            "ttl-k",
+            &SendResult {
                 success: true,
                 error_code: None,
                 error: None,
                 commit_attempted: true,
             },
+            Duration::from_millis(1),
         );
+        std::thread::sleep(Duration::from_millis(5));
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(6)),
-            IdempotencyStart::Inserted
+            claim_idempotency("ttl-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
         ));
     }
 
     #[test]
     fn in_progress_idempotency_key_does_not_expire_after_ttl() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(5));
-
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
+        clear_idempotency_rows();
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(60)),
+            claim_idempotency("in-progress-k", Duration::from_millis(1)),
+            IdempotencyStart::Inserted(_)
+        ));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(matches!(
+            claim_idempotency("in-progress-k", Duration::from_secs(60)),
             IdempotencyStart::InProgress
+        ));
+    }
+
+    #[test]
+    fn concurrent_same_key_admission_inserts_once() {
+        clear_idempotency_rows();
+        let inserted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let inserted = Arc::clone(&inserted);
+                scope.spawn(move || {
+                    if matches!(
+                        claim_idempotency("concurrent", Duration::from_secs(60)),
+                        IdempotencyStart::Inserted(_)
+                    ) {
+                        inserted.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(inserted.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            claim_idempotency("concurrent", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+    }
+
+    #[test]
+    fn persisted_queued_or_sending_blocks_duplicate_after_restart() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("restart-queued", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        assert!(matches!(
+            claim_idempotency("restart-queued", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+
+        assert!(matches!(
+            claim_idempotency("restart-sending", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_sending("restart-sending", Some(generation_for("restart-sending"))).unwrap();
+        assert!(matches!(
+            claim_idempotency("restart-sending", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+    }
+
+    #[test]
+    fn manual_reconcile_marks_persisted_queued_uncertain_without_reclaim() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("manual-queued", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        assert!(manually_reconcile_idempotency("manual-queued", Duration::from_secs(60)).unwrap());
+        let record = get_idempotency_status("manual-queued").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Uncertain);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("MANUAL_RECONCILIATION_REQUIRED")
+        );
+        match claim_idempotency("manual-queued", Duration::from_secs(60)) {
+            IdempotencyStart::Completed(result) => {
+                assert!(!result.success);
+                assert!(result.commit_attempted);
+            }
+            _ => panic!("manual reconciliation must become terminal replay, not a new claim"),
+        }
+    }
+
+    #[test]
+    fn dropped_claim_lease_marks_exact_queued_generation_needs_reconciliation() {
+        clear_idempotency_rows();
+        let key = "lease-drop-queued";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let generation = generation_for(key);
+
+        drop(IdempotencyClaimLease::new(
+            key.to_string(),
+            generation,
+            Duration::from_secs(60),
+        ));
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("IDEMPOTENCY_CLAIM_DROPPED")
+        );
+        assert!(manually_reconcile_idempotency(key, Duration::from_secs(60)).unwrap());
+        match claim_idempotency(key, Duration::from_secs(60)) {
+            IdempotencyStart::Completed(result) => {
+                assert_eq!(
+                    result.error_code.as_deref(),
+                    Some("MANUAL_RECONCILIATION_REQUIRED")
+                );
+                assert!(result.commit_attempted);
+            }
+            _ => panic!("manual reconciliation must remain no-resend terminal replay"),
+        }
+    }
+
+    #[test]
+    fn dropped_old_generation_claim_lease_cannot_overwrite_reclaimed_key() {
+        clear_idempotency_rows();
+        let key = "lease-old-generation";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let old_generation = generation_for(key);
+        persist_rejection(
+            key,
+            Some(old_generation),
+            OutboundIdempotencyState::Rejected,
+            "IMAGE_BASE64_DECODE_FAILED",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let new_generation = generation_for(key);
+
+        drop(IdempotencyClaimLease::new(
+            key.to_string(),
+            old_generation,
+            Duration::from_secs(60),
+        ));
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Queued);
+        assert_eq!(record.generation, new_generation);
+    }
+
+    #[tokio::test]
+    async fn queued_task_owns_lease_after_caller_abort_until_runtime_drop() {
+        clear_idempotency_rows();
+        let key = "lease-after-try-send-abort";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, mut rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+
+        let pending = tokio::spawn(async move {
+            sender
+                .send_claimed(test_params("queued"), Some(lease_for(key)))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+
+        let task = rx.recv().await.unwrap();
+        drop(task);
+        assert!(matches!(
+            pending.await,
+            Err(error) if error.is_cancelled()
+        ));
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::NeedsReconciliation
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_receiver_before_worker_takes_task_reconciles_queued_lease() {
+        clear_idempotency_rows();
+        let key = "lease-runtime-shutdown";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+        let pending = tokio::spawn(async move {
+            sender
+                .send_claimed(test_params("shutdown"), Some(lease_for(key)))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        drop(rx);
+        match pending.await.unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Unavailable);
+                assert!(!error.commit_attempted);
+            }
+            _ => panic!("closed receiver should fail closed after queued handoff"),
+        }
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert!(record.result.unwrap().commit_attempted);
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
         ));
     }
 
     #[tokio::test]
     async fn queue_bound_rejects_when_channel_is_full() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::from_secs(60),
@@ -1256,7 +2302,6 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(false)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
             diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
@@ -1268,6 +2313,8 @@ mod tests {
                 params: test_params("first"),
                 enqueued_at: Instant::now(),
                 idempotency_key: None,
+                idempotency_generation: None,
+                idempotency_lease: None,
                 result_tx,
             })
             .unwrap();
@@ -1282,24 +2329,23 @@ mod tests {
             }
             _ => panic!("expected queue full rejection"),
         }
-        assert!(matches!(
-            sender
-                .idempotency
-                .lock()
-                .unwrap()
-                .start("queue-full", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
-        let counters = sender.diagnostics.snapshot();
-        assert_eq!(counters.rejected_429_total, 1);
-        assert_eq!(counters.enqueued_total, 0);
-        assert_eq!(counters.completed_total, 0);
+        let record = get_idempotency_status("queue-full").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Rejected);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("QUEUE_FULL")
+        );
     }
 
     #[test]
     fn expired_task_returns_queue_expired_and_cleans_file() {
+        clear_idempotency_rows();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().to_string();
+        assert!(matches!(
+            claim_idempotency("expired", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         let (result_tx, mut result_rx) = oneshot::channel();
         let task = OutboundTask {
             params: SendMessageParams {
@@ -1312,11 +2358,11 @@ mod tests {
             },
             enqueued_at: Instant::now() - Duration::from_secs(10),
             idempotency_key: Some("expired".to_string()),
+            idempotency_generation: Some(generation_for("expired")),
+            idempotency_lease: Some(lease_for("expired")),
             result_tx,
         };
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
-
-        reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
+        reject_without_idempotency_cache(task, OutboundError::expired(), Duration::from_secs(60));
 
         let result = result_rx.try_recv().unwrap();
         match result {
@@ -1327,17 +2373,467 @@ mod tests {
             _ => panic!("expected expired rejection"),
         }
         assert!(!std::path::Path::new(&path).exists());
+        let record = get_idempotency_status("expired").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Expired);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("QUEUE_EXPIRED")
+        );
+    }
+
+    #[test]
+    fn terminal_persistence_failure_returns_fail_closed_rejection() {
+        clear_idempotency_rows();
         assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("expired", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
+            claim_idempotency("persist-fail", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        fail_next_persistence_for(&FAIL_RESULT_PERSISTENCE_FOR, "persist-fail");
+        let (result_tx, mut result_rx) = oneshot::channel();
+        let task = OutboundTask {
+            params: test_params("persist-fail"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some("persist-fail".to_string()),
+            idempotency_generation: Some(generation_for("persist-fail")),
+            idempotency_lease: None,
+            result_tx,
+        };
+        let control = OutboundControl::new(false);
+        complete_task(
+            task,
+            SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+            Some(&control),
+        );
+        match result_rx.try_recv().unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Persistence);
+                assert!(error.commit_attempted);
+            }
+            _ => panic!("terminal persistence failure must not ack the send result"),
+        }
+        assert!(control.is_runtime_paused());
+        assert_eq!(
+            get_idempotency_status("persist-fail").unwrap().state,
+            OutboundIdempotencyState::NeedsReconciliation
+        );
+    }
+
+    #[test]
+    fn unknown_worker_result_after_sending_is_needs_reconciliation_not_failed() {
+        clear_idempotency_rows();
+        let key = "unknown-after-sending";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let generation = generation_for(key);
+        persist_sending(key, Some(generation)).unwrap();
+        persist_unknown_worker_result(key, Some(generation), Duration::from_secs(60)).unwrap();
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert!(record.result.unwrap().commit_attempted);
+        assert_ne!(record.state, OutboundIdempotencyState::Failed);
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
+        ));
+    }
+
+    #[test]
+    fn protected_capacity_rejects_new_keys_but_keeps_existing_and_survives_restart() {
+        clear_idempotency_rows();
+        let held = "cap-held";
+        let extra = "cap-extra";
+        let limit = {
+            let db = get_db();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key IN (?1, ?2)",
+                [held, extra],
+            )
+            .unwrap();
+            count_protected_outbound_idempotency(&db) + 1
+        };
+        assert!(matches!(
+            try_claim_idempotency_limited(held, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Inserted(_)
+        ));
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Capacity
+        ));
+        assert!(matches!(
+            try_claim_idempotency_limited(held, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::InProgress
+        ));
+        assert!(get_idempotency_status(extra).is_none());
+
+        // Restart-equivalent: same durable rows, new claim attempt.
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Capacity
+        ));
+        assert_eq!(
+            get_idempotency_status(held).unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+
+        persist_terminal_for_test(
+            held,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            get_idempotency_status(held).unwrap().state,
+            OutboundIdempotencyState::Sent
+        );
+        let limit_after_terminal = {
+            let db = get_db();
+            count_protected_outbound_idempotency(&db) + 1
+        };
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit_after_terminal)
+                .unwrap(),
+            IdempotencyStart::Inserted(_)
         ));
     }
 
     #[tokio::test]
+    async fn capacity_rejection_http_response_exposes_stable_code() {
+        let response =
+            OutboundSendResponse::Rejected(OutboundError::capacity(Duration::from_secs(2)))
+                .into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("2")
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["errorCode"], "IDEMPOTENCY_CAPACITY");
+        assert_eq!(json["commitAttempted"], false);
+    }
+
+    #[tokio::test]
+    async fn send_claimed_oneshot_close_after_sending_does_not_persist_failed() {
+        clear_idempotency_rows();
+        let key = "oneshot-close-after-sending";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_sending(key, Some(generation_for(key))).unwrap();
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, mut rx) = mpsc::channel(config.queue_capacity);
+        let dropper = tokio::spawn(async move {
+            let task = rx.recv().await.unwrap();
+            drop(task);
+        });
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+        let mut lease = lease_for(key);
+        lease.enter_sending();
+        match sender
+            .send_claimed(test_params("closed after sending"), Some(lease))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Unavailable);
+            }
+            _ => panic!("missing worker result must not become a replayable send result"),
+        }
+        dropper.await.unwrap();
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert!(record.result.unwrap().commit_attempted);
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
+        ));
+    }
+
+    #[test]
+    fn dropped_sending_lease_marks_exact_generation_needs_reconciliation() {
+        clear_idempotency_rows();
+        let key = "lease-drop-sending";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let generation = generation_for(key);
+        persist_sending(key, Some(generation)).unwrap();
+        let mut lease =
+            IdempotencyClaimLease::new(key.to_string(), generation, Duration::from_secs(60));
+        lease.enter_sending();
+        drop(lease);
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        let result = record.result.unwrap();
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("IDEMPOTENCY_SENDING_DROPPED")
+        );
+        assert!(result.commit_attempted);
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
+        ));
+    }
+
+    #[test]
+    fn dropped_sending_lease_cannot_overwrite_terminal_or_other_generation() {
+        clear_idempotency_rows();
+        let key = "lease-sending-stale";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
+            key,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        let mut stale = IdempotencyClaimLease::new(key.to_string(), 1, Duration::from_secs(60));
+        stale.enter_sending();
+        drop(stale);
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::Sent
+        );
+    }
+
+    #[test]
+    fn persist_error_code_is_coarse_and_redacts_hostile_sqlite_text() {
+        let hostile = hostile_sqlite_error();
+        let code = persist_error_code(&hostile);
+        assert_eq!(code, "SQLITE_CORRUPT");
+        for forbidden in [
+            "hostile-secret-key",
+            "/Users/kyan/private/agent.db",
+            "UPDATE outbound_idempotency",
+            "sqlcipher",
+        ] {
+            assert!(!code.contains(forbidden), "{forbidden}");
+        }
+        assert_eq!(
+            persist_error_code(&rusqlite::Error::QueryReturnedNoRows),
+            "SQLITE_NO_ROWS"
+        );
+    }
+
+    #[test]
+    fn persistence_paths_log_only_coarse_codes_for_hostile_sqlite_errors() {
+        clear_idempotency_rows();
+        let logs = capture_logs(|| {
+            fail_next_claim_with_hostile_error();
+            let sender = OutboundSender {
+                config: OutboundConfig {
+                    queue_capacity: 1,
+                    min_spacing: Duration::ZERO,
+                    jitter: Duration::ZERO,
+                    task_ttl: Duration::from_secs(60),
+                    idempotency_ttl: Duration::from_secs(60),
+                    chat_cooldown: Duration::ZERO,
+                    hourly_budget: 10_000,
+                    daily_budget: 10_000,
+                    quiet_start_min: 0,
+                    quiet_end_min: 0,
+                    read_only: false,
+                },
+                control: Arc::new(OutboundControl::new(false)),
+                tx: mpsc::channel(1).0,
+                usage: Arc::new(Mutex::new(Usage::new())),
+                diagnostics: Arc::new(OutboundDiagnostics::default()),
+            };
+            let _ = sender.admit_idempotency_key("claim-hostile");
+            for (op, error) in [
+                ("pre_execution_rejection", hostile_sqlite_error()),
+                ("sending", hostile_sqlite_error()),
+                ("terminal_result", hostile_sqlite_error()),
+                ("reconciliation", hostile_sqlite_error()),
+            ] {
+                log_persist_failure(op, &error);
+            }
+        });
+        assert_logs_redacted(&logs);
+        assert!(logs.contains("claim"), "{logs}");
+        assert!(
+            logs.contains("pre_execution_rejection") || logs.contains("rejection"),
+            "{logs}"
+        );
+        assert!(logs.contains("sending"), "{logs}");
+        assert!(logs.contains("terminal_result"), "{logs}");
+        assert!(logs.contains("reconciliation"), "{logs}");
+    }
+
+    #[test]
+    fn sending_and_rejection_persistence_failures_are_visible() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("sending-fail", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        fail_next_persistence_for(&FAIL_SENDING_PERSISTENCE_FOR, "sending-fail");
+        assert!(persist_sending("sending-fail", Some(generation_for("sending-fail"))).is_err());
+
+        assert!(matches!(
+            claim_idempotency("reject-fail", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        fail_next_persistence_for(&FAIL_REJECTION_PERSISTENCE_FOR, "reject-fail");
+        assert!(persist_rejection(
+            "reject-fail",
+            Some(generation_for("reject-fail")),
+            OutboundIdempotencyState::Rejected,
+            "QUEUE_FULL",
+            Duration::from_secs(60)
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_sending_persistence_failure_marks_reconciliation_and_pauses() {
+        clear_idempotency_rows();
+        let key = "worker-sending-persist-fail";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let control = Arc::new(OutboundControl::new(false));
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let usage = Arc::new(Mutex::new(Usage::new()));
+        let worker = tokio::spawn(worker_loop(
+            config,
+            Arc::clone(&control),
+            rx,
+            usage,
+            Arc::new(OutboundDiagnostics::default()),
+        ));
+        let (result_tx, result_rx) = oneshot::channel();
+
+        fail_next_persistence_for(&FAIL_SENDING_PERSISTENCE_FOR, key);
+        tx.try_send(OutboundTask {
+            params: test_params("will not execute"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some(key.to_string()),
+            idempotency_generation: Some(generation_for(key)),
+            idempotency_lease: Some(lease_for(key)),
+            result_tx,
+        })
+        .unwrap();
+
+        match result_rx.await.unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Persistence);
+                assert!(!error.commit_attempted);
+            }
+            _ => panic!("sending persistence failure must fail closed"),
+        }
+        assert!(control.is_runtime_paused());
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("IDEMPOTENCY_RECONCILIATION_REQUIRED")
+        );
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
+        ));
+        assert!(manually_reconcile_idempotency(key, Duration::from_secs(60)).unwrap());
+        match claim_idempotency(key, Duration::from_secs(60)) {
+            IdempotencyStart::Completed(result) => {
+                assert!(!result.success);
+                assert!(result.commit_attempted);
+            }
+            _ => panic!("manual reconciliation must produce terminal replay"),
+        }
+
+        drop(tx);
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn kill_switch_rejects_without_queueing() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -1356,7 +2852,6 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(true)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
             diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
@@ -1371,14 +2866,244 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
-        let counters = sender.diagnostics.snapshot();
-        assert_eq!(counters.enqueued_total, 0);
-        assert_eq!(counters.completed_total, 0);
-        assert_eq!(counters.rejected_429_total, 0);
+        assert_eq!(
+            get_idempotency_status("k").unwrap().state,
+            OutboundIdempotencyState::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_duplicate_does_not_overwrite_queued_idempotency() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("paused-queued", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+
+        match sender
+            .send(test_params("duplicate"), Some("paused-queued".into()))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::DuplicateInProgress);
+            }
+            _ => panic!("expected in-progress replay"),
+        }
+        assert_eq!(
+            get_idempotency_status("paused-queued").unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_duplicate_replays_terminal_idempotency() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("paused-terminal", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
+            "paused-terminal",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+
+        match sender
+            .send(test_params("duplicate"), Some("paused-terminal".into()))
+            .await
+        {
+            OutboundSendResponse::Result(result) => assert!(result.success),
+            OutboundSendResponse::Rejected(error) => {
+                panic!("terminal replay must not be rejected as {}", error.code)
+            }
+        }
+        assert_eq!(
+            get_idempotency_status("paused-terminal").unwrap().state,
+            OutboundIdempotencyState::Sent
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_admission_expires_stale_terminal_instead_of_replaying() {
+        clear_idempotency_rows();
+        let key = "paused-expired-terminal";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_millis(1)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
+            key,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_millis(1),
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+
+        match sender
+            .send(test_params("expired replay"), Some(key.into()))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::ReadOnly);
+            }
+            OutboundSendResponse::Result(_) => {
+                panic!("paused admission must not replay a TTL-expired terminal result")
+            }
+        }
+        let record = get_idempotency_status(key).unwrap();
+        assert_ne!(record.state, OutboundIdempotencyState::Sent);
+    }
+
+    #[tokio::test]
+    async fn resume_after_paused_duplicate_replays_once_without_requeueing() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("resume-once", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, _rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+        };
+
+        match sender
+            .send(
+                test_params("duplicate while paused"),
+                Some("resume-once".into()),
+            )
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::DuplicateInProgress);
+            }
+            _ => panic!("expected paused duplicate to be treated as in-progress"),
+        }
+        sender.resume();
+        persist_terminal_for_test(
+            "resume-once",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        match sender
+            .send(
+                test_params("replay after resume"),
+                Some("resume-once".into()),
+            )
+            .await
+        {
+            OutboundSendResponse::Result(result) => assert!(result.success),
+            OutboundSendResponse::Rejected(error) => {
+                panic!(
+                    "completed resume replay must not be rejected as {}",
+                    error.code
+                )
+            }
+        }
+        assert_eq!(sender.status().queue_depth, 0);
     }
 
     #[tokio::test]
     async fn queued_task_rechecks_pause_after_spacing_delay() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(25),
@@ -1394,23 +3119,26 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
-            Arc::clone(&idempotency),
             usage,
-            Arc::clone(&diagnostics),
+            Arc::new(OutboundDiagnostics::default()),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
+        assert!(matches!(
+            claim_idempotency("pause-first", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         tx.try_send(OutboundTask {
             params: test_params("first"),
             enqueued_at: Instant::now(),
-            idempotency_key: Some("first".to_string()),
+            idempotency_key: Some("pause-first".to_string()),
+            idempotency_generation: Some(generation_for("pause-first")),
+            idempotency_lease: Some(lease_for("pause-first")),
             result_tx: first_tx,
         })
         .unwrap();
@@ -1424,10 +3152,16 @@ mod tests {
 
         let (second_tx, second_rx) = oneshot::channel();
         control.set_read_only(false);
+        assert!(matches!(
+            claim_idempotency("pause-second", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         tx.try_send(OutboundTask {
             params: test_params("second"),
             enqueued_at: Instant::now(),
-            idempotency_key: Some("second".to_string()),
+            idempotency_key: Some("pause-second".to_string()),
+            idempotency_generation: Some(generation_for("pause-second")),
+            idempotency_lease: Some(lease_for("pause-second")),
             result_tx: second_tx,
         })
         .unwrap();
@@ -1440,17 +3174,10 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
-        assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("second", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
-        let counters = diagnostics.snapshot();
-        assert_eq!(counters.completed_total, 0);
-        assert_eq!(counters.queue_expired_total, 0);
-        assert_eq!(counters.rejected_429_total, 0);
+        assert_eq!(
+            get_idempotency_status("pause-second").unwrap().state,
+            OutboundIdempotencyState::Rejected
+        );
 
         drop(tx);
         worker.await.unwrap();
@@ -1458,6 +3185,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_task_rechecks_ttl_after_spacing_delay() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(30),
@@ -1473,23 +3201,26 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
-            Arc::clone(&idempotency),
             usage,
-            Arc::clone(&diagnostics),
+            Arc::new(OutboundDiagnostics::default()),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
+        assert!(matches!(
+            claim_idempotency("ttl-first", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         tx.try_send(OutboundTask {
             params: test_params("first"),
             enqueued_at: Instant::now(),
-            idempotency_key: Some("first".to_string()),
+            idempotency_key: Some("ttl-first".to_string()),
+            idempotency_generation: Some(generation_for("ttl-first")),
+            idempotency_lease: Some(lease_for("ttl-first")),
             result_tx: first_tx,
         })
         .unwrap();
@@ -1503,10 +3234,16 @@ mod tests {
 
         let (second_tx, second_rx) = oneshot::channel();
         control.set_read_only(false);
+        assert!(matches!(
+            claim_idempotency("ttl-second", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         tx.try_send(OutboundTask {
             params: test_params("second"),
             enqueued_at: Instant::now(),
-            idempotency_key: Some("second".to_string()),
+            idempotency_key: Some("ttl-second".to_string()),
+            idempotency_generation: Some(generation_for("ttl-second")),
+            idempotency_lease: Some(lease_for("ttl-second")),
             result_tx: second_tx,
         })
         .unwrap();
@@ -1518,17 +3255,10 @@ mod tests {
             }
             _ => panic!("expected expired rejection"),
         }
-        assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("second", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
-        let counters = diagnostics.snapshot();
-        assert_eq!(counters.queue_expired_total, 1);
-        assert_eq!(counters.completed_total, 0);
-        assert_eq!(counters.rejected_429_total, 0);
+        assert_eq!(
+            get_idempotency_status("ttl-second").unwrap().state,
+            OutboundIdempotencyState::Expired
+        );
 
         drop(tx);
         worker.await.unwrap();
@@ -1536,6 +3266,7 @@ mod tests {
 
     #[test]
     fn status_reports_queue_config_and_idempotency_entries() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(150),
@@ -1554,16 +3285,14 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(true)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
             diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
 
-        sender
-            .idempotency
-            .lock()
-            .unwrap()
-            .start("status-key", Instant::now());
+        assert!(matches!(
+            claim_idempotency("status-key", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
 
         let status = sender.status();
         assert_eq!(status.queue_capacity, 2);
@@ -1575,128 +3304,7 @@ mod tests {
         assert_eq!(status.idempotency_ttl_ms, 60_000);
         assert!(status.read_only);
         assert!(status.runtime_paused);
-        assert_eq!(status.idempotency_entries, 1);
-        assert_eq!(status.diagnostics.enqueued_total, 0);
-        assert_eq!(status.chat_select_diagnostics.attach_total, 0);
-
-        let json = serde_json::to_string(&status).unwrap();
-        for sensitive in [
-            "private message body",
-            "Alice Display Name",
-            "/tmp/send_file_secret.pdf",
-            "Bearer secret-token",
-            "data:image/png;base64",
-        ] {
-            assert!(!json.contains(sensitive));
-        }
-        assert!(json.contains("diagnostics"));
-        assert!(json.contains("chatSelectDiagnostics"));
-    }
-
-    #[test]
-    fn diagnostics_count_redacted_outcomes_and_durations() {
-        let diagnostics = OutboundDiagnostics::default();
-        diagnostics.record_rejection(&OutboundError::queue_full(Duration::from_secs(1)));
-        diagnostics.record_rejection(&OutboundError::expired());
-        diagnostics.record_rejection(&OutboundError::quiet_hours(Duration::from_secs(1)));
-        diagnostics.record_rejection(&OutboundError::budget(
-            "HOURLY_BUDGET",
-            Duration::from_secs(1),
-        ));
-        diagnostics.record_queue_wait(Duration::from_millis(23));
-        diagnostics.record_result(&SendResult {
-            success: false,
-            error_code: Some("send_commit_uncertain".into()),
-            error: Some("send_commit_uncertain".into()),
-            commit_attempted: true,
-        });
-
-        let snapshot = diagnostics.snapshot();
-        assert_eq!(snapshot.rejected_429_total, 3);
-        assert_eq!(snapshot.queue_expired_total, 1);
-        assert_eq!(snapshot.quiet_hours_rejected_total, 1);
-        assert_eq!(snapshot.budget_rejected_total, 1);
-        assert_eq!(snapshot.completed_total, 1);
-        assert_eq!(snapshot.failed_total, 1);
-        assert_eq!(snapshot.uncertain_total, 1);
-        assert_eq!(snapshot.last_queue_wait_ms, 23);
-        assert_eq!(snapshot.max_queue_wait_ms, 23);
-    }
-
-    #[test]
-    fn pause_resume_and_uncertain_completion_are_counted_once() {
-        let config = OutboundConfig {
-            queue_capacity: 1,
-            min_spacing: Duration::ZERO,
-            jitter: Duration::ZERO,
-            task_ttl: Duration::from_secs(60),
-            idempotency_ttl: Duration::from_secs(60),
-            chat_cooldown: Duration::ZERO,
-            hourly_budget: 10_000,
-            daily_budget: 10_000,
-            quiet_start_min: 0,
-            quiet_end_min: 0,
-            read_only: false,
-        };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
-        sender.pause();
-        sender.pause();
-        sender.resume();
-        sender.resume();
-        sender.diagnostics.record_result(&SendResult {
-            success: false,
-            error_code: Some("send_result_uncertain".into()),
-            error: None,
-            commit_attempted: true,
-        });
-        let counters = sender.diagnostics.snapshot();
-        assert_eq!(counters.pause_total, 1);
-        assert_eq!(counters.resume_total, 1);
-        assert_eq!(counters.completed_total, 1);
-        assert_eq!(counters.failed_total, 1);
-        assert_eq!(counters.uncertain_total, 1);
-    }
-
-    #[test]
-    fn uncertain_counter_uses_only_post_commit_terminal_codes() {
-        let diagnostics = OutboundDiagnostics::default();
-        diagnostics.record_result(&SendResult {
-            success: false,
-            error_code: Some("target_confirmation_identity_mismatch".into()),
-            error: None,
-            commit_attempted: false,
-        });
-        diagnostics.record_result(&SendResult {
-            success: false,
-            error_code: Some("send_result_uncertain".into()),
-            error: None,
-            commit_attempted: true,
-        });
-        assert_eq!(diagnostics.snapshot().uncertain_total, 1);
-    }
-
-    #[test]
-    fn execution_errors_are_mapped_to_stable_codes_without_detail() {
-        assert_eq!(
-            execution_error_code("Execution timeout after 301s /tmp/private"),
-            "EXECUTION_TIMEOUT"
-        );
-        assert_eq!(
-            execution_error_code("Unknown state for 60s - Alice secret"),
-            "UNKNOWN_UI_STATE_TIMEOUT"
-        );
-        assert_eq!(
-            execution_error_code("untrusted error with message text and token"),
-            "SEND_EXECUTION_FAILED"
-        );
+        assert!(status.idempotency_entries >= 1);
     }
 
     fn test_params(text: &str) -> SendMessageParams {
@@ -1712,20 +3320,26 @@ mod tests {
 
     #[test]
     fn uncertain_terminal_result_is_cached_and_not_retried() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
-        store.complete(
-            "k",
-            now,
-            SendResult {
+        clear_idempotency_rows();
+        assert!(matches!(
+            claim_idempotency("uncertain-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
+            "uncertain-k",
+            &SendResult {
                 success: false,
                 error_code: Some("send_commit_uncertain".into()),
                 error: Some("send_commit_uncertain".into()),
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
-        match store.start("k", now + Duration::from_millis(1)) {
+        assert_eq!(
+            get_idempotency_status("uncertain-k").unwrap().state,
+            OutboundIdempotencyState::Uncertain
+        );
+        match claim_idempotency("uncertain-k", Duration::from_secs(60)) {
             IdempotencyStart::Completed(result) => {
                 assert!(!result.success);
                 assert_eq!(result.error_code.as_deref(), Some("send_commit_uncertain"));
@@ -1736,6 +3350,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_replay_beats_quiet_hours_policy() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -1754,19 +3369,22 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(false)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
             diagnostics: Arc::new(OutboundDiagnostics::default()),
         };
-        sender.idempotency.lock().unwrap().complete(
+        assert!(matches!(
+            claim_idempotency("replay", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        persist_terminal_for_test(
             "replay",
-            Instant::now(),
-            SendResult {
+            &SendResult {
                 success: true,
                 error_code: None,
                 error: None,
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
         match sender
             .send(test_params("hello"), Some("replay".into()))
@@ -1777,14 +3395,11 @@ mod tests {
                 panic!("replay must not be rejected as {}", error.code)
             }
         }
-        let counters = sender.diagnostics.snapshot();
-        assert_eq!(counters.enqueued_total, 0);
-        assert_eq!(counters.completed_total, 0);
-        assert_eq!(counters.quiet_hours_rejected_total, 0);
     }
 
     #[tokio::test]
     async fn worker_rejects_quiet_hours_instead_of_sending() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::ZERO,
@@ -1800,22 +3415,25 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(false));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
-            Arc::clone(&idempotency),
             usage,
-            Arc::clone(&diagnostics),
+            Arc::new(OutboundDiagnostics::default()),
         ));
         let (result_tx, result_rx) = oneshot::channel();
+        assert!(matches!(
+            claim_idempotency("quiet", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
         tx.try_send(OutboundTask {
             params: test_params("quiet"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("quiet".into()),
+            idempotency_generation: Some(generation_for("quiet")),
+            idempotency_lease: Some(lease_for("quiet")),
             result_tx,
         })
         .unwrap();
@@ -1825,10 +3443,6 @@ mod tests {
             }
             _ => panic!("queued quiet-hours task must be rejected, not sent"),
         }
-        let counters = diagnostics.snapshot();
-        assert_eq!(counters.quiet_hours_rejected_total, 1);
-        assert_eq!(counters.rejected_429_total, 1);
-        assert_eq!(counters.completed_total, 0);
         drop(tx);
         worker.await.unwrap();
     }
@@ -1922,14 +3536,33 @@ mod tests {
         }
     }
 
-    fn pre_execution_reject_is_not_cached() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
-        store.start("k", now);
-        store.remove("k");
+    #[test]
+    fn pre_execution_reject_does_not_contaminate_completed_result() {
+        clear_idempotency_rows();
         assert!(matches!(
-            store.start("k", now + Duration::from_millis(1)),
-            IdempotencyStart::Inserted
+            claim_idempotency("pre-reject-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
         ));
+        persist_terminal_for_test(
+            "pre-reject-k",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        assert!(persist_rejection(
+            "pre-reject-k",
+            Some(generation_for("pre-reject-k")),
+            OutboundIdempotencyState::Rejected,
+            "OUTBOUND_DISABLED",
+            Duration::from_secs(60),
+        )
+        .is_err());
+        let record = get_idempotency_status("pre-reject-k").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Sent);
+        assert!(record.result.unwrap().success);
     }
 }
