@@ -1,3 +1,4 @@
+import { sendParamsSchema, sendResultSchema } from "./schemas/index.js";
 import type {
   Chat,
   Contact,
@@ -230,7 +231,42 @@ export class WeChatClient {
   }
 
   async sendMessage(params: SendParams): Promise<SendResult> {
-    return this.post("/api/messages/send", params);
+    const validated = sendParamsSchema.parse(params);
+    const res = await fetch(`${this.base}/api/messages/send`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(validated),
+    });
+    if (res.ok) return sendResultSchema.parse(await res.json());
+
+    const body = await res.text();
+    if (res.status === 409) {
+      try {
+        const result = sendResultSchema.parse(JSON.parse(body));
+        if (
+          result.success === false &&
+          result.errorCode === "SIMILAR_CONTENT_CONFIRMATION_REQUIRED"
+        ) {
+          return result;
+        }
+      } catch {
+        // Preserve the ordinary HTTP error contract for malformed responses.
+      }
+    }
+    let errorCode: string | undefined;
+    try {
+      const parsed = JSON.parse(body) as { errorCode?: unknown };
+      if (typeof parsed.errorCode === "string") errorCode = parsed.errorCode;
+    } catch {
+      // Non-JSON error bodies stay generic.
+    }
+    throw new WeChatHttpError(
+      res.status,
+      res.statusText,
+      body,
+      errorCode,
+      parseRetryAfter(res.headers.get("retry-after")),
+    );
   }
 
   // ---- Debug ----

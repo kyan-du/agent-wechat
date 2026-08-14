@@ -19,6 +19,37 @@ test("sendParamsSchema preserves inboundChars and idempotencyKey", () => {
   assert.equal(asGenerated.inboundChars, 12);
 });
 
+test("sendParamsSchema preserves validated fairness and confirmation fields", () => {
+  const parsed = sendParamsSchema.parse({
+    chatId: "wxid_a",
+    text: "hello",
+    source: "openclaw:primary",
+    similarityConfirmed: true,
+  });
+  assert.equal(parsed.source, "openclaw:primary");
+  assert.equal(parsed.similarityConfirmed, true);
+  assert.equal(
+    sendParamsSchema.safeParse({ chatId: "wxid_a", source: "bad source" }).success,
+    false,
+  );
+  assert.equal(
+    sendParamsSchema.safeParse({ chatId: "wxid_a", source: "x".repeat(65) }).success,
+    false,
+  );
+});
+
+test("sendParamsSchema rejects blank chat and text fields", () => {
+  for (const chatId of ["", " ", "\t\n"]) {
+    assert.equal(sendParamsSchema.safeParse({ chatId, text: "hello" }).success, false);
+  }
+  for (const text of ["", " ", "\t\n"]) {
+    assert.equal(sendParamsSchema.safeParse({ chatId: "wxid_a", text }).success, false);
+  }
+  const trimmed = sendParamsSchema.parse({ chatId: " wxid_a ", text: " hello " });
+  assert.equal(trimmed.chatId, "wxid_a");
+  assert.equal(trimmed.text, "hello");
+});
+
 test("sendParamsSchema rejects invalid inboundChars", () => {
   assert.equal(
     sendParamsSchema.safeParse({ chatId: "wxid_a", inboundChars: -1 }).success,

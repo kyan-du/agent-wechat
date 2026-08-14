@@ -1,5 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::DefaultHasher, HashMap, VecDeque},
+    future::Future,
+    hash::{Hash, Hasher},
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -23,13 +26,12 @@ use crate::{
         get_db,
         queries::{
             admit_outbound_claim, complete_outbound_result, count_outbound_idempotency,
-            count_protected_outbound_idempotency, expire_outbound_if_stale,
-            get_outbound_idempotency, mark_outbound_needs_reconciliation,
-            mark_outbound_queued_needs_reconciliation,
-            mark_outbound_sending, mark_outbound_sending_needs_reconciliation,
-            reconcile_outbound_idempotency, reject_outbound_pre_execution,
-            reject_outbound_unless_active_or_completed, sweep_outbound_idempotency, OutboundAdmit,
-            OutboundIdempotencyRecord, OutboundIdempotencyState,
+            expire_outbound_if_stale, get_outbound_idempotency, mark_outbound_needs_reconciliation,
+            mark_outbound_queued_needs_reconciliation, mark_outbound_sending,
+            mark_outbound_sending_needs_reconciliation, reconcile_outbound_idempotency,
+            reject_outbound_pre_execution, reject_outbound_unless_active_or_completed,
+            sweep_outbound_idempotency, OutboundAdmit, OutboundIdempotencyRecord,
+            OutboundIdempotencyState,
         },
         try_get_db,
     },
@@ -52,6 +54,13 @@ const DEFAULT_QUIET_START_MIN: u32 = 30;
 const DEFAULT_QUIET_END_MIN: u32 = 7 * 60 + 30;
 const DEFAULT_IDEMPOTENCY_MAX_ROWS: usize = 10_000;
 pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
+const DEFAULT_LONG_TAIL_CHANCE_PERCENT: u32 = 8;
+const DEFAULT_LONG_TAIL_JITTER_MS: u64 = 4_000;
+const DEFAULT_SIMILARITY_WINDOW_MS: u64 = 10 * 60_000;
+const DEFAULT_SIMILARITY_MIN_CHARS: usize = 20;
+const DEFAULT_SIMILARITY_HAMMING: u32 = 8;
+const DEFAULT_SIMILARITY_HISTORY: usize = 200;
+const DEFAULT_SOURCE: &str = "api";
 
 fn persist_error_code(error: &rusqlite::Error) -> &'static str {
     match error {
@@ -116,9 +125,10 @@ pub enum OutboundErrorKind {
     Persistence,
     InvalidIdempotencyKey,
     Capacity,
+    SimilarContent,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundError {
     pub kind: OutboundErrorKind,
     pub retry_after: Option<Duration>,
@@ -231,6 +241,16 @@ impl OutboundError {
             commit_attempted: false,
         }
     }
+
+    fn similar_content() -> Self {
+        Self {
+            kind: OutboundErrorKind::SimilarContent,
+            retry_after: None,
+            code: "SIMILAR_CONTENT_CONFIRMATION_REQUIRED".to_string(),
+            message: "Similar outbound text requires explicit human confirmation".to_string(),
+            commit_attempted: false,
+        }
+    }
 }
 
 pub enum OutboundSendResponse {
@@ -250,6 +270,7 @@ impl IntoResponse for OutboundSendResponse {
                     | OutboundErrorKind::Budget
                     | OutboundErrorKind::Capacity => StatusCode::TOO_MANY_REQUESTS,
                     OutboundErrorKind::ReadOnly => StatusCode::SERVICE_UNAVAILABLE,
+                    OutboundErrorKind::SimilarContent => StatusCode::CONFLICT,
                     OutboundErrorKind::Expired | OutboundErrorKind::Unavailable => {
                         StatusCode::SERVICE_UNAVAILABLE
                     }
@@ -504,6 +525,12 @@ pub struct OutboundConfig {
     pub quiet_start_min: u32,
     pub quiet_end_min: u32,
     pub read_only: bool,
+    pub long_tail_jitter: Duration,
+    pub long_tail_chance_percent: u32,
+    pub similarity_window: Duration,
+    pub similarity_min_chars: usize,
+    pub similarity_hamming: u32,
+    pub similarity_history: usize,
 }
 
 impl OutboundConfig {
@@ -535,6 +562,26 @@ impl OutboundConfig {
             quiet_end_min: env_u32("AGENT_WECHAT_QUIET_END_MIN").unwrap_or(DEFAULT_QUIET_END_MIN),
             read_only: env_bool("AGENT_WECHAT_OUTBOUND_DISABLED")
                 || env_bool("AGENT_WECHAT_READ_ONLY"),
+            long_tail_jitter: Duration::from_millis(
+                env_u64("AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS")
+                    .unwrap_or(DEFAULT_LONG_TAIL_JITTER_MS),
+            ),
+            long_tail_chance_percent: env_u32("AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT")
+                .unwrap_or(DEFAULT_LONG_TAIL_CHANCE_PERCENT)
+                .min(100),
+            similarity_window: Duration::from_millis(
+                env_u64("AGENT_WECHAT_SIMILARITY_WINDOW_MS")
+                    .unwrap_or(DEFAULT_SIMILARITY_WINDOW_MS),
+            ),
+            similarity_min_chars: env_usize("AGENT_WECHAT_SIMILARITY_MIN_CHARS")
+                .unwrap_or(DEFAULT_SIMILARITY_MIN_CHARS)
+                .clamp(3, 10_000),
+            similarity_hamming: env_u32("AGENT_WECHAT_SIMILARITY_HAMMING")
+                .unwrap_or(DEFAULT_SIMILARITY_HAMMING)
+                .min(32),
+            similarity_history: env_usize("AGENT_WECHAT_SIMILARITY_HISTORY")
+                .unwrap_or(DEFAULT_SIMILARITY_HISTORY)
+                .clamp(1, 10_000),
         }
     }
 
@@ -676,6 +723,310 @@ fn env_bool(name: &str) -> bool {
     )
 }
 
+fn normalize_source(source: Option<&str>) -> String {
+    source
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+        })
+        .unwrap_or(DEFAULT_SOURCE)
+        .to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextFingerprint {
+    simhash: u64,
+    feature_bits: [u64; 2],
+    chars: usize,
+}
+
+fn text_fingerprint(text: &str) -> Option<TextFingerprint> {
+    let normalized: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() < 3 {
+        return None;
+    }
+    let mut weights = [0i32; 64];
+    let mut feature_bits = [0u64; 2];
+    for gram in chars.windows(3) {
+        let mut hasher = DefaultHasher::new();
+        gram.hash(&mut hasher);
+        let hash = hasher.finish();
+        feature_bits[(hash as usize >> 6) & 1] |= 1u64 << (hash & 63);
+        for (bit, weight) in weights.iter_mut().enumerate() {
+            *weight += if hash & (1u64 << bit) == 0 { -1 } else { 1 };
+        }
+    }
+    let simhash = weights
+        .iter()
+        .enumerate()
+        .fold(0u64, |hash, (bit, weight)| {
+            if *weight >= 0 {
+                hash | (1u64 << bit)
+            } else {
+                hash
+            }
+        });
+    Some(TextFingerprint {
+        simhash,
+        feature_bits,
+        chars: chars.len(),
+    })
+}
+
+struct SimilarityEntry {
+    at: Instant,
+    scope_hash: u64,
+    fingerprint: TextFingerprint,
+}
+
+struct PendingSimilarity {
+    id: u64,
+    scope_hash: u64,
+    fingerprint: TextFingerprint,
+}
+
+struct SimilarityGuard {
+    window: Duration,
+    min_chars: usize,
+    max_hamming: u32,
+    max_entries: usize,
+    committed: VecDeque<SimilarityEntry>,
+    pending: Vec<PendingSimilarity>,
+}
+
+impl SimilarityGuard {
+    fn new(config: &OutboundConfig) -> Self {
+        Self {
+            window: config.similarity_window,
+            min_chars: config.similarity_min_chars,
+            max_hamming: config.similarity_hamming,
+            max_entries: config.similarity_history,
+            committed: VecDeque::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn is_similar(&self, existing: TextFingerprint, fingerprint: TextFingerprint) -> bool {
+        let length_delta = existing.chars.abs_diff(fingerprint.chars);
+        let intersection: u32 = existing
+            .feature_bits
+            .iter()
+            .zip(fingerprint.feature_bits)
+            .map(|(left, right)| (left & right).count_ones())
+            .sum();
+        let union: u32 = existing
+            .feature_bits
+            .iter()
+            .zip(fingerprint.feature_bits)
+            .map(|(left, right)| (left | right).count_ones())
+            .sum();
+        length_delta * 5 <= existing.chars.max(fingerprint.chars)
+            && ((existing.simhash ^ fingerprint.simhash).count_ones() <= self.max_hamming
+                || (union > 0 && intersection * 100 >= union * 72))
+    }
+
+    fn reserve(
+        &mut self,
+        id: u64,
+        chat_id: &str,
+        source: &str,
+        text: Option<&str>,
+        confirmed: bool,
+        now: Instant,
+    ) -> Result<bool, OutboundError> {
+        while self
+            .committed
+            .front()
+            .is_some_and(|entry| now.saturating_duration_since(entry.at) > self.window)
+        {
+            self.committed.pop_front();
+        }
+        let Some(fingerprint) = text.and_then(text_fingerprint) else {
+            return Ok(false);
+        };
+        if fingerprint.chars < self.min_chars {
+            return Ok(false);
+        }
+        let mut scope_hasher = DefaultHasher::new();
+        chat_id.hash(&mut scope_hasher);
+        source.hash(&mut scope_hasher);
+        let scope_hash = scope_hasher.finish();
+        let similar = self
+            .committed
+            .iter()
+            .filter(|entry| entry.scope_hash == scope_hash)
+            .any(|entry| self.is_similar(entry.fingerprint, fingerprint));
+        if similar && !confirmed {
+            return Err(OutboundError::similar_content());
+        }
+        self.pending.push(PendingSimilarity {
+            id,
+            scope_hash,
+            fingerprint,
+        });
+        Ok(true)
+    }
+
+    fn validate_for_execute(&self, id: u64, confirmed: bool) -> Result<(), OutboundError> {
+        if confirmed {
+            return Ok(());
+        }
+        let Some(pending) = self.pending.iter().find(|entry| entry.id == id) else {
+            return Ok(());
+        };
+        if self
+            .committed
+            .iter()
+            .filter(|entry| entry.scope_hash == pending.scope_hash)
+            .any(|entry| self.is_similar(entry.fingerprint, pending.fingerprint))
+        {
+            return Err(OutboundError::similar_content());
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, id: u64, now: Instant) {
+        if let Some(index) = self.pending.iter().position(|entry| entry.id == id) {
+            let pending = self.pending.swap_remove(index);
+            self.committed.push_back(SimilarityEntry {
+                at: now,
+                scope_hash: pending.scope_hash,
+                fingerprint: pending.fingerprint,
+            });
+            while self.committed.len() > self.max_entries {
+                self.committed.pop_front();
+            }
+        }
+    }
+
+    fn release(&mut self, id: u64) {
+        self.pending.retain(|entry| entry.id != id);
+    }
+}
+
+struct SimilarityReservation {
+    guard: Arc<Mutex<SimilarityGuard>>,
+    id: u64,
+    committed: bool,
+}
+
+impl SimilarityReservation {
+    fn validate_for_execute(&self, confirmed: bool) -> Result<(), OutboundError> {
+        self.guard
+            .lock()
+            .expect("similarity guard poisoned")
+            .validate_for_execute(self.id, confirmed)
+    }
+
+    fn commit(&mut self, now: Instant) {
+        self.guard
+            .lock()
+            .expect("similarity guard poisoned")
+            .commit(self.id, now);
+        self.committed = true;
+    }
+}
+
+impl Drop for SimilarityReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard
+                .lock()
+                .expect("similarity guard poisoned")
+                .release(self.id);
+        }
+    }
+}
+
+struct FairSourceQueue {
+    chats: HashMap<String, VecDeque<OutboundTask>>,
+    ready_chats: VecDeque<String>,
+}
+
+impl FairSourceQueue {
+    fn new() -> Self {
+        Self {
+            chats: HashMap::new(),
+            ready_chats: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, task: OutboundTask) {
+        let chat = task.params.chat_id.clone();
+        let queue = self.chats.entry(chat.clone()).or_default();
+        if queue.is_empty() {
+            self.ready_chats.push_back(chat);
+        }
+        queue.push_back(task);
+    }
+
+    fn pop(&mut self) -> Option<OutboundTask> {
+        let chat = self.ready_chats.pop_front()?;
+        let queue = self.chats.get_mut(&chat)?;
+        let task = queue.pop_front();
+        if queue.is_empty() {
+            self.chats.remove(&chat);
+        } else {
+            self.ready_chats.push_back(chat);
+        }
+        task
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ready_chats.is_empty()
+    }
+}
+
+struct FairQueue {
+    sources: HashMap<String, FairSourceQueue>,
+    ready_sources: VecDeque<String>,
+}
+
+impl FairQueue {
+    fn new() -> Self {
+        Self {
+            sources: HashMap::new(),
+            ready_sources: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, task: OutboundTask) {
+        let source = normalize_source(task.params.source.as_deref());
+        let queue = self
+            .sources
+            .entry(source.clone())
+            .or_insert_with(FairSourceQueue::new);
+        if queue.is_empty() {
+            self.ready_sources.push_back(source);
+        }
+        queue.push(task);
+    }
+
+    fn pop(&mut self) -> Option<OutboundTask> {
+        let source = self.ready_sources.pop_front()?;
+        let queue = self.sources.get_mut(&source)?;
+        let task = queue.pop();
+        if queue.is_empty() {
+            self.sources.remove(&source);
+        } else {
+            self.ready_sources.push_back(source);
+        }
+        task
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ready_sources.is_empty()
+    }
+}
+
 struct OutboundTask {
     params: SendMessageParams,
     enqueued_at: Instant,
@@ -683,15 +1034,24 @@ struct OutboundTask {
     idempotency_generation: Option<i64>,
     idempotency_lease: Option<IdempotencyClaimLease>,
     result_tx: oneshot::Sender<OutboundSendResponse>,
+    _queue_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    similarity_reservation: Option<SimilarityReservation>,
 }
+
+type ExecuteFuture = Pin<Box<dyn Future<Output = SendResult> + Send>>;
+type ExecuteSend = Arc<dyn Fn(SendMessageParams) -> ExecuteFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct OutboundSender {
     config: OutboundConfig,
     control: Arc<OutboundControl>,
-    tx: mpsc::Sender<OutboundTask>,
+    tx: mpsc::UnboundedSender<OutboundTask>,
+    capacity: Arc<tokio::sync::Semaphore>,
     usage: Arc<Mutex<Usage>>,
+    similarity: Arc<Mutex<SimilarityGuard>>,
+    next_similarity_id: Arc<AtomicU64>,
     diagnostics: Arc<OutboundDiagnostics>,
+    execute: ExecuteSend,
 }
 
 static OUTBOUND_SENDER: OnceLock<OutboundSender> = OnceLock::new();
@@ -749,14 +1109,24 @@ pub fn outbound_sender() -> &'static OutboundSender {
 
 impl OutboundSender {
     pub fn spawn(config: OutboundConfig) -> Self {
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        Self::spawn_with_executor(
+            config,
+            Arc::new(|params| Box::pin(async move { execute_send(&params).await })),
+        )
+    }
+
+    fn spawn_with_executor(config: OutboundConfig, execute: ExecuteSend) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let capacity = Arc::new(tokio::sync::Semaphore::new(config.queue_capacity));
         let control = Arc::new(OutboundControl::new(config.read_only));
         let usage = Arc::new(Mutex::new(Usage::new()));
+        let similarity = Arc::new(Mutex::new(SimilarityGuard::new(&config)));
         let diagnostics = Arc::new(OutboundDiagnostics::default());
         let worker_control = Arc::clone(&control);
         let worker_usage = Arc::clone(&usage);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_config = config.clone();
+        let worker_execute = Arc::clone(&execute);
 
         tokio::spawn(async move {
             worker_loop(
@@ -765,6 +1135,7 @@ impl OutboundSender {
                 rx,
                 worker_usage,
                 worker_diagnostics,
+                worker_execute,
             )
             .await;
         });
@@ -773,8 +1144,12 @@ impl OutboundSender {
             config,
             control,
             tx,
+            capacity,
             usage,
+            similarity,
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
             diagnostics,
+            execute,
         }
     }
 
@@ -935,6 +1310,84 @@ impl OutboundSender {
             }
         }
 
+        let permit = match Arc::clone(&self.capacity).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let error = OutboundError::queue_full(self.config.retry_after());
+                if let Some(key) = idempotency_key.as_deref() {
+                    if let Err(err) = persist_rejection(
+                        key,
+                        idempotency_generation,
+                        OutboundIdempotencyState::Rejected,
+                        &error.code,
+                        self.config.idempotency_ttl,
+                    ) {
+                        log_persist_failure("queue_full_rejection", &err);
+                        self.control.set_runtime_paused(true);
+                        cleanup_temp_files(&params);
+                        return OutboundSendResponse::Rejected(OutboundError::persistence(false));
+                    }
+                    if let Some(lease) = &mut idempotency_lease {
+                        lease.disarm();
+                    }
+                }
+                cleanup_temp_files(&params);
+                self.diagnostics.record_rejection(&error);
+                return OutboundSendResponse::Rejected(error);
+            }
+        };
+
+        let similarity_id = self.next_similarity_id.fetch_add(1, Ordering::Relaxed);
+        let similarity_source = normalize_source(params.source.as_deref());
+        let similarity_text = if params.image_path.is_none() && params.file_path.is_none() {
+            params.message.as_deref()
+        } else {
+            None
+        };
+        let similarity_reserved = self
+            .similarity
+            .lock()
+            .expect("similarity guard poisoned")
+            .reserve(
+                similarity_id,
+                &params.chat_id,
+                &similarity_source,
+                similarity_text,
+                params.similarity_confirmed,
+                now,
+            );
+        let similarity_reservation = match similarity_reserved {
+            Ok(true) => Some(SimilarityReservation {
+                guard: Arc::clone(&self.similarity),
+                id: similarity_id,
+                committed: false,
+            }),
+            Ok(false) => None,
+            Err(error) => {
+                drop(permit);
+                if let Some(key) = idempotency_key.as_deref() {
+                    if let Err(err) = persist_rejection(
+                        key,
+                        idempotency_generation,
+                        OutboundIdempotencyState::Rejected,
+                        &error.code,
+                        self.config.idempotency_ttl,
+                    ) {
+                        log_persist_failure("similarity_rejection", &err);
+                        self.control.set_runtime_paused(true);
+                        cleanup_temp_files(&params);
+                        return OutboundSendResponse::Rejected(OutboundError::persistence(false));
+                    }
+                    if let Some(lease) = &mut idempotency_lease {
+                        lease.disarm();
+                    }
+                }
+                cleanup_temp_files(&params);
+                self.diagnostics.record_rejection(&error);
+                return OutboundSendResponse::Rejected(error);
+            }
+        };
+
         let (result_tx, result_rx) = oneshot::channel();
         let task = OutboundTask {
             params,
@@ -943,9 +1396,11 @@ impl OutboundSender {
             idempotency_generation,
             idempotency_lease,
             result_tx,
+            _queue_permit: Some(permit),
+            similarity_reservation,
         };
 
-        match self.tx.try_send(task) {
+        match self.tx.send(task) {
             Ok(()) => {
                 self.diagnostics
                     .enqueued_total
@@ -972,13 +1427,7 @@ impl OutboundSender {
                     }
                 }
             }
-            Err(mpsc::error::TrySendError::Full(task)) => {
-                let error = OutboundError::queue_full(self.config.retry_after());
-                self.diagnostics.record_rejection(&error);
-                reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
-                OutboundSendResponse::Rejected(error)
-            }
-            Err(mpsc::error::TrySendError::Closed(task)) => {
+            Err(mpsc::error::SendError(task)) => {
                 let error = OutboundError::unavailable();
                 self.diagnostics.record_rejection(&error);
                 reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
@@ -1012,8 +1461,11 @@ impl OutboundSender {
     pub fn status(&self) -> OutboundStatus {
         OutboundStatus {
             queue_capacity: self.config.queue_capacity,
-            queue_depth: self.tx.max_capacity().saturating_sub(self.tx.capacity()),
-            available_capacity: self.tx.capacity(),
+            queue_depth: self
+                .config
+                .queue_capacity
+                .saturating_sub(self.capacity.available_permits()),
+            available_capacity: self.capacity.available_permits(),
             min_spacing_ms: self.config.min_spacing.as_millis(),
             jitter_ms: self.config.jitter.as_millis(),
             task_ttl_ms: self.config.task_ttl.as_millis(),
@@ -1090,17 +1542,41 @@ impl OutboundControl {
 async fn worker_loop(
     config: OutboundConfig,
     control: Arc<OutboundControl>,
-    mut rx: mpsc::Receiver<OutboundTask>,
+    mut rx: mpsc::UnboundedReceiver<OutboundTask>,
     usage: Arc<Mutex<Usage>>,
     diagnostics: Arc<OutboundDiagnostics>,
+    execute: ExecuteSend,
 ) {
-    let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
+    let mut policy = SpacingPolicy::new(
+        config.min_spacing,
+        config.jitter,
+        config.long_tail_jitter,
+        config.long_tail_chance_percent,
+    );
+    let mut fair = FairQueue::new();
     let mut last_send_started: Option<Instant> = None;
-    while let Some(task) = rx.recv().await {
+    loop {
+        if fair.is_empty() {
+            let Some(task) = rx.recv().await else { break };
+            fair.push(task);
+        }
+        while let Ok(task) = rx.try_recv() {
+            fair.push(task);
+        }
+        let Some(task) = fair.pop() else { continue };
+        tokio::task::yield_now().await;
         if let Some(db) = try_get_db() {
             sweep_persistent_idempotency(&db);
         }
         let now = Instant::now();
+        if task.result_tx.is_closed() {
+            reject_without_idempotency_cache(
+                task,
+                OutboundError::unavailable(),
+                config.idempotency_ttl,
+            );
+            continue;
+        }
         if task_expired(&task, now, config.task_ttl) {
             let error = OutboundError::expired();
             diagnostics.record_rejection(&error);
@@ -1108,18 +1584,17 @@ async fn worker_loop(
             continue;
         }
 
-        let delay = policy.next_delay(now, &mut SystemJitter);
-        let human = if config.min_spacing >= Duration::from_millis(500) {
-            let outbound_chars = task
-                .params
-                .message
-                .as_ref()
-                .map(|s| s.chars().count())
-                .unwrap_or(8);
-            Duration::from_millis(human_pre_send_delay_ms(
-                outbound_chars,
-                task.params.inbound_chars.unwrap_or(0),
-            ))
+        let delay = policy.next_delay(now);
+        let human = if config.min_spacing >= Duration::from_millis(500)
+            && task.params.image_path.is_none()
+            && task.params.file_path.is_none()
+        {
+            task.params.message.as_ref().map_or(Duration::ZERO, |text| {
+                Duration::from_millis(human_pre_send_delay_ms(
+                    text.chars().count(),
+                    task.params.inbound_chars.unwrap_or(0),
+                ))
+            })
         } else {
             Duration::ZERO
         };
@@ -1163,7 +1638,7 @@ async fn worker_loop(
             tokio::time::sleep(extra).await;
         }
 
-        let task = match admit_for_execute(
+        let mut task = match admit_for_execute(
             task,
             &control,
             config.task_ttl,
@@ -1175,7 +1650,14 @@ async fn worker_loop(
             None => continue,
         };
 
-        let mut task = task;
+        if let Some(reservation) = task.similarity_reservation.as_ref() {
+            if let Err(error) = reservation.validate_for_execute(task.params.similarity_confirmed) {
+                diagnostics.record_rejection(&error);
+                reject_without_idempotency_cache(task, error, config.idempotency_ttl);
+                continue;
+            }
+        }
+
         if let Some(key) = task.idempotency_key.as_deref() {
             if let Err(error) = persist_sending(key, task.idempotency_generation) {
                 log_persist_failure("sending", &error);
@@ -1206,22 +1688,32 @@ async fn worker_loop(
                 lease.enter_sending();
             }
         }
-        diagnostics.record_queue_wait(Instant::now().saturating_duration_since(task.enqueued_at));
+
         let send_started = Instant::now();
-        if let Some(last) = last_send_started.replace(send_started) {
-            let interval = send_started.saturating_duration_since(last);
-            diagnostics.last_send_interval_ms.store(
-                interval.as_millis().min(u64::MAX as u128) as u64,
-                Ordering::Relaxed,
-            );
+        diagnostics.record_queue_wait(send_started.saturating_duration_since(task.enqueued_at));
+        if let Some(previous) = last_send_started.replace(send_started) {
+            let interval = send_started
+                .saturating_duration_since(previous)
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            diagnostics
+                .last_send_interval_ms
+                .store(interval, Ordering::Relaxed);
         }
-        let result = execute_send(&task.params).await;
+        let result = execute(task.params.clone()).await;
         diagnostics.record_result(&result);
+        let completed_at = Instant::now();
+        if counts_toward_usage(&result) {
+            policy.record_attempt(completed_at, &mut SystemJitter);
+            if let Some(reservation) = task.similarity_reservation.as_mut() {
+                reservation.commit(completed_at);
+            }
+        }
         apply_send_result_to_usage(
             &usage,
             &result,
             &task.params.chat_id,
-            Instant::now(),
+            completed_at,
             SystemTime::now(),
         );
         complete_task(task, result, config.idempotency_ttl, Some(&control));
@@ -1236,6 +1728,14 @@ fn admit_for_execute(
     usage: &Mutex<Usage>,
     diagnostics: &OutboundDiagnostics,
 ) -> Option<OutboundTask> {
+    if task.result_tx.is_closed() {
+        reject_without_idempotency_cache(
+            task,
+            OutboundError::unavailable(),
+            config.idempotency_ttl,
+        );
+        return None;
+    }
     if control.is_read_only() {
         let error = OutboundError::read_only();
         diagnostics.record_rejection(&error);
@@ -1290,9 +1790,9 @@ async fn execute_send(params: &SendMessageParams) -> SendResult {
 
     let plan = SendMessagePlan;
     let cancel = CancellationToken::new();
-    let noop_emit = |_: SubscriptionEvent| {};
+    let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
     let (result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
+        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await;
     send_result_from_plan(result.success, &plan_state, result.error)
 }
 
@@ -1774,31 +2274,51 @@ impl JitterSource for SystemJitter {
 struct SpacingPolicy {
     min_spacing: Duration,
     jitter: Duration,
+    long_tail_jitter: Duration,
+    long_tail_chance_percent: u32,
     next_allowed: Option<Instant>,
 }
 
 impl SpacingPolicy {
-    fn new(min_spacing: Duration, jitter: Duration) -> Self {
+    fn new(
+        min_spacing: Duration,
+        jitter: Duration,
+        long_tail_jitter: Duration,
+        long_tail_chance_percent: u32,
+    ) -> Self {
         Self {
             min_spacing,
             jitter,
+            long_tail_jitter,
+            long_tail_chance_percent,
             next_allowed: None,
         }
     }
 
-    fn next_delay(&mut self, now: Instant, jitter: &mut impl JitterSource) -> Duration {
-        let delay = self.next_allowed.map_or(Duration::ZERO, |next_allowed| {
+    fn next_delay(&self, now: Instant) -> Duration {
+        self.next_allowed.map_or(Duration::ZERO, |next_allowed| {
             next_allowed.saturating_duration_since(now)
-        });
-        let scheduled = now + delay;
-        self.next_allowed = Some(scheduled + self.min_spacing + jitter.next_jitter(self.jitter));
-        delay
+        })
+    }
+
+    fn record_attempt(&mut self, now: Instant, jitter: &mut impl JitterSource) {
+        let regular_jitter = jitter.next_jitter(self.jitter);
+        let long_tail = if self.long_tail_chance_percent > 0
+            && jitter.next_jitter(Duration::from_millis(99)).as_millis()
+                < self.long_tail_chance_percent as u128
+        {
+            jitter.next_jitter(self.long_tail_jitter)
+        } else {
+            Duration::ZERO
+        };
+        self.next_allowed = Some(now + self.min_spacing + regular_jitter + long_tail);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::queries::count_protected_outbound_idempotency;
     use std::{collections::VecDeque, sync::Once};
 
     static INIT_DB: Once = Once::new();
@@ -1817,6 +2337,30 @@ mod tests {
 
     fn clear_idempotency_rows() {
         init_test_db();
+    }
+
+    fn test_executor() -> ExecuteSend {
+        Arc::new(|_params| Box::pin(async { send_error("TEST_EXECUTOR") }))
+    }
+
+    fn test_sender_with_channel(
+        config: OutboundConfig,
+        control: Arc<OutboundControl>,
+        tx: mpsc::UnboundedSender<OutboundTask>,
+    ) -> OutboundSender {
+        let capacity = Arc::new(tokio::sync::Semaphore::new(config.queue_capacity));
+        let similarity = Arc::new(Mutex::new(SimilarityGuard::new(&config)));
+        OutboundSender {
+            config,
+            control,
+            tx,
+            capacity,
+            usage: Arc::new(Mutex::new(Usage::new())),
+            similarity,
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            execute: test_executor(),
+        }
     }
 
     fn claim_idempotency(key: &str, ttl: Duration) -> IdempotencyStart {
@@ -1917,21 +2461,28 @@ mod tests {
     #[test]
     fn spacing_policy_applies_min_spacing_and_jitter_deterministically() {
         let start = Instant::now();
-        let mut policy = SpacingPolicy::new(Duration::from_millis(100), Duration::from_millis(25));
+        let mut policy = SpacingPolicy::new(
+            Duration::from_millis(100),
+            Duration::from_millis(25),
+            Duration::ZERO,
+            0,
+        );
         let mut jitter = FixedJitter::new([
             Duration::from_millis(10),
             Duration::from_millis(20),
             Duration::from_millis(0),
         ]);
 
-        assert_eq!(policy.next_delay(start, &mut jitter), Duration::ZERO);
+        assert_eq!(policy.next_delay(start), Duration::ZERO);
+        policy.record_attempt(start, &mut jitter);
         assert_eq!(
-            policy.next_delay(start + Duration::from_millis(50), &mut jitter),
+            policy.next_delay(start + Duration::from_millis(50)),
             Duration::from_millis(60)
         );
+        policy.record_attempt(start + Duration::from_millis(120), &mut jitter);
         assert_eq!(
-            policy.next_delay(start + Duration::from_millis(120), &mut jitter),
-            Duration::from_millis(110)
+            policy.next_delay(start + Duration::from_millis(150)),
+            Duration::from_millis(90)
         );
     }
 
@@ -2182,15 +2733,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, mut rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
 
         let pending = tokio::spawn(async move {
             sender
@@ -2242,15 +2793,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
         let pending = tokio::spawn(async move {
             sender
                 .send_claimed(test_params("shutdown"), Some(lease_for(key)))
@@ -2296,26 +2847,29 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
 
+        let permit = Arc::clone(&sender.capacity).try_acquire_owned().unwrap();
         let (result_tx, _result_rx) = oneshot::channel();
         sender
             .tx
-            .try_send(OutboundTask {
+            .send(OutboundTask {
                 params: test_params("first"),
                 enqueued_at: Instant::now(),
                 idempotency_key: None,
                 idempotency_generation: None,
                 idempotency_lease: None,
                 result_tx,
+                _queue_permit: Some(permit),
+                similarity_reservation: None,
             })
             .unwrap();
 
@@ -2355,12 +2909,16 @@ mod tests {
                 image_mime: None,
                 file_path: None,
                 inbound_chars: None,
+                source: None,
+                similarity_confirmed: false,
             },
             enqueued_at: Instant::now() - Duration::from_secs(10),
             idempotency_key: Some("expired".to_string()),
             idempotency_generation: Some(generation_for("expired")),
             idempotency_lease: Some(lease_for("expired")),
             result_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         };
         reject_without_idempotency_cache(task, OutboundError::expired(), Duration::from_secs(60));
 
@@ -2397,6 +2955,8 @@ mod tests {
             idempotency_generation: Some(generation_for("persist-fail")),
             idempotency_lease: None,
             result_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         };
         let control = OutboundControl::new(false);
         complete_task(
@@ -2562,19 +3122,19 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, mut rx) = mpsc::channel(config.queue_capacity);
+        let (tx, mut rx) = mpsc::unbounded_channel();
         let dropper = tokio::spawn(async move {
             let task = rx.recv().await.unwrap();
             drop(task);
         });
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
         let mut lease = lease_for(key);
         lease.enter_sending();
         match sender
@@ -2686,25 +3246,28 @@ mod tests {
         clear_idempotency_rows();
         let logs = capture_logs(|| {
             fail_next_claim_with_hostile_error();
-            let sender = OutboundSender {
-                config: OutboundConfig {
-                    queue_capacity: 1,
-                    min_spacing: Duration::ZERO,
-                    jitter: Duration::ZERO,
-                    task_ttl: Duration::from_secs(60),
-                    idempotency_ttl: Duration::from_secs(60),
-                    chat_cooldown: Duration::ZERO,
-                    hourly_budget: 10_000,
-                    daily_budget: 10_000,
-                    quiet_start_min: 0,
-                    quiet_end_min: 0,
-                    read_only: false,
-                },
-                control: Arc::new(OutboundControl::new(false)),
-                tx: mpsc::channel(1).0,
-                usage: Arc::new(Mutex::new(Usage::new())),
-                diagnostics: Arc::new(OutboundDiagnostics::default()),
+            let config = OutboundConfig {
+                queue_capacity: 1,
+                min_spacing: Duration::ZERO,
+                jitter: Duration::ZERO,
+                task_ttl: Duration::from_secs(60),
+                idempotency_ttl: Duration::from_secs(60),
+                chat_cooldown: Duration::ZERO,
+                hourly_budget: 10_000,
+                daily_budget: 10_000,
+                quiet_start_min: 0,
+                quiet_end_min: 0,
+                read_only: false,
+                long_tail_jitter: Duration::ZERO,
+                long_tail_chance_percent: 0,
+                similarity_window: Duration::from_secs(600),
+                similarity_min_chars: 20,
+                similarity_hamming: 8,
+                similarity_history: 200,
             };
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let sender =
+                test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
             let _ = sender.admit_idempotency_key("claim-hostile");
             for (op, error) in [
                 ("pre_execution_rejection", hostile_sqlite_error()),
@@ -2776,9 +3339,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
         let control = Arc::new(OutboundControl::new(false));
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::unbounded_channel();
         let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
@@ -2786,17 +3355,20 @@ mod tests {
             rx,
             usage,
             Arc::new(OutboundDiagnostics::default()),
+            test_executor(),
         ));
         let (result_tx, result_rx) = oneshot::channel();
 
         fail_next_persistence_for(&FAIL_SENDING_PERSISTENCE_FOR, key);
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("will not execute"),
             enqueued_at: Instant::now(),
             idempotency_key: Some(key.to_string()),
             idempotency_generation: Some(generation_for(key)),
             idempotency_lease: Some(lease_for(key)),
             result_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
 
@@ -2846,15 +3418,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         match sender
             .send(test_params("blocked"), Some("k".to_string()))
@@ -2891,15 +3463,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         match sender
             .send(test_params("duplicate"), Some("paused-queued".into()))
@@ -2945,15 +3517,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         match sender
             .send(test_params("duplicate"), Some("paused-terminal".into()))
@@ -3006,15 +3578,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         match sender
             .send(test_params("expired replay"), Some(key.into()))
@@ -3050,15 +3622,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         match sender
             .send(
@@ -3116,9 +3688,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
         let control = Arc::new(OutboundControl::new(true));
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::unbounded_channel();
         let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
@@ -3126,6 +3704,7 @@ mod tests {
             rx,
             usage,
             Arc::new(OutboundDiagnostics::default()),
+            test_executor(),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -3133,13 +3712,15 @@ mod tests {
             claim_idempotency("pause-first", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
         ));
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("first"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("pause-first".to_string()),
             idempotency_generation: Some(generation_for("pause-first")),
             idempotency_lease: Some(lease_for("pause-first")),
             result_tx: first_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
         let first = first_rx.await.unwrap();
@@ -3156,13 +3737,15 @@ mod tests {
             claim_idempotency("pause-second", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
         ));
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("second"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("pause-second".to_string()),
             idempotency_generation: Some(generation_for("pause-second")),
             idempotency_lease: Some(lease_for("pause-second")),
             result_tx: second_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
         control.set_read_only(true);
@@ -3192,22 +3775,29 @@ mod tests {
             jitter: Duration::ZERO,
             task_ttl: Duration::from_millis(10),
             idempotency_ttl: Duration::from_secs(60),
-            chat_cooldown: Duration::ZERO,
+            chat_cooldown: Duration::from_millis(30),
             hourly_budget: 10_000,
             daily_budget: 10_000,
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
         let control = Arc::new(OutboundControl::new(true));
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::unbounded_channel();
         let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
             Arc::clone(&control),
             rx,
-            usage,
+            Arc::clone(&usage),
             Arc::new(OutboundDiagnostics::default()),
+            test_executor(),
         ));
 
         let (first_tx, first_rx) = oneshot::channel();
@@ -3215,13 +3805,15 @@ mod tests {
             claim_idempotency("ttl-first", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
         ));
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("first"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("ttl-first".to_string()),
             idempotency_generation: Some(generation_for("ttl-first")),
             idempotency_lease: Some(lease_for("ttl-first")),
             result_tx: first_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
         let first = first_rx.await.unwrap();
@@ -3232,19 +3824,26 @@ mod tests {
             _ => panic!("expected read-only rejection"),
         }
 
+        usage
+            .lock()
+            .unwrap()
+            .last_per_chat
+            .insert("chat".to_string(), Instant::now());
         let (second_tx, second_rx) = oneshot::channel();
         control.set_read_only(false);
         assert!(matches!(
             claim_idempotency("ttl-second", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
         ));
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("second"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("ttl-second".to_string()),
             idempotency_generation: Some(generation_for("ttl-second")),
             idempotency_lease: Some(lease_for("ttl-second")),
             result_tx: second_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
 
@@ -3279,15 +3878,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 0,
             read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(true)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(true)), tx);
 
         assert!(matches!(
             claim_idempotency("status-key", Duration::from_secs(60)),
@@ -3315,6 +3914,8 @@ mod tests {
             image_mime: None,
             file_path: None,
             inbound_chars: None,
+            source: None,
+            similarity_confirmed: false,
         }
     }
 
@@ -3363,15 +3964,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 24 * 60,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
-        let (tx, _rx) = mpsc::channel(config.queue_capacity);
-        let sender = OutboundSender {
-            config,
-            control: Arc::new(OutboundControl::new(false)),
-            tx,
-            usage: Arc::new(Mutex::new(Usage::new())),
-            diagnostics: Arc::new(OutboundDiagnostics::default()),
-        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = test_sender_with_channel(config, Arc::new(OutboundControl::new(false)), tx);
         assert!(matches!(
             claim_idempotency("replay", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
@@ -3412,9 +4013,15 @@ mod tests {
             quiet_start_min: 0,
             quiet_end_min: 24 * 60,
             read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(600),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
         };
         let control = Arc::new(OutboundControl::new(false));
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let (tx, rx) = mpsc::unbounded_channel();
         let usage = Arc::new(Mutex::new(Usage::new()));
         let worker = tokio::spawn(worker_loop(
             config,
@@ -3422,19 +4029,22 @@ mod tests {
             rx,
             usage,
             Arc::new(OutboundDiagnostics::default()),
+            test_executor(),
         ));
         let (result_tx, result_rx) = oneshot::channel();
         assert!(matches!(
             claim_idempotency("quiet", Duration::from_secs(60)),
             IdempotencyStart::Inserted(_)
         ));
-        tx.try_send(OutboundTask {
+        tx.send(OutboundTask {
             params: test_params("quiet"),
             enqueued_at: Instant::now(),
             idempotency_key: Some("quiet".into()),
             idempotency_generation: Some(generation_for("quiet")),
             idempotency_lease: Some(lease_for("quiet")),
             result_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
         })
         .unwrap();
         match result_rx.await.unwrap() {
@@ -3564,5 +4174,883 @@ mod tests {
         let record = get_idempotency_status("pre-reject-k").unwrap();
         assert_eq!(record.state, OutboundIdempotencyState::Sent);
         assert!(record.result.unwrap().success);
+    }
+}
+
+#[cfg(test)]
+mod p0c_tests {
+    use std::sync::Once;
+
+    static INIT_DB: Once = Once::new();
+
+    fn init_test_db() {
+        INIT_DB.call_once(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("outbound-p0c-integrated-test.db");
+            std::env::set_var("AGENT_DB_PATH", &path);
+            std::env::set_var("AGENT_WECHAT_TOKEN", "test-token");
+            crate::router::auth::init_token();
+            let _ = crate::db::init_db();
+            std::mem::forget(dir);
+        });
+    }
+
+    fn clear_idempotency_rows() {
+        init_test_db();
+        let db = get_db();
+        db.execute("DELETE FROM outbound_idempotency", []).unwrap();
+    }
+
+    use super::*;
+
+    fn test_executor() -> ExecuteSend {
+        Arc::new(|_params| Box::pin(async { send_error("TEST_EXECUTOR") }))
+    }
+
+    struct FixedJitter {
+        values: VecDeque<Duration>,
+    }
+
+    impl FixedJitter {
+        fn new(values: impl IntoIterator<Item = Duration>) -> Self {
+            Self {
+                values: values.into_iter().collect(),
+            }
+        }
+    }
+
+    impl JitterSource for FixedJitter {
+        fn next_jitter(&mut self, max: Duration) -> Duration {
+            self.values.pop_front().unwrap_or(Duration::ZERO).min(max)
+        }
+    }
+
+    #[test]
+    fn spacing_policy_applies_min_spacing_and_jitter_deterministically() {
+        let start = Instant::now();
+        let mut policy = SpacingPolicy::new(
+            Duration::from_millis(100),
+            Duration::from_millis(25),
+            Duration::ZERO,
+            0,
+        );
+        let mut jitter = FixedJitter::new([
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            Duration::ZERO,
+        ]);
+
+        assert_eq!(policy.next_delay(start), Duration::ZERO);
+        policy.record_attempt(start, &mut jitter);
+        assert_eq!(
+            policy.next_delay(start + Duration::from_millis(50)),
+            Duration::from_millis(60)
+        );
+        policy.record_attempt(start + Duration::from_millis(120), &mut jitter);
+        assert_eq!(
+            policy.next_delay(start + Duration::from_millis(150)),
+            Duration::from_millis(90)
+        );
+    }
+
+    fn task_for_fairness(chat: &str, source: &str, text: &str) -> OutboundTask {
+        let (result_tx, _result_rx) = oneshot::channel();
+        let mut params = test_params(text);
+        params.chat_id = chat.to_string();
+        params.source = Some(source.to_string());
+        OutboundTask {
+            params,
+            enqueued_at: Instant::now(),
+            idempotency_key: None,
+            idempotency_generation: None,
+            idempotency_lease: None,
+            result_tx,
+            _queue_permit: None,
+            similarity_reservation: None,
+        }
+    }
+
+    #[test]
+    fn fair_queue_rotates_sources_and_chats_without_starvation() {
+        let mut queue = FairQueue::new();
+        queue.push(task_for_fairness("a", "openclaw", "a1"));
+        queue.push(task_for_fairness("a", "openclaw", "a2"));
+        queue.push(task_for_fairness("b", "openclaw", "b1"));
+        queue.push(task_for_fairness("c", "wechaty", "c1"));
+        queue.push(task_for_fairness("d", "wechaty", "d1"));
+
+        let order: Vec<(String, String)> = (0..5)
+            .map(|_| {
+                let task = queue.pop().unwrap();
+                (task.params.source.unwrap(), task.params.message.unwrap())
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("openclaw".into(), "a1".into()),
+                ("wechaty".into(), "c1".into()),
+                ("openclaw".into(), "b1".into()),
+                ("wechaty".into(), "d1".into()),
+                ("openclaw".into(), "a2".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn similar_text_requires_confirmation_without_retaining_plaintext() {
+        let config = OutboundConfig {
+            similarity_min_chars: 8,
+            similarity_hamming: 12,
+            ..test_config()
+        };
+        let mut guard = SimilarityGuard::new(&config);
+        let now = Instant::now();
+        assert_eq!(
+            guard.reserve(
+                1,
+                "chat",
+                "api",
+                Some("Your order 123 has shipped today"),
+                false,
+                now
+            ),
+            Ok(true)
+        );
+        guard.commit(1, now);
+        let error = guard
+            .reserve(
+                2,
+                "chat",
+                "api",
+                Some("Your order 124 has shipped today!"),
+                false,
+                now + Duration::from_secs(1),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, OutboundErrorKind::SimilarContent);
+        assert_eq!(
+            guard.reserve(
+                3,
+                "chat",
+                "api",
+                Some("Your order 124 has shipped today!"),
+                true,
+                now + Duration::from_secs(2),
+            ),
+            Ok(true)
+        );
+        guard.commit(3, now + Duration::from_secs(2));
+        assert_eq!(guard.committed.len(), 2);
+        assert_eq!(
+            guard.reserve(
+                4,
+                "other-chat",
+                "api",
+                Some("Your order 125 has shipped today!"),
+                false,
+                now + Duration::from_secs(3),
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            guard.reserve(
+                5,
+                "chat",
+                "other-source",
+                Some("Your order 126 has shipped today!"),
+                false,
+                now + Duration::from_secs(3),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn pending_confirmed_work_does_not_become_policy_history() {
+        let config = OutboundConfig {
+            similarity_min_chars: 8,
+            ..test_config()
+        };
+        let mut guard = SimilarityGuard::new(&config);
+        let now = Instant::now();
+        assert_eq!(
+            guard.reserve(
+                1,
+                "chat",
+                "api",
+                Some("pending confirmed template message"),
+                true,
+                now,
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            guard.reserve(
+                2,
+                "chat",
+                "api",
+                Some("pending confirmed template message"),
+                false,
+                now + Duration::from_millis(1),
+            ),
+            Ok(true)
+        );
+        guard.release(1);
+        guard.release(2);
+        assert!(guard.committed.is_empty());
+        assert!(guard.pending.is_empty());
+    }
+
+    #[test]
+    fn short_text_and_media_only_requests_bypass_similarity_guard() {
+        let config = test_config();
+        let mut guard = SimilarityGuard::new(&config);
+        let now = Instant::now();
+        assert_eq!(
+            guard.reserve(1, "chat", "api", Some("ok"), false, now),
+            Ok(false)
+        );
+        assert_eq!(
+            guard.reserve(2, "chat", "api", Some("ok"), false, now),
+            Ok(false)
+        );
+        assert_eq!(guard.reserve(3, "chat", "api", None, false, now), Ok(false));
+        assert!(guard.committed.is_empty());
+        assert!(guard.pending.is_empty());
+    }
+
+    #[test]
+    fn failed_or_cancelled_similarity_reservations_do_not_poison_history() {
+        let config = OutboundConfig {
+            similarity_min_chars: 8,
+            ..test_config()
+        };
+        let guard = Arc::new(Mutex::new(SimilarityGuard::new(&config)));
+        let now = Instant::now();
+        assert_eq!(
+            guard.lock().unwrap().reserve(
+                1,
+                "chat",
+                "api",
+                Some("template message for cancellation"),
+                false,
+                now
+            ),
+            Ok(true)
+        );
+        {
+            let _reservation = SimilarityReservation {
+                guard: Arc::clone(&guard),
+                id: 1,
+                committed: false,
+            };
+        }
+        assert!(guard.lock().unwrap().committed.is_empty());
+        assert!(guard.lock().unwrap().pending.is_empty());
+        assert_eq!(
+            guard.lock().unwrap().reserve(
+                2,
+                "chat",
+                "api",
+                Some("template message for cancellation"),
+                false,
+                now + Duration::from_secs(1),
+            ),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn spacing_policy_adds_bounded_long_tail_deterministically() {
+        let start = Instant::now();
+        let mut policy = SpacingPolicy::new(
+            Duration::from_millis(100),
+            Duration::ZERO,
+            Duration::from_millis(500),
+            10,
+        );
+        let mut jitter = FixedJitter::new([
+            Duration::ZERO,
+            Duration::from_millis(5),
+            Duration::from_millis(400),
+            Duration::ZERO,
+            Duration::from_millis(99),
+        ]);
+        assert_eq!(policy.next_delay(start), Duration::ZERO);
+        policy.record_attempt(start, &mut jitter);
+        assert_eq!(
+            policy.next_delay(start + Duration::from_millis(100)),
+            Duration::from_millis(400)
+        );
+    }
+
+    #[tokio::test]
+    async fn live_worker_rotates_hot_sources_and_chats_and_releases_capacity() {
+        let config = OutboundConfig {
+            queue_capacity: 8,
+            similarity_min_chars: 1_000,
+            ..test_config()
+        };
+        let order = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let call = Arc::new(AtomicU64::new(0));
+        let executor: ExecuteSend = {
+            let order = Arc::clone(&order);
+            let first_started = Arc::clone(&first_started);
+            let release_first = Arc::clone(&release_first);
+            let call = Arc::clone(&call);
+            Arc::new(move |params| {
+                let order = Arc::clone(&order);
+                let first_started = Arc::clone(&first_started);
+                let release_first = Arc::clone(&release_first);
+                let call = Arc::clone(&call);
+                Box::pin(async move {
+                    let index = call.fetch_add(1, Ordering::SeqCst);
+                    order
+                        .lock()
+                        .unwrap()
+                        .push((normalize_source(params.source.as_deref()), params.chat_id));
+                    if index == 0 {
+                        first_started.notify_one();
+                        release_first.notified().await;
+                    }
+                    SendResult {
+                        success: true,
+                        error_code: None,
+                        error: None,
+                        commit_attempted: true,
+                    }
+                })
+            })
+        };
+        let sender = OutboundSender::spawn_with_executor(config, executor);
+        let mut hot = test_params("hot-a1");
+        hot.chat_id = "a".into();
+        hot.source = Some("hot".into());
+        let first = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send(hot, None).await }
+        });
+        first_started.notified().await;
+
+        let mut sends = Vec::new();
+        for (source, chat, text) in [
+            ("hot", "a", "hot-a2"),
+            ("hot", "b", "hot-b1"),
+            ("cold", "c", "cold-c1"),
+            ("hot", "a", "hot-a3"),
+            ("cold", "d", "cold-d1"),
+        ] {
+            let mut params = test_params(text);
+            params.source = Some(source.into());
+            params.chat_id = chat.into();
+            let sender = sender.clone();
+            sends.push(tokio::spawn(async move { sender.send(params, None).await }));
+        }
+        tokio::task::yield_now().await;
+        release_first.notify_one();
+        let _ = first.await.unwrap();
+        for send in sends {
+            assert!(matches!(
+                send.await.unwrap(),
+                OutboundSendResponse::Result(_)
+            ));
+        }
+        assert_eq!(
+            sender.capacity.available_permits(),
+            sender.config.queue_capacity
+        );
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                ("hot".into(), "a".into()),
+                ("hot".into(), "a".into()),
+                ("cold".into(), "c".into()),
+                ("hot".into(), "b".into()),
+                ("cold".into(), "d".into()),
+                ("hot".into(), "a".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_bound_rejects_when_channel_is_full() {
+        clear_idempotency_rows();
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::from_secs(60),
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(60),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = OutboundSender {
+            config: config.clone(),
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            capacity: Arc::new(tokio::sync::Semaphore::new(config.queue_capacity)),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            similarity: Arc::new(Mutex::new(SimilarityGuard::new(&config))),
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            execute: test_executor(),
+        };
+
+        let held_permit = Arc::clone(&sender.capacity).try_acquire_owned().unwrap();
+
+        match sender
+            .send(test_params("second"), Some("queue-full".to_string()))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::QueueFull);
+                assert!(error.retry_after.is_some());
+            }
+            _ => panic!("expected queue full rejection"),
+        }
+        let record = get_idempotency_status("queue-full").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Rejected);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("QUEUE_FULL")
+        );
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.rejected_429_total, 1);
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        drop(held_permit);
+    }
+
+    #[tokio::test]
+    async fn cancelled_confirmed_send_releases_capacity_and_similarity_without_false_block() {
+        clear_idempotency_rows();
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::from_millis(50),
+            task_ttl: Duration::from_millis(5),
+            similarity_min_chars: 8,
+            ..test_config()
+        };
+        let sender = OutboundSender::spawn_with_executor(config, test_executor());
+        sender
+            .usage
+            .lock()
+            .unwrap()
+            .last_per_chat
+            .insert("chat".into(), Instant::now());
+        let mut confirmed = test_params("confirmed pending template message");
+        confirmed.similarity_confirmed = true;
+        let cancelled = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send(confirmed, Some("cancelled".into())).await }
+        });
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let concurrent_unconfirmed = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                sender
+                    .send(test_params("confirmed pending template message"), None)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        cancelled.abort();
+        let _ = cancelled.await;
+        assert!(!matches!(
+            concurrent_unconfirmed.await.unwrap(),
+            OutboundSendResponse::Rejected(OutboundError {
+                kind: OutboundErrorKind::SimilarContent,
+                ..
+            })
+        ));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(
+            sender.capacity.available_permits(),
+            sender.config.queue_capacity
+        );
+        assert!(sender.similarity.lock().unwrap().committed.is_empty());
+        assert!(sender.similarity.lock().unwrap().pending.is_empty());
+
+        let unconfirmed = test_params("confirmed pending template message");
+        assert!(!matches!(
+            sender.send(unconfirmed, None).await,
+            OutboundSendResponse::Rejected(OutboundError {
+                kind: OutboundErrorKind::SimilarContent,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn media_caption_is_not_reserved_as_template_text() {
+        let params = SendMessageParams {
+            image_path: Some("/tmp/image.png".to_string()),
+            ..test_params("A repeated caption that is long enough to guard")
+        };
+        let similarity_text = if params.image_path.is_none() && params.file_path.is_none() {
+            params.message.as_deref()
+        } else {
+            None
+        };
+        assert!(similarity_text.is_none());
+    }
+
+    #[tokio::test]
+    async fn kill_switch_rejects_without_queueing() {
+        clear_idempotency_rows();
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(60),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = OutboundSender {
+            config: config.clone(),
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            capacity: Arc::new(tokio::sync::Semaphore::new(config.queue_capacity)),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            similarity: Arc::new(Mutex::new(SimilarityGuard::new(&config))),
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            execute: test_executor(),
+        };
+
+        match sender
+            .send(test_params("blocked"), Some("k".to_string()))
+            .await
+        {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::ReadOnly);
+                assert!(error.retry_after.is_none());
+            }
+            _ => panic!("expected read-only rejection"),
+        }
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.enqueued_total, 0);
+        assert_eq!(counters.completed_total, 0);
+        assert_eq!(counters.rejected_429_total, 0);
+    }
+
+    #[test]
+    fn status_reports_queue_config_and_idempotency_entries() {
+        let config = OutboundConfig {
+            queue_capacity: 2,
+            min_spacing: Duration::from_millis(150),
+            jitter: Duration::from_millis(25),
+            task_ttl: Duration::from_secs(30),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: true,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(60),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sender = OutboundSender {
+            config: config.clone(),
+            control: Arc::new(OutboundControl::new(true)),
+            tx,
+            capacity: Arc::new(tokio::sync::Semaphore::new(config.queue_capacity)),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            similarity: Arc::new(Mutex::new(SimilarityGuard::new(&config))),
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            execute: test_executor(),
+        };
+
+        clear_idempotency_rows();
+
+        let status = sender.status();
+        assert_eq!(status.queue_capacity, 2);
+        assert_eq!(status.queue_depth, 0);
+        assert_eq!(status.available_capacity, 2);
+        assert_eq!(status.min_spacing_ms, 150);
+        assert_eq!(status.jitter_ms, 25);
+        assert_eq!(status.task_ttl_ms, 30_000);
+        assert_eq!(status.idempotency_ttl_ms, 60_000);
+        assert!(status.read_only);
+        assert!(status.runtime_paused);
+        assert_eq!(status.idempotency_entries, 0);
+        assert_eq!(status.diagnostics.enqueued_total, 0);
+        assert_eq!(status.chat_select_diagnostics.attach_total, 0);
+
+        let json = serde_json::to_string(&status).unwrap();
+        for sensitive in [
+            "private message body",
+            "Alice Display Name",
+            "/tmp/send_file_secret.pdf",
+            "Bearer secret-token",
+            "data:image/png;base64",
+        ] {
+            assert!(!json.contains(sensitive));
+        }
+        assert!(json.contains("diagnostics"));
+        assert!(json.contains("chatSelectDiagnostics"));
+    }
+
+    #[test]
+    fn diagnostics_count_redacted_outcomes_and_durations() {
+        let diagnostics = OutboundDiagnostics::default();
+        diagnostics.record_rejection(&OutboundError::queue_full(Duration::from_secs(1)));
+        diagnostics.record_rejection(&OutboundError::expired());
+        diagnostics.record_rejection(&OutboundError::quiet_hours(Duration::from_secs(1)));
+        diagnostics.record_rejection(&OutboundError::budget(
+            "HOURLY_BUDGET",
+            Duration::from_secs(1),
+        ));
+        diagnostics.record_queue_wait(Duration::from_millis(23));
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_commit_uncertain".into()),
+            error: Some("send_commit_uncertain".into()),
+            commit_attempted: true,
+        });
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot.rejected_429_total, 3);
+        assert_eq!(snapshot.queue_expired_total, 1);
+        assert_eq!(snapshot.quiet_hours_rejected_total, 1);
+        assert_eq!(snapshot.budget_rejected_total, 1);
+        assert_eq!(snapshot.completed_total, 1);
+        assert_eq!(snapshot.failed_total, 1);
+        assert_eq!(snapshot.uncertain_total, 1);
+        assert_eq!(snapshot.last_queue_wait_ms, 23);
+        assert_eq!(snapshot.max_queue_wait_ms, 23);
+    }
+
+    #[test]
+    fn pause_resume_and_uncertain_completion_are_counted_once() {
+        let sender = OutboundSender {
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            ..test_sender(false)
+        };
+        sender.pause();
+        sender.pause();
+        sender.resume();
+        sender.resume();
+        sender.diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_result_uncertain".into()),
+            error: None,
+            commit_attempted: true,
+        });
+        let counters = sender.diagnostics.snapshot();
+        assert_eq!(counters.pause_total, 1);
+        assert_eq!(counters.resume_total, 1);
+        assert_eq!(counters.completed_total, 1);
+        assert_eq!(counters.failed_total, 1);
+        assert_eq!(counters.uncertain_total, 1);
+    }
+
+    #[test]
+    fn uncertain_counter_uses_only_post_commit_terminal_codes() {
+        let diagnostics = OutboundDiagnostics::default();
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("target_confirmation_identity_mismatch".into()),
+            error: None,
+            commit_attempted: false,
+        });
+        diagnostics.record_result(&SendResult {
+            success: false,
+            error_code: Some("send_result_uncertain".into()),
+            error: None,
+            commit_attempted: true,
+        });
+        assert_eq!(diagnostics.snapshot().uncertain_total, 1);
+    }
+
+    #[test]
+    fn execution_errors_are_mapped_to_stable_codes_without_detail() {
+        assert_eq!(
+            execution_error_code("Execution timeout after 301s /tmp/private"),
+            "EXECUTION_TIMEOUT"
+        );
+        assert_eq!(
+            execution_error_code("Unknown state for 60s - Alice secret"),
+            "UNKNOWN_UI_STATE_TIMEOUT"
+        );
+        assert_eq!(
+            execution_error_code("untrusted error with message text and token"),
+            "SEND_EXECUTION_FAILED"
+        );
+    }
+
+    fn test_config() -> OutboundConfig {
+        OutboundConfig {
+            queue_capacity: 20,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+            long_tail_jitter: Duration::ZERO,
+            long_tail_chance_percent: 0,
+            similarity_window: Duration::from_secs(60),
+            similarity_min_chars: 20,
+            similarity_hamming: 8,
+            similarity_history: 200,
+        }
+    }
+
+    fn test_sender(read_only: bool) -> OutboundSender {
+        let mut config = test_config();
+        config.read_only = read_only;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        OutboundSender {
+            config: config.clone(),
+            control: Arc::new(OutboundControl::new(read_only)),
+            tx,
+            capacity: Arc::new(tokio::sync::Semaphore::new(config.queue_capacity)),
+            usage: Arc::new(Mutex::new(Usage::new())),
+            similarity: Arc::new(Mutex::new(SimilarityGuard::new(&config))),
+            next_similarity_id: Arc::new(AtomicU64::new(1)),
+            diagnostics: Arc::new(OutboundDiagnostics::default()),
+            execute: test_executor(),
+        }
+    }
+
+    fn test_params(text: &str) -> SendMessageParams {
+        SendMessageParams {
+            chat_id: "chat".to_string(),
+            message: Some(text.to_string()),
+            image_path: None,
+            image_mime: None,
+            file_path: None,
+            inbound_chars: None,
+            source: None,
+            similarity_confirmed: false,
+        }
+    }
+
+    #[test]
+    fn quiet_hours_and_budgets_are_deterministic() {
+        let mut config = OutboundConfig::from_env();
+        config.quiet_start_min = 30;
+        config.quiet_end_min = 450;
+        config.hourly_budget = 2;
+        config.daily_budget = 2;
+        config.chat_cooldown = Duration::from_secs(5);
+        let mut usage = Usage::new();
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        assert!(in_quiet_hours(30, 30, 450));
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 30).is_err());
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 500).is_ok());
+        usage.hour_count = 2;
+        usage.hour_key = wall.duration_since(UNIX_EPOCH).unwrap().as_secs() / 3600;
+        assert!(policy_allows_send(&config, &mut usage, "c", now, wall, 500).is_err());
+    }
+
+    fn post_commit_result(code: &str) -> SendResult {
+        SendResult {
+            success: false,
+            error_code: Some(code.into()),
+            error: Some(code.into()),
+            commit_attempted: true,
+        }
+    }
+
+    #[test]
+    fn post_commit_diagnostics_count_as_usage() {
+        let usage = Mutex::new(Usage::new());
+        let now = Instant::now();
+        let wall = SystemTime::now();
+        for code in [
+            "send_commit_uncertain",
+            "send_result_uncertain",
+            "composer_missing_during_confirmation",
+            "popup_after_send_action",
+        ] {
+            apply_send_result_to_usage(&usage, &post_commit_result(code), "chat", now, wall);
+        }
+        let snapshot = usage.lock().unwrap();
+        assert_eq!(snapshot.hour_count, 4);
+        assert_eq!(snapshot.day_count, 4);
+        assert!(snapshot.last_per_chat.contains_key("chat"));
+    }
+
+    #[test]
+    fn pre_commit_failures_do_not_count_as_usage() {
+        let usage = Mutex::new(Usage::new());
+        apply_send_result_to_usage(
+            &usage,
+            &SendResult {
+                success: false,
+                error_code: Some("target_confirmation_identity_mismatch".into()),
+                error: Some("target_confirmation_identity_mismatch".into()),
+                commit_attempted: false,
+            },
+            "chat",
+            Instant::now(),
+            SystemTime::now(),
+        );
+        let snapshot = usage.lock().unwrap();
+        assert_eq!(snapshot.hour_count, 0);
+        assert_eq!(snapshot.day_count, 0);
+    }
+
+    #[test]
+    fn successful_return_then_uncertain_confirmation_is_commit_attempted() {
+        let mut plan_state = crate::plans::send_message::SendMessagePlanState {
+            phase: crate::plans::send_message::SendMessagePhase::Confirming,
+            open_result: None,
+            confirm_attempts: 0,
+            send_action_executed: true,
+            diagnostic_error: None,
+        };
+        for code in [
+            "send_result_uncertain",
+            "composer_missing_during_confirmation",
+            "popup_after_send_action",
+        ] {
+            plan_state.diagnostic_error = Some(code.into());
+            let result = send_result_from_plan(false, &plan_state, None);
+            assert!(result.commit_attempted, "{code}");
+            assert!(counts_toward_usage(&result), "{code}");
+            assert_eq!(result.error_code.as_deref(), Some(code));
+        }
     }
 }

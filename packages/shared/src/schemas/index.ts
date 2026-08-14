@@ -189,10 +189,14 @@ export const listMessagesParamsSchema = z.object({
   offset: z.number().int().nonnegative().optional().default(0),
 });
 
+const nonBlankStringSchema = z.string().trim().min(1, {
+  message: "must contain non-whitespace characters",
+});
+
 export const sendParamsSchema = z.object({
-  chatId: z.string().min(1),
+  chatId: nonBlankStringSchema,
   idempotencyKey: idempotencyKeySchema.optional(),
-  text: z.string().optional(),
+  text: nonBlankStringSchema.optional(),
   image: z.object({
     data: z.string(),
     mimeType: z.string(),
@@ -202,11 +206,14 @@ export const sendParamsSchema = z.object({
     filename: z.string(),
   }).optional(),
   inboundChars: z.number().int().nonnegative().optional(),
+  source: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  similarityConfirmed: z.boolean().optional(),
 });
 
 export const sendResultSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
+  errorCode: z.string().optional(),
   error: z.string().optional(),
   commitAttempted: z.boolean().optional(),
 });

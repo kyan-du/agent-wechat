@@ -39,7 +39,7 @@ pub async fn run_execution_loop<P, PS, PA>(
     plan: &P,
     params: &PA,
     context: &mut Context,
-    emit: &(dyn Fn(SubscriptionEvent) + Send + Sync),
+    emit: std::sync::Arc<dyn Fn(SubscriptionEvent) + Send + Sync>,
     cancel: CancellationToken,
 ) -> (ExecutionResult, PS)
 where
@@ -250,9 +250,15 @@ where
 
         // 7. EXECUTE: run the action (emits fire inline via callback)
         if let Some(sel) = &selected {
-            let action_result =
-                actions::execute_action(&sel.action, sel.frame.as_ref(), &exec_options, &a11y, emit)
-                    .await;
+            let action_result = actions::execute_action_supervised(
+                sel.action.clone(),
+                sel.frame.clone(),
+                exec_options.clone(),
+                a11y.clone(),
+                emit.clone(),
+                cancel.child_token(),
+            )
+            .await;
             let fail_on_error = plan.action_executed(&mut plan_state, &action_result);
             if let Err(error) = action_result {
                 tracing::warn!(

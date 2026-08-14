@@ -146,7 +146,43 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
     ))
 }
 
-pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse {
+pub async fn send_message(Json(mut input): Json<SendParams>) -> OutboundSendResponse {
+    input.chat_id = input.chat_id.trim().to_string();
+    if input.chat_id.is_empty() {
+        return OutboundSendResponse::Result(SendResult {
+            success: false,
+            error_code: Some("INVALID_CHAT_ID".to_string()),
+            error: Some("chatId must contain non-whitespace characters".to_string()),
+            commit_attempted: false,
+        });
+    }
+    if let Some(text) = input.text.as_mut() {
+        *text = text.trim().to_string();
+        if text.is_empty() {
+            return OutboundSendResponse::Result(SendResult {
+                success: false,
+                error_code: Some("INVALID_TEXT".to_string()),
+                error: Some("text must contain non-whitespace characters".to_string()),
+                commit_attempted: false,
+            });
+        }
+    }
+
+    if input.source.as_deref().is_some_and(|source| {
+        source.is_empty()
+            || source.len() > 64
+            || !source
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    }) {
+        return OutboundSendResponse::Result(SendResult {
+            success: false,
+            error_code: Some("INVALID_SOURCE".to_string()),
+            error: Some("source must be 1-64 ASCII characters from [A-Za-z0-9._:-]".to_string()),
+            commit_attempted: false,
+        });
+    }
+
     if input.text.is_none() && input.image.is_none() && input.file.is_none() {
         return OutboundSendResponse::Result(SendResult {
             success: false,
@@ -271,6 +307,8 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                         image_mime: image_mime.clone(),
                         file_path: file_path.clone(),
                         inbound_chars: None,
+                        source: None,
+                        similarity_confirmed: false,
                     });
                     if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                         &mut idempotency_lease,
@@ -294,6 +332,8 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                     image_mime: image_mime.clone(),
                     file_path: file_path.clone(),
                     inbound_chars: None,
+                    source: None,
+                    similarity_confirmed: false,
                 });
                 if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                     &mut idempotency_lease,
@@ -318,6 +358,8 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         image_mime,
         file_path,
         inbound_chars: input.inbound_chars.map(|n| n as usize),
+        source: input.source,
+        similarity_confirmed: input.similarity_confirmed.unwrap_or(false),
     };
     outbound_sender()
         .send_claimed(params, idempotency_lease)

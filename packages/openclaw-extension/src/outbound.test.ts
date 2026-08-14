@@ -28,6 +28,7 @@ test("media and caption share a logical request id and are paced", async () => {
   assert.deepEqual(sent.map((part) => part.idempotencyKey), ["logical-123:0", "logical-123:1"]);
   assert.deepEqual(sent.map((part) => part.partIndex), [0, 1]);
   assert.deepEqual(sent.map((part) => part.partCount), [2, 2]);
+  assert.deepEqual(sent.map((part) => part.source), ["openclaw", "openclaw"]);
 });
 
 test("logical media task stops when a child send fails", async () => {

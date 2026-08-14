@@ -11,6 +11,64 @@ use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
 
+const DEFAULT_TEXT_CHUNK_CHARS: usize = 24;
+const DEFAULT_TEXT_CHUNK_PAUSE_MS: u64 = 45;
+const DEFAULT_TEXT_CHUNK_JITTER_MS: u64 = 80;
+const MAX_CHUNKED_TEXT_CHARS: usize = 4_096;
+
+fn bounded_env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn bounded_env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn text_input_actions(
+    text: &str,
+    chunk_chars: usize,
+    pause_ms: u64,
+    pause_jitter_ms: u64,
+    mut jitter: impl FnMut() -> u64,
+) -> Vec<Action> {
+    let chars: Vec<char> = text.chars().collect();
+    let effective_chunk_chars = if chars.len() > MAX_CHUNKED_TEXT_CHARS {
+        chars.len()
+    } else {
+        chunk_chars.max(1)
+    };
+    let chunks: Vec<String> = chars
+        .chunks(effective_chunk_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let mut actions = Vec::with_capacity(chunks.len().saturating_mul(2));
+    for (index, chunk) in chunks.iter().enumerate() {
+        actions.push(Action::Type {
+            text: chunk.clone(),
+            selector: None,
+        });
+        if index + 1 < chunks.len() {
+            let extra = if pause_jitter_ms == 0 {
+                0
+            } else {
+                jitter() % (pause_jitter_ms + 1)
+            };
+            actions.push(Action::Wait {
+                ms: pause_ms + extra,
+            });
+        }
+    }
+    actions
+}
+
 #[derive(Clone)]
 pub struct SendMessageParams {
     pub chat_id: String,
@@ -19,6 +77,8 @@ pub struct SendMessageParams {
     pub image_mime: Option<String>,
     pub file_path: Option<String>,
     pub inbound_chars: Option<usize>,
+    pub source: Option<String>,
+    pub similarity_confirmed: bool,
 }
 
 pub enum SendMessagePhase {
@@ -184,6 +244,19 @@ impl Plan for SendMessagePlan {
         a11y: &A11yNode,
         _session_id: &str,
     ) -> Option<SelectedAction> {
+        if params.chat_id.trim().is_empty() {
+            plan_state.diagnostic_error = Some("invalid_chat_id".to_string());
+            return None;
+        }
+        if params
+            .message
+            .as_deref()
+            .is_some_and(|text| text.trim().is_empty())
+        {
+            plan_state.diagnostic_error = Some("invalid_text".to_string());
+            return None;
+        }
+
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
         // Security popups freeze outbound; do not click them away.
@@ -340,15 +413,29 @@ impl Plan for SendMessagePlan {
 
                     let beat = 400 + (actions::next_jitter() % 500) as u64;
 
+                    let cleanup = || {
+                        vec![
+                            Action::Key {
+                                combo: "ctrl+a".to_string(),
+                            },
+                            Action::Key {
+                                combo: "BackSpace".to_string(),
+                            },
+                        ]
+                    };
+
                     if let Some(fp) = &params.file_path {
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::PasteFile { path: fp.clone() },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: Action::PreCommitSequence {
+                                actions: vec![
+                                    Action::PasteFile { path: fp.clone() },
+                                    Action::Wait { ms: beat },
+                                    Action::CommitKey {
+                                        combo: "Return".to_string(),
+                                    },
+                                ],
+                                cleanup: cleanup(),
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -358,16 +445,19 @@ impl Plan for SendMessagePlan {
 
                     if let Some(ip) = &params.image_path {
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::PasteImage {
-                                    path: ip.clone(),
-                                    mime: params.image_mime.clone(),
-                                },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: Action::PreCommitSequence {
+                                actions: vec![
+                                    Action::PasteImage {
+                                        path: ip.clone(),
+                                        mime: params.image_mime.clone(),
+                                    },
+                                    Action::Wait { ms: beat },
+                                    Action::CommitKey {
+                                        combo: "Return".to_string(),
+                                    },
+                                ],
+                                cleanup: cleanup(),
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -375,22 +465,44 @@ impl Plan for SendMessagePlan {
                         });
                     }
 
-                    // Text: outbound queue already waited "typing time".
                     if let Some(msg) = &params.message {
+                        let chunk_chars = bounded_env_usize(
+                            "AGENT_WECHAT_TEXT_CHUNK_CHARS",
+                            DEFAULT_TEXT_CHUNK_CHARS,
+                            8,
+                            64,
+                        );
+                        let pause_ms = bounded_env_u64(
+                            "AGENT_WECHAT_TEXT_CHUNK_PAUSE_MS",
+                            DEFAULT_TEXT_CHUNK_PAUSE_MS,
+                            20,
+                            500,
+                        );
+                        let pause_jitter_ms = bounded_env_u64(
+                            "AGENT_WECHAT_TEXT_CHUNK_JITTER_MS",
+                            DEFAULT_TEXT_CHUNK_JITTER_MS,
+                            0,
+                            500,
+                        );
+                        let mut input = vec![Action::Key {
+                            combo: "ctrl+a".to_string(),
+                        }];
+                        input.extend(text_input_actions(
+                            msg,
+                            chunk_chars,
+                            pause_ms,
+                            pause_jitter_ms,
+                            || actions::next_jitter() as u64,
+                        ));
+                        input.push(Action::Wait { ms: beat });
+                        input.push(Action::CommitKey {
+                            combo: "Return".to_string(),
+                        });
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::Key {
-                                    combo: "ctrl+a".to_string(),
-                                },
-                                Action::Type {
-                                    text: msg.clone(),
-                                    selector: None,
-                                },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: Action::PreCommitSequence {
+                                actions: input,
+                                cleanup: cleanup(),
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -472,6 +584,58 @@ mod tests {
         }
     }
 
+    fn blank_params(chat_id: &str, message: Option<&str>) -> SendMessageParams {
+        SendMessageParams {
+            chat_id: chat_id.to_string(),
+            message: message.map(str::to_string),
+            image_path: None,
+            image_mime: None,
+            file_path: None,
+            inbound_chars: None,
+            source: None,
+            similarity_confirmed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn blank_chat_or_text_never_selects_an_action() {
+        let state = AppState::default();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: None,
+            contact_card: None,
+            settings: None,
+        };
+        let a11y = A11yNode {
+            role: "desktop".to_string(),
+            name: String::new(),
+            bounds: None,
+            children: None,
+            parent_index: None,
+            window: None,
+            states: None,
+        };
+        for (params, expected) in [
+            (blank_params(" ", Some("hello")), "invalid_chat_id"),
+            (blank_params("chat", Some(" \n ")), "invalid_text"),
+        ] {
+            let mut plan_state = SendMessagePlan.initial_plan_state();
+            let selected = SendMessagePlan
+                .select_action(
+                    &state,
+                    &params,
+                    &identified,
+                    &mut plan_state,
+                    &a11y,
+                    "default",
+                )
+                .await;
+            assert!(selected.is_none());
+            assert_eq!(plan_state.diagnostic_error.as_deref(), Some(expected));
+            assert!(!plan_state.send_action_executed);
+        }
+    }
+
     #[test]
     fn all_unverifiable_fallback_codes_are_safety_critical() {
         for code in [
@@ -498,6 +662,41 @@ mod tests {
         ] {
             assert!(!is_unverifiable_chat_selection(ordinary), "{ordinary}");
         }
+    }
+
+    #[test]
+    fn text_chunking_is_unicode_safe_and_deterministic() {
+        let actions = text_input_actions("你好abc世界def", 4, 40, 20, || 7);
+        assert_eq!(actions.len(), 5);
+        assert!(matches!(
+            &actions[0],
+            Action::Type { text, .. } if text == "你好ab"
+        ));
+        assert!(matches!(&actions[1], Action::Wait { ms: 47 }));
+        assert!(matches!(
+            &actions[2],
+            Action::Type { text, .. } if text == "c世界d"
+        ));
+        assert!(matches!(&actions[3], Action::Wait { ms: 47 }));
+        assert!(matches!(
+            &actions[4],
+            Action::Type { text, .. } if text == "ef"
+        ));
+    }
+
+    #[test]
+    fn very_long_text_falls_back_to_one_input_action() {
+        let text = "界".repeat(MAX_CHUNKED_TEXT_CHARS + 1);
+        let actions = text_input_actions(&text, 8, 45, 80, || 7);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], Action::Type { text: actual, .. } if actual == &text));
+    }
+
+    #[test]
+    fn short_text_is_one_input_action_without_pause() {
+        let actions = text_input_actions("hello", 24, 45, 80, || 999);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], Action::Type { text, .. } if text == "hello"));
     }
 
     #[test]

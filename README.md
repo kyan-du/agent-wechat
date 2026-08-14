@@ -127,6 +127,15 @@ services:
       - AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY=${AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY:-20}
       - AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS=${AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS:-1500}
       - AGENT_WECHAT_OUTBOUND_JITTER_MS=${AGENT_WECHAT_OUTBOUND_JITTER_MS:-250}
+      - AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS=${AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS:-4000}
+      - AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT=${AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT:-8}
+      - AGENT_WECHAT_TEXT_CHUNK_CHARS=${AGENT_WECHAT_TEXT_CHUNK_CHARS:-24}
+      - AGENT_WECHAT_TEXT_CHUNK_PAUSE_MS=${AGENT_WECHAT_TEXT_CHUNK_PAUSE_MS:-45}
+      - AGENT_WECHAT_TEXT_CHUNK_JITTER_MS=${AGENT_WECHAT_TEXT_CHUNK_JITTER_MS:-80}
+      - AGENT_WECHAT_SIMILARITY_WINDOW_MS=${AGENT_WECHAT_SIMILARITY_WINDOW_MS:-600000}
+      - AGENT_WECHAT_SIMILARITY_MIN_CHARS=${AGENT_WECHAT_SIMILARITY_MIN_CHARS:-20}
+      - AGENT_WECHAT_SIMILARITY_HAMMING=${AGENT_WECHAT_SIMILARITY_HAMMING:-8}
+      - AGENT_WECHAT_SIMILARITY_HISTORY=${AGENT_WECHAT_SIMILARITY_HISTORY:-200}
       - AGENT_WECHAT_OUTBOUND_DISABLED=${AGENT_WECHAT_OUTBOUND_DISABLED:-false}
       - AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS=${AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS:-10000}
       - AGENT_WECHAT_MACHINE_ID=${AGENT_WECHAT_MACHINE_ID:?run scripts/device-identity.sh}
@@ -138,6 +147,21 @@ volumes:
   agent-wechat-data:
   agent-wechat-home:
 ```
+
+Outbound text requests are scheduled with round-robin fairness across both
+`source` and chat. OpenClaw and Wechaty set their source automatically; direct
+API callers may use a 1-64 character ASCII `source`. Long text is pasted in
+Unicode-safe chunks with bounded pauses (texts above 4096 characters use one
+paste to keep the action plan bounded). Any pre-commit text-input failure clears
+the partial composer draft; cleanup is never attempted after an uncertain commit.
+Image/file sends remain unchanged.
+If a text-only request resembles another recent outbound message, the API
+returns `SIMILAR_CONTENT_CONFIRMATION_REQUIRED`; after reviewing the exact
+recipient and text, an operator can rerun CLI with `--confirm-similar`, call the
+OpenClaw `wechat_send_confirmed` tool with `confirmed: true`, use Wechaty's
+`messageSendTextConfirmed(..., true)`, or set raw REST `similarityConfirmed:
+true`. None of the normal automation paths confirms or retries automatically.
+Similarity history is memory-only and retains fingerprints, not message text.
 
 ## Development
 

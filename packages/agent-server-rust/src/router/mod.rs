@@ -109,7 +109,7 @@ mod tests {
         std::env::set_var("AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", "1000");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_JITTER_MS", "0");
         std::env::set_var("AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", "5000");
-        // Keep this route fixture independent of the runner's local timezone.
+        // This test exercises pause/resume, not the host's local quiet-hours clock.
         std::env::set_var("AGENT_WECHAT_QUIET_START_MIN", "0");
         std::env::set_var("AGENT_WECHAT_QUIET_END_MIN", "0");
         std::env::remove_var("AGENT_WECHAT_OUTBOUND_DISABLED");
@@ -167,6 +167,27 @@ mod tests {
             "qrData",
         ] {
             assert!(!serialized.contains(sensitive));
+        }
+    }
+
+    #[tokio::test]
+    async fn blank_chat_or_text_is_rejected_before_outbound_execution() {
+        init_test_server_state().await;
+        let app = build_router();
+        for (payload, code) in [
+            (r#"{"chatId":" ","text":"hello"}"#, "INVALID_CHAT_ID"),
+            (r#"{"chatId":"chat","text":" \n\t "}"#, "INVALID_TEXT"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authed("POST", "/api/messages/send", Body::from(payload)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_response(response).await;
+            assert_eq!(body["success"], false);
+            assert_eq!(body["errorCode"], code);
+            assert_eq!(body["commitAttempted"], false);
         }
     }
 

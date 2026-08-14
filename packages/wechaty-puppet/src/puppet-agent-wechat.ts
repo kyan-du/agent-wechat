@@ -18,6 +18,7 @@ import {
   type PollContext,
   type PollLifecycle,
 } from './poll-guard.js'
+import { buildWechatyTextSend } from './send-confirmation.js'
 import {
   chatToContactPayload,
   contactToContactPayload,
@@ -532,14 +533,34 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     return rawPayload
   }
 
+  /** Explicit operator path for retrying one reviewed similar-content send. */
+  async messageSendTextConfirmed(
+    conversationId: string,
+    text: string,
+    confirmed: true,
+  ): Promise<void | string> {
+    if (confirmed !== true) throw new Error('Explicit operator confirmation is required')
+    const result = await this.client.sendMessage(
+      buildWechatyTextSend(conversationId, text, true),
+    )
+    if (!result.success) throw new Error(result.error ?? 'Send failed')
+  }
+
   override async messageSendText(
     conversationId: string,
     text: string,
     _mentionIdList?: string[],
   ): Promise<void | string> {
     log.verbose('PuppetAgentWeChat', 'messageSendText(%s, %s)', conversationId, text.slice(0, 50))
-    const result = await this.client.sendMessage({ chatId: conversationId, text })
+    const result = await this.client.sendMessage(
+      buildWechatyTextSend(conversationId, text),
+    )
     if (!result.success) {
+      if (result.errorCode === 'SIMILAR_CONTENT_CONFIRMATION_REQUIRED') {
+        throw new Error(
+          'Similar text requires explicit operator review via messageSendTextConfirmed(); it was not retried automatically',
+        )
+      }
       throw new Error(result.error ?? 'Send failed')
     }
   }
@@ -559,10 +580,12 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       ? await this.client.sendMessage({
           chatId: conversationId,
           image: { data: base64, mimeType },
+          source: 'wechaty',
         })
       : await this.client.sendMessage({
           chatId: conversationId,
           file: { data: base64, filename: file.name },
+          source: 'wechaty',
         })
 
     if (!result.success) {
