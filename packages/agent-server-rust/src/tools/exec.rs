@@ -28,6 +28,7 @@ pub struct CommandResult {
     pub exit_code: i32,
 }
 
+#[derive(Clone)]
 pub struct ExecOptions {
     pub session: Option<Session>,
     pub timeout_ms: u64,
