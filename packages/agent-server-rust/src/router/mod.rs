@@ -416,7 +416,7 @@ mod tests {
         );
 
         match crate::outbound::outbound_sender().admit_idempotency_key(key) {
-            crate::outbound::IdempotencyAdmission::Claimed(_) => {}
+            crate::outbound::IdempotencyAdmission::Claimed(mut lease) => lease.disarm(),
             _ => panic!("rejected materialization failure must be reclaimable after restart"),
         }
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
         );
 
         match crate::outbound::outbound_sender().admit_idempotency_key(key) {
-            crate::outbound::IdempotencyAdmission::Claimed(_) => {}
+            crate::outbound::IdempotencyAdmission::Claimed(mut lease) => lease.disarm(),
             _ => panic!("write failure rejection must be reclaimable after restart"),
         }
     }
@@ -577,5 +577,71 @@ mod tests {
         assert_eq!(body["success"], false);
         assert_eq!(body["errorCode"], "MANUAL_RECONCILIATION_REQUIRED");
         assert_eq!(crate::outbound::outbound_sender().status().queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn manual_reconcile_failure_response_and_log_code_are_redacted() {
+        init_test_server_state().await;
+        let app = build_router();
+        let key = "hostile-secret-key";
+        {
+            let db = crate::db::get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+            crate::db::queries::insert_outbound_queued(
+                &db,
+                key,
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+
+        crate::outbound::fail_next_manual_reconcile_with_hostile_error();
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/status/outbound/idempotency/hostile-secret-key/reconcile",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_response(response).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["error"], "IDEMPOTENCY_RECONCILE_FAILED");
+        assert!(body.get("key").is_none());
+        assert!(body.get("detail").is_none());
+        let serialized = serde_json::to_string(&body).unwrap();
+        for forbidden in [
+            "hostile-secret-key",
+            "/Users/kyan/private/agent.db",
+            "UPDATE outbound_idempotency",
+            "sqlcipher",
+            "provider",
+        ] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
+        }
+
+        let hostile = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 0,
+            },
+            Some(
+                "path=/Users/kyan/private/agent.db SQL=UPDATE outbound_idempotency provider=sqlcipher key=hostile-secret-key"
+                    .to_string(),
+            ),
+        );
+        let log_code = status::reconciliation_failure_log_code(&hostile);
+        assert_eq!(log_code, "IDEMPOTENCY_RECONCILE_FAILED");
+        for forbidden in [
+            "hostile-secret-key",
+            "/Users/kyan/private/agent.db",
+            "UPDATE outbound_idempotency",
+            "sqlcipher",
+            "provider",
+        ] {
+            assert!(!log_code.contains(forbidden), "{forbidden}");
+        }
     }
 }

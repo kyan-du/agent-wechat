@@ -105,16 +105,24 @@ pub async fn reconcile_outbound_idempotency(Path(key): Path<String>) -> impl Int
                 "error": "IDEMPOTENCY_NOT_RECONCILABLE",
             })),
         ),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "success": false,
-                "key": key,
-                "error": "IDEMPOTENCY_RECONCILE_FAILED",
-                "detail": error.to_string(),
-            })),
-        ),
+        Err(error) => {
+            tracing::error!(
+                error_code = reconciliation_failure_log_code(&error),
+                "[status] outbound idempotency reconcile failed"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "IDEMPOTENCY_RECONCILE_FAILED",
+                })),
+            )
+        }
     }
+}
+
+pub(crate) fn reconciliation_failure_log_code(_: &rusqlite::Error) -> &'static str {
+    "IDEMPOTENCY_RECONCILE_FAILED"
 }
 
 pub async fn pause_outbound() -> Json<crate::outbound::OutboundStatus> {

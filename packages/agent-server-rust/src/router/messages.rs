@@ -7,7 +7,8 @@ use serde::Deserialize;
 use crate::db::get_db;
 use crate::ia::types::{MediaResult, Message, SendParams, SendResult};
 use crate::outbound::{
-    cleanup_temp_files, outbound_sender, IdempotencyAdmission, OutboundError, OutboundSendResponse,
+    cleanup_temp_files, outbound_sender, IdempotencyAdmission, IdempotencyClaimLease,
+    OutboundError, OutboundSendResponse,
 };
 use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
@@ -155,11 +156,11 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         });
     }
 
-    let mut idempotency_generation = None;
+    let mut idempotency_lease: Option<IdempotencyClaimLease> = None;
     if let Some(key) = input.idempotency_key.as_deref() {
         match outbound_sender().admit_idempotency_key(key) {
-            IdempotencyAdmission::Claimed(generation) => {
-                idempotency_generation = Some(generation);
+            IdempotencyAdmission::Claimed(lease) => {
+                idempotency_lease = Some(lease);
             }
             IdempotencyAdmission::Completed(result) => {
                 return OutboundSendResponse::Result(result);
@@ -200,8 +201,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 }
                 Err(e) => {
                     if let Err(error) = outbound_sender().reject_claimed_pre_execution(
-                        input.idempotency_key.as_deref(),
-                        idempotency_generation,
+                        &mut idempotency_lease,
                         "TEMP_FILE_WRITE_FAILED",
                     ) {
                         return OutboundSendResponse::Rejected(error);
@@ -216,8 +216,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
             },
             Err(e) => {
                 if let Err(error) = outbound_sender().reject_claimed_pre_execution(
-                    input.idempotency_key.as_deref(),
-                    idempotency_generation,
+                    &mut idempotency_lease,
                     "IMAGE_BASE64_DECODE_FAILED",
                 ) {
                     return OutboundSendResponse::Rejected(error);
@@ -274,8 +273,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                         inbound_chars: None,
                     });
                     if let Err(error) = outbound_sender().reject_claimed_pre_execution(
-                        input.idempotency_key.as_deref(),
-                        idempotency_generation,
+                        &mut idempotency_lease,
                         "TEMP_FILE_WRITE_FAILED",
                     ) {
                         return OutboundSendResponse::Rejected(error);
@@ -298,8 +296,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                     inbound_chars: None,
                 });
                 if let Err(error) = outbound_sender().reject_claimed_pre_execution(
-                    input.idempotency_key.as_deref(),
-                    idempotency_generation,
+                    &mut idempotency_lease,
                     "FILE_BASE64_DECODE_FAILED",
                 ) {
                     return OutboundSendResponse::Rejected(error);
@@ -323,6 +320,6 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
     outbound_sender()
-        .send_claimed(params, input.idempotency_key, idempotency_generation)
+        .send_claimed(params, idempotency_lease)
         .await
 }

@@ -24,8 +24,8 @@ use crate::{
         queries::{
             claim_reusable_outbound_queued, complete_outbound_result, count_outbound_idempotency,
             expire_outbound_if_stale, get_outbound_idempotency, insert_outbound_queued,
-            mark_outbound_needs_reconciliation, mark_outbound_sending,
-            reconcile_outbound_idempotency, reject_outbound_pre_execution,
+            mark_outbound_needs_reconciliation, mark_outbound_queued_needs_reconciliation,
+            mark_outbound_sending, reconcile_outbound_idempotency, reject_outbound_pre_execution,
             reject_outbound_unless_active_or_completed, OutboundIdempotencyRecord,
             OutboundIdempotencyState,
         },
@@ -229,10 +229,64 @@ pub struct OutboundStatus {
 }
 
 pub enum IdempotencyAdmission {
-    Claimed(i64),
+    Claimed(IdempotencyClaimLease),
     InProgress,
     Completed(SendResult),
     Rejected(OutboundError),
+}
+
+pub struct IdempotencyClaimLease {
+    key: String,
+    generation: i64,
+    ttl: Duration,
+    disarmed: bool,
+}
+
+impl IdempotencyClaimLease {
+    fn new(key: String, generation: i64, ttl: Duration) -> Self {
+        Self {
+            key,
+            generation,
+            ttl,
+            disarmed: false,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for IdempotencyClaimLease {
+    fn drop(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        let db = get_db();
+        match mark_outbound_queued_needs_reconciliation(
+            &db,
+            &self.key,
+            self.generation,
+            "IDEMPOTENCY_CLAIM_DROPPED",
+            self.ttl,
+        ) {
+            Ok(affected) if affected > 0 => {}
+            Ok(_) => {
+                tracing::warn!("[outbound] idempotency claim lease drop CAS affected 0 rows");
+            }
+            Err(_) => {
+                tracing::error!("[outbound] idempotency claim lease drop failed");
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -425,6 +479,7 @@ struct OutboundTask {
     enqueued_at: Instant,
     idempotency_key: Option<String>,
     idempotency_generation: Option<i64>,
+    idempotency_lease: Option<IdempotencyClaimLease>,
     result_tx: oneshot::Sender<OutboundSendResponse>,
 }
 
@@ -444,6 +499,8 @@ static FAIL_SENDING_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock:
 static FAIL_RESULT_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 #[cfg(test)]
 static FAIL_REJECTION_PERSISTENCE_FOR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+#[cfg(test)]
+static FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR: OnceLock<Mutex<bool>> = OnceLock::new();
 
 pub fn outbound_sender() -> &'static OutboundSender {
     OUTBOUND_SENDER.get_or_init(|| OutboundSender::spawn(OutboundConfig::from_env()))
@@ -481,10 +538,8 @@ impl OutboundSender {
     ) -> OutboundSendResponse {
         if let Some(key) = idempotency_key.as_deref() {
             match self.admit_idempotency_key(key) {
-                IdempotencyAdmission::Claimed(generation) => {
-                    return self
-                        .send_claimed(params, idempotency_key, Some(generation))
-                        .await;
+                IdempotencyAdmission::Claimed(lease) => {
+                    return self.send_claimed(params, Some(lease)).await;
                 }
                 IdempotencyAdmission::Completed(result) => {
                     cleanup_temp_files(&params);
@@ -503,7 +558,7 @@ impl OutboundSender {
             }
         }
 
-        self.send_claimed(params, idempotency_key, None).await
+        self.send_claimed(params, None).await
     }
 
     pub fn admit_idempotency_key(&self, key: &str) -> IdempotencyAdmission {
@@ -539,7 +594,13 @@ impl OutboundSender {
         }
 
         match try_claim_idempotency(key, self.config.idempotency_ttl) {
-            Ok(IdempotencyStart::Inserted(generation)) => IdempotencyAdmission::Claimed(generation),
+            Ok(IdempotencyStart::Inserted(generation)) => {
+                IdempotencyAdmission::Claimed(IdempotencyClaimLease::new(
+                    key.to_string(),
+                    generation,
+                    self.config.idempotency_ttl,
+                ))
+            }
             Ok(IdempotencyStart::Completed(result)) => IdempotencyAdmission::Completed(result),
             Ok(IdempotencyStart::InProgress) | Ok(IdempotencyStart::NeedsReconciliation) => {
                 IdempotencyAdmission::InProgress
@@ -555,10 +616,11 @@ impl OutboundSender {
     pub async fn send_claimed(
         &self,
         params: SendMessageParams,
-        idempotency_key: Option<String>,
-        idempotency_generation: Option<i64>,
+        mut idempotency_lease: Option<IdempotencyClaimLease>,
     ) -> OutboundSendResponse {
         let now = Instant::now();
+        let idempotency_key = idempotency_lease.as_ref().map(|lease| lease.key.clone());
+        let idempotency_generation = idempotency_lease.as_ref().map(|lease| lease.generation);
         if self.control.is_read_only() {
             cleanup_temp_files(&params);
             if let Some(key) = idempotency_key.as_deref() {
@@ -572,6 +634,9 @@ impl OutboundSender {
                     tracing::error!("[outbound] failed to persist read-only rejection: {error}");
                     self.control.set_runtime_paused(true);
                     return OutboundSendResponse::Rejected(OutboundError::persistence(false));
+                }
+                if let Some(lease) = &mut idempotency_lease {
+                    lease.disarm();
                 }
             }
             return OutboundSendResponse::Rejected(OutboundError::read_only());
@@ -600,6 +665,9 @@ impl OutboundSender {
                         cleanup_temp_files(&params);
                         return OutboundSendResponse::Rejected(OutboundError::persistence(false));
                     }
+                    if let Some(lease) = &mut idempotency_lease {
+                        lease.disarm();
+                    }
                 }
                 cleanup_temp_files(&params);
                 return OutboundSendResponse::Rejected(error);
@@ -612,6 +680,7 @@ impl OutboundSender {
             enqueued_at: now,
             idempotency_key: idempotency_key.clone(),
             idempotency_generation,
+            idempotency_lease,
             result_tx,
         };
 
@@ -666,14 +735,13 @@ impl OutboundSender {
 
     pub(crate) fn reject_claimed_pre_execution(
         &self,
-        idempotency_key: Option<&str>,
-        idempotency_generation: Option<i64>,
+        idempotency_lease: &mut Option<IdempotencyClaimLease>,
         error_code: &str,
     ) -> Result<(), OutboundError> {
-        if let Some(key) = idempotency_key {
+        if let Some(lease) = idempotency_lease {
             if let Err(error) = persist_rejection(
-                key,
-                idempotency_generation,
+                lease.key(),
+                Some(lease.generation()),
                 OutboundIdempotencyState::Rejected,
                 error_code,
                 self.config.idempotency_ttl,
@@ -682,6 +750,7 @@ impl OutboundSender {
                 self.control.set_runtime_paused(true);
                 return Err(OutboundError::persistence(false));
             }
+            lease.disarm();
         }
         Ok(())
     }
@@ -818,15 +887,20 @@ async fn worker_loop(
             None => continue,
         };
 
+        let mut task = task;
         if let Some(key) = task.idempotency_key.as_deref() {
             if let Err(error) = persist_sending(key, task.idempotency_generation) {
                 tracing::error!("[outbound] failed to persist sending state: {error}");
-                if !mark_needs_reconciliation(
+                if mark_needs_reconciliation(
                     key,
                     task.idempotency_generation,
                     false,
                     config.idempotency_ttl,
                 ) {
+                    if let Some(lease) = &mut task.idempotency_lease {
+                        lease.disarm();
+                    }
+                } else {
                     tracing::error!("[outbound] failed to persist sending reconciliation state");
                 }
                 control.set_runtime_paused(true);
@@ -835,6 +909,9 @@ async fn worker_loop(
                     OutboundError::persistence(false),
                 ));
                 continue;
+            }
+            if let Some(lease) = &mut task.idempotency_lease {
+                lease.disarm();
             }
         }
         let result = execute_send(&task.params).await;
@@ -979,7 +1056,7 @@ fn complete_task(
 }
 
 fn reject_without_idempotency_cache(
-    task: OutboundTask,
+    mut task: OutboundTask,
     error: OutboundError,
     idempotency_ttl: Duration,
 ) {
@@ -1004,6 +1081,9 @@ fn reject_without_idempotency_cache(
                         false,
                     )));
             return;
+        }
+        if let Some(lease) = &mut task.idempotency_lease {
+            lease.disarm();
         }
     }
     let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
@@ -1246,6 +1326,19 @@ pub fn manually_reconcile_idempotency(key: &str, ttl: Duration) -> rusqlite::Res
     if validate_idempotency_key(key).is_err() {
         return Ok(false);
     }
+    #[cfg(test)]
+    if consume_manual_reconcile_hostile_failure() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::DatabaseCorrupt,
+                extended_code: 0,
+            },
+            Some(
+                "hostile path=/Users/kyan/private/agent.db SQL=UPDATE outbound_idempotency provider=sqlcipher key=hostile-secret-key"
+                    .to_string(),
+            ),
+        ));
+    }
     let db = get_db();
     reconcile_outbound_idempotency(
         &db,
@@ -1254,6 +1347,26 @@ pub fn manually_reconcile_idempotency(key: &str, ttl: Duration) -> rusqlite::Res
         "MANUAL_RECONCILIATION_REQUIRED",
         ttl,
     )
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_manual_reconcile_with_hostile_error() {
+    let mut guard = FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("manual reconcile fault slot poisoned");
+    *guard = true;
+}
+
+#[cfg(test)]
+fn consume_manual_reconcile_hostile_failure() -> bool {
+    let mut guard = FAIL_MANUAL_RECONCILE_WITH_HOSTILE_ERROR
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .expect("manual reconcile fault slot poisoned");
+    let fail = *guard;
+    *guard = false;
+    fail
 }
 
 trait JitterSource {
@@ -1330,6 +1443,14 @@ mod tests {
 
     fn generation_for(key: &str) -> i64 {
         get_idempotency_status(key).unwrap().generation
+    }
+
+    fn lease_for(key: &str) -> IdempotencyClaimLease {
+        IdempotencyClaimLease::new(
+            key.to_string(),
+            generation_for(key),
+            Duration::from_secs(60),
+        )
     }
 
     fn persist_terminal_for_test(key: &str, result: &SendResult, ttl: Duration) {
@@ -1535,6 +1656,189 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dropped_claim_lease_marks_exact_queued_generation_needs_reconciliation() {
+        clear_idempotency_rows();
+        let key = "lease-drop-queued";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let generation = generation_for(key);
+
+        drop(IdempotencyClaimLease::new(
+            key.to_string(),
+            generation,
+            Duration::from_secs(60),
+        ));
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("IDEMPOTENCY_CLAIM_DROPPED")
+        );
+        assert!(manually_reconcile_idempotency(key, Duration::from_secs(60)).unwrap());
+        match claim_idempotency(key, Duration::from_secs(60)) {
+            IdempotencyStart::Completed(result) => {
+                assert_eq!(
+                    result.error_code.as_deref(),
+                    Some("MANUAL_RECONCILIATION_REQUIRED")
+                );
+                assert!(result.commit_attempted);
+            }
+            _ => panic!("manual reconciliation must remain no-resend terminal replay"),
+        }
+    }
+
+    #[test]
+    fn dropped_old_generation_claim_lease_cannot_overwrite_reclaimed_key() {
+        clear_idempotency_rows();
+        let key = "lease-old-generation";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let old_generation = generation_for(key);
+        persist_rejection(
+            key,
+            Some(old_generation),
+            OutboundIdempotencyState::Rejected,
+            "IMAGE_BASE64_DECODE_FAILED",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let new_generation = generation_for(key);
+
+        drop(IdempotencyClaimLease::new(
+            key.to_string(),
+            old_generation,
+            Duration::from_secs(60),
+        ));
+
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Queued);
+        assert_eq!(record.generation, new_generation);
+    }
+
+    #[tokio::test]
+    async fn queued_task_owns_lease_after_caller_abort_until_runtime_drop() {
+        clear_idempotency_rows();
+        let key = "lease-after-try-send-abort";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, mut rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+
+        let pending = tokio::spawn(async move {
+            sender
+                .send_claimed(test_params("queued"), Some(lease_for(key)))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+
+        let task = rx.recv().await.unwrap();
+        drop(task);
+        assert!(matches!(
+            pending.await,
+            Err(error) if error.is_cancelled()
+        ));
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::NeedsReconciliation
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_receiver_before_worker_takes_task_reconciles_queued_lease() {
+        clear_idempotency_rows();
+        let key = "lease-runtime-shutdown";
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted(_)
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let sender = OutboundSender {
+            config,
+            control: Arc::new(OutboundControl::new(false)),
+            tx,
+            usage: Arc::new(Mutex::new(Usage::new())),
+        };
+        let pending = tokio::spawn(async move {
+            sender
+                .send_claimed(test_params("shutdown"), Some(lease_for(key)))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while rx.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        drop(rx);
+        match pending.await.unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Persistence);
+                assert!(error.commit_attempted);
+            }
+            _ => panic!("closed receiver should fail closed after queued handoff"),
+        }
+        assert_eq!(
+            get_idempotency_status(key).unwrap().state,
+            OutboundIdempotencyState::NeedsReconciliation
+        );
+    }
+
     #[tokio::test]
     async fn queue_bound_rejects_when_channel_is_full() {
         clear_idempotency_rows();
@@ -1567,6 +1871,7 @@ mod tests {
                 enqueued_at: Instant::now(),
                 idempotency_key: None,
                 idempotency_generation: None,
+                idempotency_lease: None,
                 result_tx,
             })
             .unwrap();
@@ -1611,6 +1916,7 @@ mod tests {
             enqueued_at: Instant::now() - Duration::from_secs(10),
             idempotency_key: Some("expired".to_string()),
             idempotency_generation: Some(generation_for("expired")),
+            idempotency_lease: Some(lease_for("expired")),
             result_tx,
         };
         reject_without_idempotency_cache(task, OutboundError::expired(), Duration::from_secs(60));
@@ -1646,6 +1952,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("persist-fail".to_string()),
             idempotency_generation: Some(generation_for("persist-fail")),
+            idempotency_lease: None,
             result_tx,
         };
         let control = OutboundControl::new(false);
@@ -1710,11 +2017,7 @@ mod tests {
 
         fail_next_persistence_for(&FAIL_RESULT_PERSISTENCE_FOR, key);
         match sender
-            .send_claimed(
-                test_params("closed result channel"),
-                Some(key.to_string()),
-                Some(generation_for(key)),
-            )
+            .send_claimed(test_params("closed result channel"), Some(lease_for(key)))
             .await
         {
             OutboundSendResponse::Rejected(error) => {
@@ -1793,6 +2096,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some(key.to_string()),
             idempotency_generation: Some(generation_for(key)),
+            idempotency_lease: Some(lease_for(key)),
             result_tx,
         })
         .unwrap();
@@ -2064,6 +2368,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("pause-first".to_string()),
             idempotency_generation: Some(generation_for("pause-first")),
+            idempotency_lease: Some(lease_for("pause-first")),
             result_tx: first_tx,
         })
         .unwrap();
@@ -2086,6 +2391,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("pause-second".to_string()),
             idempotency_generation: Some(generation_for("pause-second")),
+            idempotency_lease: Some(lease_for("pause-second")),
             result_tx: second_tx,
         })
         .unwrap();
@@ -2138,6 +2444,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("ttl-first".to_string()),
             idempotency_generation: Some(generation_for("ttl-first")),
+            idempotency_lease: Some(lease_for("ttl-first")),
             result_tx: first_tx,
         })
         .unwrap();
@@ -2160,6 +2467,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("ttl-second".to_string()),
             idempotency_generation: Some(generation_for("ttl-second")),
+            idempotency_lease: Some(lease_for("ttl-second")),
             result_tx: second_tx,
         })
         .unwrap();
@@ -2341,6 +2649,7 @@ mod tests {
             enqueued_at: Instant::now(),
             idempotency_key: Some("quiet".into()),
             idempotency_generation: Some(generation_for("quiet")),
+            idempotency_lease: Some(lease_for("quiet")),
             result_tx,
         })
         .unwrap();

@@ -278,6 +278,32 @@ pub fn mark_outbound_needs_reconciliation(
     )
 }
 
+pub fn mark_outbound_queued_needs_reconciliation(
+    conn: &Connection,
+    key: &str,
+    generation: i64,
+    error_code: &str,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<usize> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = 'needs_reconciliation',
+             result_success = 0,
+             error_code = ?3,
+             error = ?3,
+             commit_attempted = 0,
+             expires_at = ?4,
+             updated_at = ?5,
+             completed_at = ?5
+         WHERE key = ?1
+           AND generation = ?2
+           AND state = 'queued'",
+        params![key, generation, error_code, expires_at, now],
+    )
+}
+
 pub fn reconcile_outbound_idempotency(
     conn: &Connection,
     key: &str,
