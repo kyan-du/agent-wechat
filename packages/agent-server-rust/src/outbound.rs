@@ -23,12 +23,12 @@ use crate::{
         get_db,
         queries::{
             claim_reusable_outbound_queued, complete_outbound_result, count_outbound_idempotency,
-            expire_outbound_if_stale, get_outbound_idempotency, insert_outbound_queued,
-            mark_outbound_needs_reconciliation, mark_outbound_queued_needs_reconciliation,
-            mark_outbound_sending, mark_outbound_sending_needs_reconciliation,
-            reconcile_outbound_idempotency, reject_outbound_pre_execution,
-            reject_outbound_unless_active_or_completed, sweep_outbound_idempotency,
-            OutboundIdempotencyRecord, OutboundIdempotencyState,
+            count_protected_outbound_idempotency, expire_outbound_if_stale,
+            get_outbound_idempotency, insert_outbound_queued, mark_outbound_needs_reconciliation,
+            mark_outbound_queued_needs_reconciliation, mark_outbound_sending,
+            mark_outbound_sending_needs_reconciliation, reconcile_outbound_idempotency,
+            reject_outbound_pre_execution, reject_outbound_unless_active_or_completed,
+            sweep_outbound_idempotency, OutboundIdempotencyRecord, OutboundIdempotencyState,
         },
         try_get_db,
     },
@@ -114,6 +114,7 @@ pub enum OutboundErrorKind {
     Budget,
     Persistence,
     InvalidIdempotencyKey,
+    Capacity,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +220,16 @@ impl OutboundError {
             commit_attempted: false,
         }
     }
+
+    fn capacity(retry_after: Duration) -> Self {
+        Self {
+            kind: OutboundErrorKind::Capacity,
+            retry_after: Some(retry_after),
+            code: "IDEMPOTENCY_CAPACITY".to_string(),
+            message: "Outbound idempotency capacity is exhausted by protected evidence".to_string(),
+            commit_attempted: false,
+        }
+    }
 }
 
 pub enum OutboundSendResponse {
@@ -235,7 +246,8 @@ impl IntoResponse for OutboundSendResponse {
                     OutboundErrorKind::QueueFull
                     | OutboundErrorKind::DuplicateInProgress
                     | OutboundErrorKind::QuietHours
-                    | OutboundErrorKind::Budget => StatusCode::TOO_MANY_REQUESTS,
+                    | OutboundErrorKind::Budget
+                    | OutboundErrorKind::Capacity => StatusCode::TOO_MANY_REQUESTS,
                     OutboundErrorKind::ReadOnly => StatusCode::SERVICE_UNAVAILABLE,
                     OutboundErrorKind::Expired | OutboundErrorKind::Unavailable => {
                         StatusCode::SERVICE_UNAVAILABLE
@@ -348,6 +360,7 @@ impl OutboundDiagnostics {
                 | OutboundErrorKind::DuplicateInProgress
                 | OutboundErrorKind::QuietHours
                 | OutboundErrorKind::Budget
+                | OutboundErrorKind::Capacity
         ) {
             self.rejected_429_total.fetch_add(1, Ordering::Relaxed);
         }
@@ -845,6 +858,9 @@ impl OutboundSender {
             Ok(IdempotencyStart::Completed(result)) => IdempotencyAdmission::Completed(result),
             Ok(IdempotencyStart::InProgress) | Ok(IdempotencyStart::NeedsReconciliation) => {
                 IdempotencyAdmission::InProgress
+            }
+            Ok(IdempotencyStart::Capacity) => {
+                IdempotencyAdmission::Rejected(OutboundError::capacity(self.config.retry_after()))
             }
             Err(error) => {
                 log_persist_failure("claim", &error);
@@ -1443,16 +1459,52 @@ enum IdempotencyStart {
     InProgress,
     NeedsReconciliation,
     Completed(SendResult),
+    Capacity,
+}
+
+fn replay_existing_record(record: OutboundIdempotencyRecord) -> IdempotencyStart {
+    if record.state.is_completed_execution() {
+        IdempotencyStart::Completed(
+            record
+                .result
+                .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
+        )
+    } else if matches!(
+        record.state,
+        OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
+    ) {
+        IdempotencyStart::InProgress
+    } else if record.state == OutboundIdempotencyState::NeedsReconciliation {
+        IdempotencyStart::NeedsReconciliation
+    } else {
+        IdempotencyStart::Capacity
+    }
 }
 
 fn try_claim_idempotency(key: &str, ttl: Duration) -> rusqlite::Result<IdempotencyStart> {
+    try_claim_idempotency_limited(key, ttl, idempotency_max_rows())
+}
+
+fn try_claim_idempotency_limited(
+    key: &str,
+    ttl: Duration,
+    max_rows: usize,
+) -> rusqlite::Result<IdempotencyStart> {
     #[cfg(test)]
     if consume_hostile_claim_failure() {
         return Err(hostile_sqlite_error());
     }
     let db = get_db();
     expire_outbound_if_stale(&db, key)?;
-    sweep_persistent_idempotency(&db);
+    if let Err(error) = sweep_outbound_idempotency(&db, max_rows) {
+        log_persist_failure("sweep", &error);
+    }
+    if count_protected_outbound_idempotency(&db) >= max_rows {
+        return Ok(match get_outbound_idempotency(&db, key)? {
+            Some(record) => replay_existing_record(record),
+            None => IdempotencyStart::Capacity,
+        });
+    }
     if let Some(generation) = insert_outbound_queued(&db, key, ttl)? {
         return Ok(IdempotencyStart::Inserted(generation));
     }
@@ -2439,6 +2491,69 @@ mod tests {
         assert!(matches!(
             claim_idempotency(key, Duration::from_secs(60)),
             IdempotencyStart::NeedsReconciliation
+        ));
+    }
+
+    #[test]
+    fn protected_capacity_rejects_new_keys_but_keeps_existing_and_survives_restart() {
+        clear_idempotency_rows();
+        let held = "cap-held";
+        let extra = "cap-extra";
+        let limit = {
+            let db = get_db();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key IN (?1, ?2)",
+                [held, extra],
+            )
+            .unwrap();
+            count_protected_outbound_idempotency(&db) + 1
+        };
+        assert!(matches!(
+            try_claim_idempotency_limited(held, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Inserted(_)
+        ));
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Capacity
+        ));
+        assert!(matches!(
+            try_claim_idempotency_limited(held, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::InProgress
+        ));
+        assert!(get_idempotency_status(extra).is_none());
+
+        // Restart-equivalent: same durable rows, new claim attempt.
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit).unwrap(),
+            IdempotencyStart::Capacity
+        ));
+        assert_eq!(
+            get_idempotency_status(held).unwrap().state,
+            OutboundIdempotencyState::Queued
+        );
+
+        persist_terminal_for_test(
+            held,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            get_idempotency_status(held).unwrap().state,
+            OutboundIdempotencyState::Sent
+        );
+        let limit_after_terminal = {
+            let db = get_db();
+            count_protected_outbound_idempotency(&db) + 1
+        };
+        assert!(matches!(
+            try_claim_idempotency_limited(extra, Duration::from_secs(60), limit_after_terminal)
+                .unwrap(),
+            IdempotencyStart::Inserted(_)
         ));
     }
 

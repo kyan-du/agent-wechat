@@ -145,6 +145,36 @@ pub fn count_outbound_idempotency(conn: &Connection) -> usize {
     .max(0) as usize
 }
 
+pub fn count_protected_outbound_idempotency(conn: &Connection) -> usize {
+    conn.query_row(
+        "SELECT count(*) FROM outbound_idempotency
+         WHERE state IN ('queued', 'sending', 'uncertain', 'needs_reconciliation')",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+    .max(0) as usize
+}
+
+pub fn outbound_generation_seq(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT generation FROM outbound_idempotency_seq WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn allocate_outbound_generation(conn: &Connection, key: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "INSERT INTO outbound_idempotency_seq (key, generation) VALUES (?1, 1)
+         ON CONFLICT(key) DO UPDATE SET generation = generation + 1
+         RETURNING generation",
+        params![key],
+        |row| row.get(0),
+    )
+}
+
 pub fn insert_outbound_queued(
     conn: &Connection,
     key: &str,
@@ -152,14 +182,15 @@ pub fn insert_outbound_queued(
 ) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    let generation = allocate_outbound_generation(conn, key)?;
     let changed = conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
-         VALUES (?1, 'queued', NULL, NULL, NULL, 0, ?2, ?3, ?3, NULL, 1)
+         VALUES (?1, 'queued', NULL, NULL, NULL, 0, ?2, ?3, ?3, NULL, ?4)
          ON CONFLICT(key) DO NOTHING",
-        params![key, expires_at, now],
+        params![key, expires_at, now, generation],
     )?;
-    Ok((changed > 0).then_some(1))
+    Ok((changed > 0).then_some(generation))
 }
 
 pub fn claim_reusable_outbound_queued(
@@ -169,7 +200,8 @@ pub fn claim_reusable_outbound_queued(
 ) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    conn.query_row(
+    let generation = allocate_outbound_generation(conn, key)?;
+    let changed = conn.execute(
         "UPDATE outbound_idempotency
          SET state = 'queued',
              result_success = NULL,
@@ -179,14 +211,12 @@ pub fn claim_reusable_outbound_queued(
              expires_at = ?2,
              updated_at = ?3,
              completed_at = NULL,
-             generation = generation + 1
+             generation = ?4
          WHERE key = ?1
-           AND state IN ('rejected', 'expired')
-         RETURNING generation",
-        params![key, expires_at, now],
-        |row| row.get(0),
-    )
-    .optional()
+           AND state IN ('rejected', 'expired')",
+        params![key, expires_at, now, generation],
+    )?;
+    Ok((changed > 0).then_some(generation))
 }
 
 pub fn mark_outbound_sending(
@@ -457,10 +487,11 @@ pub fn reject_outbound_pre_execution(
     }
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    let generation = allocate_outbound_generation(conn, key)?;
     let changed = conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
-         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5, 1)
+         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5, ?6)
          ON CONFLICT(key) DO UPDATE SET
             state = excluded.state,
             result_success = 0,
@@ -470,9 +501,9 @@ pub fn reject_outbound_pre_execution(
             expires_at = excluded.expires_at,
             updated_at = excluded.updated_at,
             completed_at = excluded.completed_at,
-            generation = outbound_idempotency.generation + 1
+            generation = excluded.generation
          WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed', 'needs_reconciliation')",
-        params![key, state.as_str(), error_code, expires_at, now],
+        params![key, state.as_str(), error_code, expires_at, now, generation],
     )?;
     Ok(changed > 0)
 }
@@ -486,10 +517,11 @@ pub fn reject_outbound_unless_active_or_completed(
 ) -> rusqlite::Result<()> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    let generation = allocate_outbound_generation(conn, key)?;
     conn.execute(
         "INSERT INTO outbound_idempotency
-            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at)
-         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5)
+            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
+         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5, ?6)
          ON CONFLICT(key) DO UPDATE SET
             state = excluded.state,
             result_success = 0,
@@ -498,9 +530,10 @@ pub fn reject_outbound_unless_active_or_completed(
             commit_attempted = 0,
             expires_at = excluded.expires_at,
             updated_at = excluded.updated_at,
-            completed_at = excluded.completed_at
+            completed_at = excluded.completed_at,
+            generation = excluded.generation
          WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed', 'needs_reconciliation')",
-        params![key, state.as_str(), error_code, expires_at, now],
+        params![key, state.as_str(), error_code, expires_at, now, generation],
     )?;
     Ok(())
 }
@@ -617,6 +650,10 @@ mod tests {
                 updated_at TEXT DEFAULT (datetime('now')),
                 completed_at TEXT,
                 generation INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE IF NOT EXISTS outbound_idempotency_seq (
+                key TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL
              );",
         )
         .unwrap();
@@ -974,6 +1011,81 @@ mod tests {
                 "{key} must survive capacity eviction"
             );
         }
+    }
+
+    #[test]
+    fn sweep_delete_reinsert_does_not_reuse_generation_against_stale_worker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("aba.db");
+        let conn = open_test_conn(&path);
+        let old_generation = insert_outbound_queued(&conn, "aba-key", Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        assert_eq!(old_generation, 1);
+        assert!(mark_outbound_sending(&conn, "aba-key", old_generation).unwrap());
+        conn.execute(
+            "UPDATE outbound_idempotency
+             SET state = 'expired', expires_at = '1970-01-01T00:00:00+00:00'
+             WHERE key = 'aba-key'",
+            [],
+        )
+        .unwrap();
+        sweep_outbound_idempotency(&conn, 10_000).unwrap();
+        assert!(get_outbound_idempotency(&conn, "aba-key")
+            .unwrap()
+            .is_none());
+        assert_eq!(outbound_generation_seq(&conn, "aba-key").unwrap(), Some(1));
+
+        let stale = open_test_conn(&path);
+        let fresh = open_test_conn(&path);
+        let new_generation = insert_outbound_queued(&fresh, "aba-key", Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        assert!(new_generation > old_generation);
+        assert!(mark_outbound_sending(&fresh, "aba-key", new_generation).unwrap());
+
+        assert!(!complete_outbound_result(
+            &stale,
+            "aba-key",
+            old_generation,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        assert_eq!(
+            mark_outbound_sending_needs_reconciliation(
+                &stale,
+                "aba-key",
+                old_generation,
+                "IDEMPOTENCY_SENDING_DROPPED",
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+            0
+        );
+        let record = get_outbound_idempotency(&conn, "aba-key").unwrap().unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Sending);
+        assert_eq!(record.generation, new_generation);
+    }
+
+    #[test]
+    fn protected_rows_above_max_are_retained_and_counted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("protected-cap.db");
+        let conn = open_test_conn(&path);
+        let future = datetime_after_ms(60_000);
+        for i in 0..20 {
+            insert_state(&conn, &format!("unc-{i}"), "uncertain", &future);
+        }
+        sweep_outbound_idempotency(&conn, 3).unwrap();
+        assert_eq!(count_outbound_idempotency(&conn), 20);
+        assert_eq!(count_protected_outbound_idempotency(&conn), 20);
+        assert!(count_protected_outbound_idempotency(&conn) > 3);
     }
 }
 
