@@ -6,7 +6,9 @@ use serde::Deserialize;
 
 use crate::db::get_db;
 use crate::ia::types::{MediaResult, Message, SendParams, SendResult};
-use crate::outbound::{cleanup_temp_files, outbound_sender, OutboundSendResponse};
+use crate::outbound::{
+    cleanup_temp_files, outbound_sender, IdempotencyAdmission, OutboundError, OutboundSendResponse,
+};
 use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
@@ -153,6 +155,23 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         });
     }
 
+    if let Some(key) = input.idempotency_key.as_deref() {
+        match outbound_sender().admit_idempotency_key(key) {
+            IdempotencyAdmission::Claimed => {}
+            IdempotencyAdmission::Completed(result) => {
+                return OutboundSendResponse::Result(result);
+            }
+            IdempotencyAdmission::InProgress => {
+                return OutboundSendResponse::Rejected(OutboundError::duplicate_in_progress(
+                    outbound_sender().retry_after(),
+                ));
+            }
+            IdempotencyAdmission::Rejected(error) => {
+                return OutboundSendResponse::Rejected(error);
+            }
+        }
+    }
+
     // Decode base64 image to temp file
     let mut image_path: Option<String> = None;
     let mut image_mime: Option<String> = None;
@@ -256,5 +275,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         file_path,
         inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
-    outbound_sender().send(params, input.idempotency_key).await
+    outbound_sender()
+        .send_claimed(params, input.idempotency_key)
+        .await
 }

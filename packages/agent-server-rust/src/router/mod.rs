@@ -38,6 +38,10 @@ pub fn build_router() -> Router {
             "/api/status/outbound/idempotency/{key}",
             get(status::outbound_idempotency_status),
         )
+        .route(
+            "/api/status/outbound/idempotency/{key}/reconcile",
+            post(status::reconcile_outbound_idempotency),
+        )
         .route("/api/status/outbound/pause", post(status::pause_outbound))
         .route("/api/status/outbound/resume", post(status::resume_outbound))
         .route("/api/status/login", post(status::login))
@@ -127,6 +131,18 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    fn tmp_send_artifact_count() -> usize {
+        std::fs::read_dir("/tmp")
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("send_image_") || name.starts_with("send_file_")
+            })
+            .count()
+    }
+
     #[tokio::test]
     async fn authenticated_outbound_pause_rejects_queued_send_until_explicit_resume() {
         init_test_server_state().await;
@@ -156,7 +172,9 @@ mod tests {
             .oneshot(authed(
                 "POST",
                 "/api/messages/send",
-                Body::from(r#"{"chatId":"chat","text":"second","idempotencyKey":"api-pause-route"}"#),
+                Body::from(
+                    r#"{"chatId":"chat","text":"second","idempotencyKey":"api-pause-route"}"#,
+                ),
             ))
             .await
             .unwrap();
@@ -203,8 +221,11 @@ mod tests {
         init_test_server_state().await;
         {
             let db = crate::db::get_db();
-            db.execute("DELETE FROM outbound_idempotency WHERE key = 'route-redact'", [])
-                .unwrap();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key = 'route-redact'",
+                [],
+            )
+            .unwrap();
             crate::db::queries::insert_outbound_queued(
                 &db,
                 "route-redact",
@@ -267,5 +288,165 @@ mod tests {
         ] {
             assert!(!serialized.contains(forbidden), "{forbidden}");
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_terminal_media_request_replays_before_decode_or_temp_write() {
+        init_test_server_state().await;
+        let app = build_router();
+        {
+            let db = crate::db::get_db();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key = 'media-terminal'",
+                [],
+            )
+            .unwrap();
+            crate::db::queries::insert_outbound_queued(
+                &db,
+                "media-terminal",
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+            crate::db::queries::complete_outbound_result(
+                &db,
+                "media-terminal",
+                &crate::ia::types::SendResult {
+                    success: true,
+                    error_code: None,
+                    error: None,
+                    commit_attempted: true,
+                },
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+        let before = tmp_send_artifact_count();
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","idempotencyKey":"media-terminal","image":{"mimeType":"image/png","data":"%%%not-base64%%%"}}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert_eq!(body["success"], true);
+        assert_eq!(tmp_send_artifact_count(), before);
+    }
+
+    #[tokio::test]
+    async fn duplicate_in_progress_media_request_rejects_before_decode_or_temp_write() {
+        init_test_server_state().await;
+        let app = build_router();
+        {
+            let db = crate::db::get_db();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key = 'media-progress'",
+                [],
+            )
+            .unwrap();
+            crate::db::queries::insert_outbound_queued(
+                &db,
+                "media-progress",
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+        let before = tmp_send_artifact_count();
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","idempotencyKey":"media-progress","file":{"filename":"x.txt","data":"%%%not-base64%%%"}}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = json_response(response).await;
+        assert_eq!(body["errorCode"], "IDEMPOTENCY_IN_PROGRESS");
+        assert_eq!(tmp_send_artifact_count(), before);
+    }
+
+    #[tokio::test]
+    async fn send_and_lookup_reject_invalid_idempotency_keys() {
+        init_test_server_state().await;
+        let app = build_router();
+        let response = app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","text":"hi","idempotencyKey":"bad key","file":{"filename":"x.txt","data":"%%%not-base64%%%"}}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_response(response).await;
+        assert_eq!(body["errorCode"], "INVALID_IDEMPOTENCY_KEY");
+
+        let lookup = app
+            .oneshot(authed(
+                "GET",
+                "/api/status/outbound/idempotency/bad%20key",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(lookup.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn manual_reconcile_route_marks_stuck_key_uncertain() {
+        init_test_server_state().await;
+        let app = build_router();
+        {
+            let db = crate::db::get_db();
+            db.execute(
+                "DELETE FROM outbound_idempotency WHERE key = 'route-reconcile'",
+                [],
+            )
+            .unwrap();
+            crate::db::queries::insert_outbound_queued(
+                &db,
+                "route-reconcile",
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+        let response = app
+            .clone()
+            .oneshot(authed(
+                "POST",
+                "/api/status/outbound/idempotency/route-reconcile/reconcile",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert_eq!(body["state"], "uncertain");
+
+        let duplicate = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","text":"retry","idempotencyKey":"route-reconcile"}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::OK);
+        let body = json_response(duplicate).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["errorCode"], "MANUAL_RECONCILIATION_REQUIRED");
+        assert_eq!(crate::outbound::outbound_sender().status().queue_depth, 0);
     }
 }

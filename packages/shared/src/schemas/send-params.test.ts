@@ -34,6 +34,29 @@ test("sendParamsSchema rejects invalid inboundChars", () => {
   );
 });
 
+test("sendParamsSchema enforces conservative idempotencyKey grammar", () => {
+  const boundary = "a".repeat(128);
+  assert.equal(
+    sendParamsSchema.safeParse({ chatId: "wxid_a", text: "hi", idempotencyKey: boundary }).success,
+    true,
+  );
+  for (const idempotencyKey of [
+    "",
+    "a".repeat(129),
+    "snowman-☃",
+    "汉字",
+    "line\nbreak",
+    "space key",
+    "slash/key",
+  ]) {
+    assert.equal(
+      sendParamsSchema.safeParse({ chatId: "wxid_a", text: "hi", idempotencyKey }).success,
+      false,
+      idempotencyKey,
+    );
+  }
+});
+
 test("sendParamsSchema stays assignable to generated SendParams", () => {
   type Parsed = ReturnType<typeof sendParamsSchema.parse>;
   const _compat: Assignable<Parsed, GeneratedSendParams> = true;

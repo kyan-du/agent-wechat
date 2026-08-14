@@ -11,6 +11,7 @@ pub enum OutboundIdempotencyState {
     Failed,
     Rejected,
     Expired,
+    NeedsReconciliation,
 }
 
 impl OutboundIdempotencyState {
@@ -23,6 +24,7 @@ impl OutboundIdempotencyState {
             Self::Failed => "failed",
             Self::Rejected => "rejected",
             Self::Expired => "expired",
+            Self::NeedsReconciliation => "needs_reconciliation",
         }
     }
 
@@ -35,6 +37,7 @@ impl OutboundIdempotencyState {
             "failed" => Self::Failed,
             "rejected" => Self::Rejected,
             "expired" => Self::Expired,
+            "needs_reconciliation" => Self::NeedsReconciliation,
             _ => return None,
         })
     }
@@ -98,8 +101,8 @@ fn sanitized_result(result: &SendResult) -> SendResult {
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundIdempotencyRecord> {
     let state_raw: String = row.get(1)?;
-    let state = OutboundIdempotencyState::from_str(&state_raw)
-        .unwrap_or(OutboundIdempotencyState::Failed);
+    let state =
+        OutboundIdempotencyState::from_str(&state_raw).unwrap_or(OutboundIdempotencyState::Failed);
     let result_success: Option<i64> = row.get(2)?;
     let error_code: Option<String> = row.get(3)?;
     let error: Option<String> = row.get(4)?;
@@ -144,25 +147,41 @@ pub fn insert_outbound_queued(
     conn: &Connection,
     key: &str,
     ttl: std::time::Duration,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    conn.execute(
+    let changed = conn.execute(
         "INSERT INTO outbound_idempotency
             (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at)
          VALUES (?1, 'queued', NULL, NULL, NULL, 0, ?2, ?3, ?3, NULL)
-         ON CONFLICT(key) DO UPDATE SET
-            state = 'queued',
-            result_success = NULL,
-            error_code = NULL,
-            error = NULL,
-            commit_attempted = 0,
-            expires_at = excluded.expires_at,
-            updated_at = excluded.updated_at,
-            completed_at = NULL",
+         ON CONFLICT(key) DO NOTHING",
         params![key, expires_at, now],
     )?;
-    Ok(())
+    Ok(changed > 0)
+}
+
+pub fn claim_reusable_outbound_queued(
+    conn: &Connection,
+    key: &str,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<bool> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    let changed = conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = 'queued',
+             result_success = NULL,
+             error_code = NULL,
+             error = NULL,
+             commit_attempted = 0,
+             expires_at = ?2,
+             updated_at = ?3,
+             completed_at = NULL
+         WHERE key = ?1
+           AND state IN ('rejected', 'expired')",
+        params![key, expires_at, now],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn update_outbound_state(
@@ -170,10 +189,13 @@ pub fn update_outbound_state(
     key: &str,
     state: OutboundIdempotencyState,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE outbound_idempotency SET state = ?2, updated_at = ?3 WHERE key = ?1",
         params![key, state.as_str(), sqlite_now()],
     )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 
@@ -187,7 +209,7 @@ pub fn complete_outbound_result(
     let state = send_result_state(&sanitized);
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    conn.execute(
+    let changed = conn.execute(
         "UPDATE outbound_idempotency
          SET state = ?2,
              result_success = ?3,
@@ -209,7 +231,76 @@ pub fn complete_outbound_result(
             now
         ],
     )?;
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
+}
+
+pub fn mark_outbound_needs_reconciliation(
+    conn: &Connection,
+    key: &str,
+    error_code: &str,
+    commit_attempted: bool,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<()> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = 'needs_reconciliation',
+             result_success = 0,
+             error_code = ?2,
+             error = ?2,
+             commit_attempted = ?3,
+             expires_at = ?4,
+             updated_at = ?5,
+             completed_at = ?5
+         WHERE key = ?1
+           AND state IN ('queued', 'sending', 'needs_reconciliation')",
+        params![
+            key,
+            error_code,
+            if commit_attempted { 1 } else { 0 },
+            expires_at,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn reconcile_outbound_idempotency(
+    conn: &Connection,
+    key: &str,
+    state: OutboundIdempotencyState,
+    error_code: &str,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<bool> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    let success = matches!(state, OutboundIdempotencyState::Sent);
+    let changed = conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = ?2,
+             result_success = ?3,
+             error_code = ?4,
+             error = ?4,
+             commit_attempted = 1,
+             expires_at = ?5,
+             updated_at = ?6,
+             completed_at = ?6
+         WHERE key = ?1
+           AND state IN ('queued', 'sending', 'needs_reconciliation')",
+        params![
+            key,
+            state.as_str(),
+            if success { 1 } else { 0 },
+            error_code,
+            expires_at,
+            now
+        ],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn reject_outbound_pre_execution(
@@ -280,7 +371,7 @@ pub fn expire_outbound_if_stale(conn: &Connection, key: &str) -> rusqlite::Resul
          SET state = 'expired', result_success = 0, error_code = 'IDEMPOTENCY_EXPIRED',
              error = 'IDEMPOTENCY_EXPIRED', commit_attempted = 0, updated_at = ?2, completed_at = ?2
          WHERE key = ?1
-           AND state IN ('sent', 'uncertain', 'failed')
+           AND state IN ('sent', 'uncertain', 'failed', 'needs_reconciliation')
            AND julianday(expires_at) <= julianday(?2)",
         params![key, sqlite_now()],
     )?;
@@ -344,12 +435,131 @@ pub fn update_session_logged_in_user(
     logged_in_user: Option<&str>,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
-    let login_state = if logged_in_user.is_some() { "logged_in" } else { "logged_out" };
+    let login_state = if logged_in_user.is_some() {
+        "logged_in"
+    } else {
+        "logged_out"
+    };
     conn.execute(
         "UPDATE sessions SET logged_in_user = ?1, login_state = ?2, updated_at = ?3 WHERE id = ?4",
         params![logged_in_user, login_state, now, session_id],
     )
     .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier,
+        },
+        time::Duration,
+    };
+
+    fn open_test_conn(path: &std::path::Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE IF NOT EXISTS outbound_idempotency (
+                key TEXT PRIMARY KEY,
+                state TEXT NOT NULL CHECK (
+                    state IN ('queued', 'sending', 'sent', 'uncertain', 'failed', 'rejected', 'expired', 'needs_reconciliation')
+                ),
+                result_success INTEGER,
+                error_code TEXT,
+                error TEXT,
+                commit_attempted INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                completed_at TEXT
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn independent_connections_atomically_insert_one_queued_claim() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("claim.db");
+        open_test_conn(&path);
+        let barrier = Arc::new(Barrier::new(2));
+        let inserted = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                let inserted = Arc::clone(&inserted);
+                let path = path.clone();
+                scope.spawn(move || {
+                    let conn = open_test_conn(&path);
+                    assert!(get_outbound_idempotency(&conn, "same-key")
+                        .unwrap()
+                        .is_none());
+                    barrier.wait();
+                    if insert_outbound_queued(&conn, "same-key", Duration::from_secs(60)).unwrap() {
+                        inserted.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        let conn = open_test_conn(&path);
+        assert_eq!(inserted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            get_outbound_idempotency(&conn, "same-key")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Queued
+        );
+    }
+
+    #[test]
+    fn independent_connections_atomically_reclaim_reusable_key_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("reclaim.db");
+        let conn = open_test_conn(&path);
+        reject_outbound_pre_execution(
+            &conn,
+            "retry-key",
+            OutboundIdempotencyState::Rejected,
+            "QUEUE_FULL",
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let claimed = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let barrier = Arc::clone(&barrier);
+                let claimed = Arc::clone(&claimed);
+                let path = path.clone();
+                scope.spawn(move || {
+                    let conn = open_test_conn(&path);
+                    barrier.wait();
+                    if claim_reusable_outbound_queued(&conn, "retry-key", Duration::from_secs(60))
+                        .unwrap()
+                    {
+                        claimed.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(claimed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            get_outbound_idempotency(&conn, "retry-key")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Queued
+        );
+    }
 }
 
 pub fn clear_session_data(conn: &Connection, session_id: &str) {
