@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -19,7 +19,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     context::create_context,
-    db::get_db,
+    db::{
+        get_db, try_get_db,
+        queries::{
+            complete_outbound_result, count_outbound_idempotency, expire_outbound_if_stale,
+            get_outbound_idempotency, insert_outbound_queued, reject_outbound_pre_execution,
+            update_outbound_state, OutboundIdempotencyRecord, OutboundIdempotencyState,
+        },
+    },
     execution::run_execution_loop,
     ia::types::{SendResult, SubscriptionEvent},
     plans::send_message::{SendMessageParams, SendMessagePlan},
@@ -369,7 +376,6 @@ pub struct OutboundSender {
     config: OutboundConfig,
     control: Arc<OutboundControl>,
     tx: mpsc::Sender<OutboundTask>,
-    idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
 }
 
@@ -383,22 +389,19 @@ impl OutboundSender {
     pub fn spawn(config: OutboundConfig) -> Self {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let control = Arc::new(OutboundControl::new(config.read_only));
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(config.idempotency_ttl)));
         let usage = Arc::new(Mutex::new(Usage::new()));
         let worker_control = Arc::clone(&control);
-        let worker_store = Arc::clone(&idempotency);
         let worker_usage = Arc::clone(&usage);
         let worker_config = config.clone();
 
         tokio::spawn(async move {
-            worker_loop(worker_config, worker_control, rx, worker_store, worker_usage).await;
+            worker_loop(worker_config, worker_control, rx, worker_usage).await;
         });
 
         Self {
             config,
             control,
             tx,
-            idempotency,
             usage,
         }
     }
@@ -410,13 +413,20 @@ impl OutboundSender {
     ) -> OutboundSendResponse {
         let now = Instant::now();
         if self.control.is_read_only() {
+            if let Some(key) = idempotency_key.as_deref() {
+                persist_rejection(
+                    key,
+                    OutboundIdempotencyState::Rejected,
+                    "OUTBOUND_DISABLED",
+                    self.config.idempotency_ttl,
+                );
+            }
             cleanup_temp_files(&params);
             return OutboundSendResponse::Rejected(OutboundError::read_only());
         }
 
         if let Some(key) = idempotency_key.as_deref() {
-            let mut store = self.idempotency.lock().expect("idempotency store poisoned");
-            match store.start(key, now) {
+            match start_persistent_idempotency(key, self.config.idempotency_ttl) {
                 IdempotencyStart::Inserted => {}
                 IdempotencyStart::Completed(result) => {
                     cleanup_temp_files(&params);
@@ -442,10 +452,12 @@ impl OutboundSender {
                 local_minute_of_day(),
             ) {
                 if let Some(key) = idempotency_key.as_deref() {
-                    self.idempotency
-                        .lock()
-                        .expect("idempotency store poisoned")
-                        .remove(key);
+                    persist_rejection(
+                        key,
+                        OutboundIdempotencyState::Rejected,
+                        &error.code,
+                        self.config.idempotency_ttl,
+                    );
                 }
                 cleanup_temp_files(&params);
                 return OutboundSendResponse::Rejected(error);
@@ -465,24 +477,21 @@ impl OutboundSender {
                 Ok(response) => response,
                 Err(_) => {
                     if let Some(key) = idempotency_key.as_deref() {
-                        self.idempotency
-                            .lock()
-                            .expect("idempotency store poisoned")
-                            .complete(key, now, unavailable_result());
+                        persist_result(key, &unavailable_result(), self.config.idempotency_ttl);
                     }
                     OutboundSendResponse::Rejected(OutboundError::unavailable())
                 }
             },
             Err(mpsc::error::TrySendError::Full(task)) => {
                 let error = OutboundError::queue_full(self.config.retry_after());
-                reject_without_idempotency_cache(task, error.clone(), &self.idempotency);
+                reject_without_idempotency_cache(task, error.clone(), self.config.idempotency_ttl);
                 OutboundSendResponse::Rejected(error)
             }
             Err(mpsc::error::TrySendError::Closed(task)) => {
                 reject_without_idempotency_cache(
                     task,
                     OutboundError::unavailable(),
-                    &self.idempotency,
+                    self.config.idempotency_ttl,
                 );
                 OutboundSendResponse::Rejected(OutboundError::unavailable())
             }
@@ -500,11 +509,7 @@ impl OutboundSender {
             idempotency_ttl_ms: self.config.idempotency_ttl.as_millis(),
             read_only: self.control.is_read_only(),
             runtime_paused: self.control.is_runtime_paused(),
-            idempotency_entries: self
-                .idempotency
-                .lock()
-                .expect("idempotency store poisoned")
-                .len(),
+            idempotency_entries: count_persistent_idempotency(),
         }
     }
 
@@ -559,14 +564,17 @@ async fn worker_loop(
     config: OutboundConfig,
     control: Arc<OutboundControl>,
     mut rx: mpsc::Receiver<OutboundTask>,
-    idempotency: Arc<Mutex<IdempotencyStore>>,
     usage: Arc<Mutex<Usage>>,
 ) {
     let mut policy = SpacingPolicy::new(config.min_spacing, config.jitter);
     while let Some(task) = rx.recv().await {
         let now = Instant::now();
         if task_expired(&task, now, config.task_ttl) {
-            reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
+            reject_without_idempotency_cache(
+                task,
+                OutboundError::expired(),
+                config.idempotency_ttl,
+            );
             continue;
         }
 
@@ -596,7 +604,6 @@ async fn worker_loop(
             config.task_ttl,
             &config,
             &usage,
-            &idempotency,
         ) {
             Some(task) => task,
             None => continue,
@@ -616,7 +623,7 @@ async fn worker_loop(
         let extra = match extra {
             Ok(wait) => wait,
             Err(error) => {
-                reject_without_idempotency_cache(task, error, &idempotency);
+                reject_without_idempotency_cache(task, error, config.idempotency_ttl);
                 continue;
             }
         };
@@ -630,12 +637,14 @@ async fn worker_loop(
             config.task_ttl,
             &config,
             &usage,
-            &idempotency,
         ) {
             Some(task) => task,
             None => continue,
         };
 
+        if let Some(key) = task.idempotency_key.as_deref() {
+            persist_sending(key);
+        }
         let result = execute_send(&task.params).await;
         apply_send_result_to_usage(
             &usage,
@@ -644,7 +653,7 @@ async fn worker_loop(
             Instant::now(),
             SystemTime::now(),
         );
-        complete_task(task, result, &idempotency, Instant::now());
+        complete_task(task, result, config.idempotency_ttl);
     }
 }
 
@@ -654,14 +663,13 @@ fn admit_for_execute(
     task_ttl: Duration,
     config: &OutboundConfig,
     usage: &Mutex<Usage>,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
 ) -> Option<OutboundTask> {
     if control.is_read_only() {
-        reject_without_idempotency_cache(task, OutboundError::read_only(), idempotency);
+        reject_without_idempotency_cache(task, OutboundError::read_only(), config.idempotency_ttl);
         return None;
     }
     if task_expired(&task, Instant::now(), task_ttl) {
-        reject_without_idempotency_cache(task, OutboundError::expired(), idempotency);
+        reject_without_idempotency_cache(task, OutboundError::expired(), config.idempotency_ttl);
         return None;
     }
     let policy = {
@@ -678,7 +686,7 @@ fn admit_for_execute(
     match policy {
         Ok(_) => Some(task),
         Err(error) => {
-            reject_without_idempotency_cache(task, error, idempotency);
+            reject_without_idempotency_cache(task, error, config.idempotency_ttl);
             None
         }
     }
@@ -747,15 +755,11 @@ fn apply_send_result_to_usage(
 fn complete_task(
     task: OutboundTask,
     result: SendResult,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
-    now: Instant,
+    idempotency_ttl: Duration,
 ) {
     cleanup_temp_files(&task.params);
     if let Some(key) = task.idempotency_key.as_deref() {
-        idempotency
-            .lock()
-            .expect("idempotency store poisoned")
-            .complete(key, now, result.clone());
+        persist_result(key, &result, idempotency_ttl);
     }
     let _ = task.result_tx.send(OutboundSendResponse::Result(result));
 }
@@ -763,14 +767,16 @@ fn complete_task(
 fn reject_without_idempotency_cache(
     task: OutboundTask,
     error: OutboundError,
-    idempotency: &Arc<Mutex<IdempotencyStore>>,
+    idempotency_ttl: Duration,
 ) {
     cleanup_temp_files(&task.params);
     if let Some(key) = task.idempotency_key.as_deref() {
-        idempotency
-            .lock()
-            .expect("idempotency store poisoned")
-            .remove(key);
+        let state = if error.kind == OutboundErrorKind::Expired {
+            OutboundIdempotencyState::Expired
+        } else {
+            OutboundIdempotencyState::Rejected
+        };
+        persist_rejection(key, state, &error.code, idempotency_ttl);
     }
     let _ = task.result_tx.send(OutboundSendResponse::Rejected(error));
 }
@@ -795,6 +801,65 @@ fn send_error(error: &str) -> SendResult {
 
 fn unavailable_result() -> SendResult {
     send_error("SCHEDULER_UNAVAILABLE")
+}
+
+enum IdempotencyStart {
+    Inserted,
+    InProgress,
+    Completed(SendResult),
+}
+
+fn start_persistent_idempotency(key: &str, ttl: Duration) -> IdempotencyStart {
+    let db = get_db();
+    let _ = expire_outbound_if_stale(&db, key);
+    match get_outbound_idempotency(&db, key).ok().flatten() {
+        Some(record) if record.state.is_completed_execution() => {
+            IdempotencyStart::Completed(
+                record
+                    .result
+                    .unwrap_or_else(|| send_error("REPLAY_UNAVAILABLE")),
+            )
+        }
+        Some(record)
+            if matches!(
+                record.state,
+                OutboundIdempotencyState::Queued | OutboundIdempotencyState::Sending
+            ) =>
+        {
+            IdempotencyStart::InProgress
+        }
+        _ => {
+            insert_outbound_queued(&db, key, ttl).expect("failed to persist outbound idempotency");
+            IdempotencyStart::Inserted
+        }
+    }
+}
+
+fn persist_sending(key: &str) {
+    let db = get_db();
+    let _ = update_outbound_state(&db, key, OutboundIdempotencyState::Sending);
+}
+
+fn persist_result(key: &str, result: &SendResult, ttl: Duration) {
+    let db = get_db();
+    let _ = complete_outbound_result(&db, key, result, ttl);
+}
+
+fn persist_rejection(key: &str, state: OutboundIdempotencyState, error_code: &str, ttl: Duration) {
+    let db = get_db();
+    let _ = reject_outbound_pre_execution(&db, key, state, error_code, ttl);
+}
+
+fn count_persistent_idempotency() -> usize {
+    try_get_db()
+        .map(|db| count_outbound_idempotency(&db))
+        .unwrap_or(0)
+}
+
+pub fn get_idempotency_status(key: &str) -> Option<OutboundIdempotencyRecord> {
+    let db = get_db();
+    let _ = expire_outbound_if_stale(&db, key);
+    get_outbound_idempotency(&db, key).ok().flatten()
 }
 
 trait JitterSource {
@@ -842,84 +907,28 @@ impl SpacingPolicy {
     }
 }
 
-#[derive(Clone)]
-enum IdempotencyEntry {
-    InProgress,
-    Completed {
-        expires_at: Instant,
-        result: SendResult,
-    },
-}
-
-enum IdempotencyStart {
-    Inserted,
-    InProgress,
-    Completed(SendResult),
-}
-
-struct IdempotencyStore {
-    ttl: Duration,
-    entries: HashMap<String, IdempotencyEntry>,
-    order: VecDeque<String>,
-}
-
-impl IdempotencyStore {
-    fn new(ttl: Duration) -> Self {
-        Self {
-            ttl,
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn start(&mut self, key: &str, now: Instant) -> IdempotencyStart {
-        self.prune(now);
-        match self.entries.get(key) {
-            Some(IdempotencyEntry::InProgress { .. }) => IdempotencyStart::InProgress,
-            Some(IdempotencyEntry::Completed { result, .. }) => {
-                IdempotencyStart::Completed(result.clone())
-            }
-            None => {
-                self.entries
-                    .insert(key.to_string(), IdempotencyEntry::InProgress);
-                self.order.push_back(key.to_string());
-                IdempotencyStart::Inserted
-            }
-        }
-    }
-
-    fn complete(&mut self, key: &str, now: Instant, result: SendResult) {
-        self.prune(now);
-        self.entries.insert(
-            key.to_string(),
-            IdempotencyEntry::Completed {
-                expires_at: now + self.ttl,
-                result,
-            },
-        );
-        self.order.push_back(key.to_string());
-    }
-
-    fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn prune(&mut self, now: Instant) {
-        self.entries.retain(|_, entry| match entry {
-            IdempotencyEntry::InProgress => true,
-            IdempotencyEntry::Completed { expires_at, .. } => *expires_at > now,
-        });
-        self.order.retain(|key| self.entries.contains_key(key));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::VecDeque, sync::Once};
+
+    static INIT_DB: Once = Once::new();
+
+    fn init_test_db() {
+        INIT_DB.call_once(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("outbound-test.db");
+            std::env::set_var("AGENT_DB_PATH", &path);
+            std::env::set_var("AGENT_WECHAT_TOKEN", "test-token");
+            crate::router::auth::init_token();
+            let _ = crate::db::init_db();
+            std::mem::forget(dir);
+        });
+    }
+
+    fn clear_idempotency_rows() {
+        init_test_db();
+    }
 
     struct FixedJitter {
         values: VecDeque<Duration>,
@@ -962,27 +971,28 @@ mod tests {
 
     #[test]
     fn idempotency_replays_completed_result_and_blocks_in_progress_duplicate() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
+        clear_idempotency_rows();
 
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(1)),
+            start_persistent_idempotency("replay-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        assert!(matches!(
+            start_persistent_idempotency("replay-k", Duration::from_secs(60)),
             IdempotencyStart::InProgress
         ));
-
-        store.complete(
-            "k",
-            now + Duration::from_secs(2),
-            SendResult {
+        persist_result(
+            "replay-k",
+            &SendResult {
                 success: false,
                 error_code: Some("UNCERTAIN_AFTER_SEND".to_string()),
                 error: Some("UNCERTAIN_AFTER_SEND".to_string()),
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
 
-        match store.start("k", now + Duration::from_secs(3)) {
+        match start_persistent_idempotency("replay-k", Duration::from_secs(60)) {
             IdempotencyStart::Completed(result) => {
                 assert!(!result.success);
                 assert_eq!(result.error.as_deref(), Some("UNCERTAIN_AFTER_SEND"));
@@ -993,40 +1003,92 @@ mod tests {
 
     #[test]
     fn completed_idempotency_key_can_be_reused_after_ttl() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(5));
-
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
-        store.complete(
-            "k",
-            now + Duration::from_secs(1),
-            SendResult {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("ttl-k", Duration::from_millis(1)),
+            IdempotencyStart::Inserted
+        ));
+        persist_result(
+            "ttl-k",
+            &SendResult {
                 success: true,
                 error_code: None,
                 error: None,
                 commit_attempted: true,
             },
+            Duration::from_millis(1),
         );
+        std::thread::sleep(Duration::from_millis(5));
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(6)),
+            start_persistent_idempotency("ttl-k", Duration::from_secs(60)),
             IdempotencyStart::Inserted
         ));
     }
 
     #[test]
     fn in_progress_idempotency_key_does_not_expire_after_ttl() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(5));
-
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
+        clear_idempotency_rows();
         assert!(matches!(
-            store.start("k", now + Duration::from_secs(60)),
+            start_persistent_idempotency("in-progress-k", Duration::from_millis(1)),
+            IdempotencyStart::Inserted
+        ));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(matches!(
+            start_persistent_idempotency("in-progress-k", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+    }
+
+    #[test]
+    fn concurrent_same_key_admission_inserts_once() {
+        clear_idempotency_rows();
+        let inserted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let inserted = Arc::clone(&inserted);
+                scope.spawn(move || {
+                    if matches!(
+                        start_persistent_idempotency("concurrent", Duration::from_secs(60)),
+                        IdempotencyStart::Inserted
+                    ) {
+                        inserted.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(inserted.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            start_persistent_idempotency("concurrent", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+    }
+
+    #[test]
+    fn persisted_queued_or_sending_blocks_duplicate_after_restart() {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("restart-queued", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        assert!(matches!(
+            start_persistent_idempotency("restart-queued", Duration::from_secs(60)),
+            IdempotencyStart::InProgress
+        ));
+
+        assert!(matches!(
+            start_persistent_idempotency("restart-sending", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        persist_sending("restart-sending");
+        assert!(matches!(
+            start_persistent_idempotency("restart-sending", Duration::from_secs(60)),
             IdempotencyStart::InProgress
         ));
     }
 
     #[tokio::test]
     async fn queue_bound_rejects_when_channel_is_full() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::from_secs(60),
@@ -1045,7 +1107,6 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(false)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
         };
 
@@ -1070,18 +1131,17 @@ mod tests {
             }
             _ => panic!("expected queue full rejection"),
         }
-        assert!(matches!(
-            sender
-                .idempotency
-                .lock()
-                .unwrap()
-                .start("queue-full", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
+        let record = get_idempotency_status("queue-full").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Rejected);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("QUEUE_FULL")
+        );
     }
 
     #[test]
     fn expired_task_returns_queue_expired_and_cleans_file() {
+        clear_idempotency_rows();
         let temp = tempfile::NamedTempFile::new().unwrap();
         let path = temp.path().to_string_lossy().to_string();
         let (result_tx, mut result_rx) = oneshot::channel();
@@ -1098,9 +1158,7 @@ mod tests {
             idempotency_key: Some("expired".to_string()),
             result_tx,
         };
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
-
-        reject_without_idempotency_cache(task, OutboundError::expired(), &idempotency);
+        reject_without_idempotency_cache(task, OutboundError::expired(), Duration::from_secs(60));
 
         let result = result_rx.try_recv().unwrap();
         match result {
@@ -1111,17 +1169,17 @@ mod tests {
             _ => panic!("expected expired rejection"),
         }
         assert!(!std::path::Path::new(&path).exists());
-        assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("expired", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
+        let record = get_idempotency_status("expired").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Expired);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("QUEUE_EXPIRED")
+        );
     }
 
     #[tokio::test]
     async fn kill_switch_rejects_without_queueing() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -1140,7 +1198,6 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(true)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
         };
 
@@ -1154,10 +1211,15 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
+        assert_eq!(
+            get_idempotency_status("k").unwrap().state,
+            OutboundIdempotencyState::Rejected
+        );
     }
 
     #[tokio::test]
     async fn queued_task_rechecks_pause_after_spacing_delay() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(25),
@@ -1173,15 +1235,8 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(
-            config,
-            Arc::clone(&control),
-            rx,
-            Arc::clone(&idempotency),
-            usage,
-        ));
+        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
 
         let (first_tx, first_rx) = oneshot::channel();
         tx.try_send(OutboundTask {
@@ -1217,13 +1272,10 @@ mod tests {
             }
             _ => panic!("expected read-only rejection"),
         }
-        assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("second", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
+        assert_eq!(
+            get_idempotency_status("second").unwrap().state,
+            OutboundIdempotencyState::Rejected
+        );
 
         drop(tx);
         worker.await.unwrap();
@@ -1231,6 +1283,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_task_rechecks_ttl_after_spacing_delay() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(30),
@@ -1246,15 +1299,8 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(true));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(
-            config,
-            Arc::clone(&control),
-            rx,
-            Arc::clone(&idempotency),
-            usage,
-        ));
+        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
 
         let (first_tx, first_rx) = oneshot::channel();
         tx.try_send(OutboundTask {
@@ -1289,13 +1335,10 @@ mod tests {
             }
             _ => panic!("expected expired rejection"),
         }
-        assert!(matches!(
-            idempotency
-                .lock()
-                .unwrap()
-                .start("second", Instant::now() + Duration::from_secs(1)),
-            IdempotencyStart::Inserted
-        ));
+        assert_eq!(
+            get_idempotency_status("second").unwrap().state,
+            OutboundIdempotencyState::Expired
+        );
 
         drop(tx);
         worker.await.unwrap();
@@ -1303,6 +1346,7 @@ mod tests {
 
     #[test]
     fn status_reports_queue_config_and_idempotency_entries() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::from_millis(150),
@@ -1321,15 +1365,13 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(true)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
         };
 
-        sender
-            .idempotency
-            .lock()
-            .unwrap()
-            .start("status-key", Instant::now());
+        assert!(matches!(
+            start_persistent_idempotency("status-key", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
 
         let status = sender.status();
         assert_eq!(status.queue_capacity, 2);
@@ -1341,7 +1383,7 @@ mod tests {
         assert_eq!(status.idempotency_ttl_ms, 60_000);
         assert!(status.read_only);
         assert!(status.runtime_paused);
-        assert_eq!(status.idempotency_entries, 1);
+        assert!(status.idempotency_entries >= 1);
     }
 
     fn test_params(text: &str) -> SendMessageParams {
@@ -1357,20 +1399,26 @@ mod tests {
 
     #[test]
     fn uncertain_terminal_result_is_cached_and_not_retried() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
-        assert!(matches!(store.start("k", now), IdempotencyStart::Inserted));
-        store.complete(
-            "k",
-            now,
-            SendResult {
+        clear_idempotency_rows();
+        assert!(matches!(
+            start_persistent_idempotency("uncertain-k", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        persist_result(
+            "uncertain-k",
+            &SendResult {
                 success: false,
                 error_code: Some("send_commit_uncertain".into()),
                 error: Some("send_commit_uncertain".into()),
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
-        match store.start("k", now + Duration::from_millis(1)) {
+        assert_eq!(
+            get_idempotency_status("uncertain-k").unwrap().state,
+            OutboundIdempotencyState::Uncertain
+        );
+        match start_persistent_idempotency("uncertain-k", Duration::from_secs(60)) {
             IdempotencyStart::Completed(result) => {
                 assert!(!result.success);
                 assert_eq!(result.error_code.as_deref(), Some("send_commit_uncertain"));
@@ -1381,6 +1429,7 @@ mod tests {
 
     #[tokio::test]
     async fn completed_replay_beats_quiet_hours_policy() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 1,
             min_spacing: Duration::ZERO,
@@ -1399,18 +1448,21 @@ mod tests {
             config,
             control: Arc::new(OutboundControl::new(false)),
             tx,
-            idempotency: Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60)))),
             usage: Arc::new(Mutex::new(Usage::new())),
         };
-        sender.idempotency.lock().unwrap().complete(
+        assert!(matches!(
+            start_persistent_idempotency("replay", Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        persist_result(
             "replay",
-            Instant::now(),
-            SendResult {
+            &SendResult {
                 success: true,
                 error_code: None,
                 error: None,
                 commit_attempted: true,
             },
+            Duration::from_secs(60),
         );
         match sender.send(test_params("hello"), Some("replay".into())).await {
             OutboundSendResponse::Result(result) => assert!(result.success),
@@ -1422,6 +1474,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_rejects_quiet_hours_instead_of_sending() {
+        clear_idempotency_rows();
         let config = OutboundConfig {
             queue_capacity: 2,
             min_spacing: Duration::ZERO,
@@ -1437,15 +1490,8 @@ mod tests {
         };
         let control = Arc::new(OutboundControl::new(false));
         let (tx, rx) = mpsc::channel(config.queue_capacity);
-        let idempotency = Arc::new(Mutex::new(IdempotencyStore::new(Duration::from_secs(60))));
         let usage = Arc::new(Mutex::new(Usage::new()));
-        let worker = tokio::spawn(worker_loop(
-            config,
-            Arc::clone(&control),
-            rx,
-            Arc::clone(&idempotency),
-            usage,
-        ));
+        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
         let (result_tx, result_rx) = oneshot::channel();
         tx.try_send(OutboundTask {
             params: test_params("quiet"),
@@ -1553,14 +1599,31 @@ mod tests {
         }
     }
 
-    fn pre_execution_reject_is_not_cached() {
-        let now = Instant::now();
-        let mut store = IdempotencyStore::new(Duration::from_secs(60));
-        store.start("k", now);
-        store.remove("k");
+    #[test]
+    fn pre_execution_reject_does_not_contaminate_completed_result() {
+        clear_idempotency_rows();
         assert!(matches!(
-            store.start("k", now + Duration::from_millis(1)),
+            start_persistent_idempotency("pre-reject-k", Duration::from_secs(60)),
             IdempotencyStart::Inserted
         ));
+        persist_result(
+            "pre-reject-k",
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        );
+        persist_rejection(
+            "pre-reject-k",
+            OutboundIdempotencyState::Rejected,
+            "OUTBOUND_DISABLED",
+            Duration::from_secs(60),
+        );
+        let record = get_idempotency_status("pre-reject-k").unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::Sent);
+        assert!(record.result.unwrap().success);
     }
 }

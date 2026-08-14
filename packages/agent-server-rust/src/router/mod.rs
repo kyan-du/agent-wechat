@@ -34,6 +34,10 @@ pub fn build_router() -> Router {
         .route("/api/status", get(status::get_status))
         .route("/api/status/auth", get(status::auth_status))
         .route("/api/status/outbound", get(status::outbound_status))
+        .route(
+            "/api/status/outbound/idempotency/{key}",
+            get(status::outbound_idempotency_status),
+        )
         .route("/api/status/outbound/pause", post(status::pause_outbound))
         .route("/api/status/outbound/resume", post(status::resume_outbound))
         .route("/api/status/login", post(status::login))
@@ -209,5 +213,76 @@ mod tests {
         let explicit_resume_body = json_response(explicit_resume).await;
         assert_eq!(explicit_resume_body["runtimePaused"], false);
         assert_eq!(explicit_resume_body["readOnly"], false);
+    }
+
+    #[tokio::test]
+    async fn idempotency_status_requires_auth_and_redacts_sensitive_payload_data() {
+        init_test_server_state().await;
+        {
+            let db = crate::db::get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = 'route-redact'", [])
+                .unwrap();
+            crate::db::queries::insert_outbound_queued(
+                &db,
+                "route-redact",
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+            crate::db::queries::complete_outbound_result(
+                &db,
+                "route-redact",
+                &crate::ia::types::SendResult {
+                    success: false,
+                    error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
+                    error: Some(
+                        "failed /tmp/send_file_secret.pdf token=abc QR:base64,AAAA contact Alice"
+                            .to_string(),
+                    ),
+                    commit_attempted: false,
+                },
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        }
+
+        let app = build_router();
+        let unauth = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/status/outbound/idempotency/route-redact")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let authed_response = app
+            .oneshot(authed(
+                "GET",
+                "/api/status/outbound/idempotency/route-redact",
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(authed_response.status(), StatusCode::OK);
+        let body = json_response(authed_response).await;
+        assert_eq!(body["key"], "route-redact");
+        assert_eq!(body["state"], "failed");
+        assert_eq!(body["result"]["errorCode"], "TEMP_FILE_WRITE_FAILED");
+        assert_eq!(body["result"]["error"], "TEMP_FILE_WRITE_FAILED");
+        let serialized = serde_json::to_string(&body).unwrap();
+        for forbidden in [
+            "/tmp/send_file_secret.pdf",
+            "abc",
+            "AAAA",
+            "Alice",
+            "base64",
+            "contact",
+        ] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
+        }
     }
 }

@@ -1,6 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Path,
         Query,
     },
     response::IntoResponse,
@@ -42,6 +43,22 @@ pub async fn get_status() -> Json<serde_json::Value> {
 
 pub async fn outbound_status() -> Json<crate::outbound::OutboundStatus> {
     Json(outbound_sender().status())
+}
+
+pub async fn outbound_idempotency_status(Path(key): Path<String>) -> Json<serde_json::Value> {
+    match crate::outbound::get_idempotency_status(&key) {
+        Some(record) => Json(serde_json::json!({
+            "key": record.key,
+            "state": record.state.as_str(),
+            "result": record.result,
+            "expiresAt": record.expires_at,
+            "updatedAt": record.updated_at,
+        })),
+        None => Json(serde_json::json!({
+            "key": key,
+            "state": "unknown",
+        })),
+    }
 }
 
 pub async fn pause_outbound() -> Json<crate::outbound::OutboundStatus> {

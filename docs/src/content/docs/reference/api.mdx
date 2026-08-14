@@ -29,7 +29,7 @@ Authorization: Bearer <token>
 | `POST` | `/api/messages/send` | Send a message (text, image, or file) |
 | `GET` | `/api/messages/:chatId/media/:localId` | Download a media attachment |
 
-`POST /api/messages/send` is processed through the server-side outbound safety queue. The request body accepts text, image, or file payloads and an optional `idempotencyKey` string. Reusing the same `idempotencyKey` while the first request is pending returns `429 Too Many Requests`; reusing it after completion returns the cached result for a short TTL so clients can retry safely after uncertain network outcomes without creating a second send.
+`POST /api/messages/send` is processed through the server-side outbound safety queue. The request body accepts text, image, or file payloads and an optional `idempotencyKey` string. Reusing the same `idempotencyKey` while the first request is pending returns `429 Too Many Requests`; reusing it after completion returns the persisted result for a short TTL so clients can retry safely after uncertain network outcomes without creating a second send.
 
 If the outbound queue is full, the server returns `429 Too Many Requests` with a `Retry-After` header and a JSON body such as:
 
@@ -43,13 +43,16 @@ If the outbound queue is full, the server returns `429 Too Many Requests` with a
 
 If outbound sending is disabled by read-only mode, the endpoint returns `503 Service Unavailable` with `errorCode: "OUTBOUND_DISABLED"`.
 
-`GET /api/status/outbound` reports queue `queueDepth`, `queueCapacity`, `availableCapacity`, current read-only state, idempotency cache size, and configured spacing/TTL values for operational monitoring.
+`GET /api/status/outbound` reports queue `queueDepth`, `queueCapacity`, `availableCapacity`, current read-only state, persisted idempotency entry count, and configured spacing/TTL values.
+
+`GET /api/status/outbound/idempotency/:key` returns the authenticated status for one `idempotencyKey`. Possible states are `queued`, `sending`, `sent`, `uncertain`, `failed`, `rejected`, `expired`, and `unknown`. The response contains only the key, state, coarse result metadata, and timestamps; it does not return message text, contacts, file paths, media data, QR data, or tokens.
 
 ### Auth
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/status/outbound` | Inspect outbound send queue pressure and safety settings |
+| `GET` | `/api/status/outbound/idempotency/:key` | Look up an outbound send by idempotency key |
 | `GET` | `/api/auth/status` | Check login status |
 | `POST` | `/api/auth/logout` | Log out of WeChat |
 | `WS` | `/api/ws/login` | WebSocket for login flow (QR code events) |
