@@ -11,6 +11,64 @@ use crate::tools::wechat_keys::get_stored_keys;
 
 pub struct SendMessagePlan;
 
+const DEFAULT_TEXT_CHUNK_CHARS: usize = 24;
+const DEFAULT_TEXT_CHUNK_PAUSE_MS: u64 = 45;
+const DEFAULT_TEXT_CHUNK_JITTER_MS: u64 = 80;
+const MAX_CHUNKED_TEXT_CHARS: usize = 4_096;
+
+fn bounded_env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn bounded_env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn text_input_actions(
+    text: &str,
+    chunk_chars: usize,
+    pause_ms: u64,
+    pause_jitter_ms: u64,
+    mut jitter: impl FnMut() -> u64,
+) -> Vec<Action> {
+    let chars: Vec<char> = text.chars().collect();
+    let effective_chunk_chars = if chars.len() > MAX_CHUNKED_TEXT_CHARS {
+        chars.len()
+    } else {
+        chunk_chars.max(1)
+    };
+    let chunks: Vec<String> = chars
+        .chunks(effective_chunk_chars)
+        .map(|chunk| chunk.iter().collect())
+        .collect();
+    let mut actions = Vec::with_capacity(chunks.len().saturating_mul(2));
+    for (index, chunk) in chunks.iter().enumerate() {
+        actions.push(Action::Type {
+            text: chunk.clone(),
+            selector: None,
+        });
+        if index + 1 < chunks.len() {
+            let extra = if pause_jitter_ms == 0 {
+                0
+            } else {
+                jitter() % (pause_jitter_ms + 1)
+            };
+            actions.push(Action::Wait {
+                ms: pause_ms + extra,
+            });
+        }
+    }
+    actions
+}
+
 #[derive(Clone)]
 pub struct SendMessageParams {
     pub chat_id: String,
@@ -19,6 +77,8 @@ pub struct SendMessageParams {
     pub image_mime: Option<String>,
     pub file_path: Option<String>,
     pub inbound_chars: Option<usize>,
+    pub source: Option<String>,
+    pub similarity_confirmed: bool,
 }
 
 pub enum SendMessagePhase {
@@ -53,10 +113,6 @@ fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResul
         index: None,
         skipped: Some(true),
         verified: Some(true),
-        used_frida: Some(false),
-        frida_attach_count: Some(0),
-        duration_ms: Some(0),
-        error_code: None,
         error: None,
     })
 }
@@ -78,41 +134,9 @@ fn load_matching_usernames(opened_name: Option<&str>) -> Option<Vec<String>> {
 }
 
 fn target_confirmation_error(result: &OpenChatResult, chat_id: &str) -> Option<String> {
-    if !result.ok {
-        return Some(
-            result
-                .error_code
-                .clone()
-                .unwrap_or_else(|| "CHAT_SELECT_FAILED".to_string()),
-        );
-    }
     confirm_target(result, chat_id)
         .err()
         .map(|error| format!("target_confirmation_{}", error.code()))
-}
-
-fn is_unverifiable_chat_selection(code: &str) -> bool {
-    matches!(
-        code,
-        "CHAT_SELECT_FAILED"
-            | "CHAT_SELECT_TIMEOUT"
-            | "CHAT_SELECT_INVALID_RESPONSE"
-            | "FRIDA_ATTACH_TIMEOUT"
-            | "FRIDA_ATTACH_FAILED"
-            | "FRIDA_ENUMERATION_FAILED"
-            | "FRIDA_HOOK_FAILED"
-            | "FRIDA_SESSION_VECTOR_UNAVAILABLE"
-            | "TARGET_CONFIRMATION_FAILED"
-            | "CHAT_CLICK_TIMEOUT"
-            | "CHAT_CLICK_FAILED"
-    )
-}
-
-fn fail_chat_selection(plan_state: &mut SendMessagePlanState, code: String) {
-    if is_unverifiable_chat_selection(&code) {
-        crate::outbound::outbound_sender().trip_kill_switch(&code);
-    }
-    plan_state.diagnostic_error = Some(code);
 }
 
 fn reset_after_popup(plan_state: &mut SendMessagePlanState) -> Result<(), &'static str> {
@@ -235,8 +259,8 @@ impl Plan for SendMessagePlan {
                     // rescan to prove the selected username equals the target.
                     let result = open_chat(&params.chat_id, true, click_xy).await;
                     if let Some(error) = target_confirmation_error(&result, &params.chat_id) {
-                        tracing::warn!("[send] target confirmation failed code={error}");
-                        fail_chat_selection(plan_state, error);
+                        tracing::warn!("[send] target confirmation failed: {error}");
+                        plan_state.diagnostic_error = Some(error);
                         plan_state.open_result = Some(result);
                         return None;
                     }
@@ -323,8 +347,9 @@ impl Plan for SendMessagePlan {
                         if let Some(error) =
                             target_confirmation_error(&live_target, &params.chat_id)
                         {
-                            tracing::warn!("[send] pre-send target rescan failed code={error}");
-                            fail_chat_selection(plan_state, error);
+                            tracing::warn!("[send] pre-send target rescan failed: {error}");
+                            plan_state.diagnostic_error =
+                                Some("pre_send_target_confirmation_failed".to_string());
                             return None;
                         }
                     }
@@ -375,22 +400,41 @@ impl Plan for SendMessagePlan {
                         });
                     }
 
-                    // Text: outbound queue already waited "typing time".
                     if let Some(msg) = &params.message {
+                        let chunk_chars = bounded_env_usize(
+                            "AGENT_WECHAT_TEXT_CHUNK_CHARS",
+                            DEFAULT_TEXT_CHUNK_CHARS,
+                            8,
+                            64,
+                        );
+                        let pause_ms = bounded_env_u64(
+                            "AGENT_WECHAT_TEXT_CHUNK_PAUSE_MS",
+                            DEFAULT_TEXT_CHUNK_PAUSE_MS,
+                            20,
+                            500,
+                        );
+                        let pause_jitter_ms = bounded_env_u64(
+                            "AGENT_WECHAT_TEXT_CHUNK_JITTER_MS",
+                            DEFAULT_TEXT_CHUNK_JITTER_MS,
+                            0,
+                            500,
+                        );
+                        let mut input = vec![Action::Key {
+                            combo: "ctrl+a".to_string(),
+                        }];
+                        input.extend(text_input_actions(
+                            msg,
+                            chunk_chars,
+                            pause_ms,
+                            pause_jitter_ms,
+                            || actions::next_jitter() as u64,
+                        ));
+                        input.push(Action::Wait { ms: beat });
+                        input.push(Action::CommitKey {
+                            combo: "Return".to_string(),
+                        });
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::Key {
-                                    combo: "ctrl+a".to_string(),
-                                },
-                                Action::Type {
-                                    text: msg.clone(),
-                                    selector: None,
-                                },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: actions::sequence(input),
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -464,10 +508,6 @@ mod tests {
             index: Some(1),
             skipped: Some(false),
             verified,
-            used_frida: Some(false),
-            frida_attach_count: Some(0),
-            duration_ms: Some(0),
-            error_code: None,
             error: None,
         }
     }
@@ -498,6 +538,41 @@ mod tests {
         ] {
             assert!(!is_unverifiable_chat_selection(ordinary), "{ordinary}");
         }
+    }
+
+    #[test]
+    fn text_chunking_is_unicode_safe_and_deterministic() {
+        let actions = text_input_actions("你好abc世界def", 4, 40, 20, || 7);
+        assert_eq!(actions.len(), 5);
+        assert!(matches!(
+            &actions[0],
+            Action::Type { text, .. } if text == "你好ab"
+        ));
+        assert!(matches!(&actions[1], Action::Wait { ms: 47 }));
+        assert!(matches!(
+            &actions[2],
+            Action::Type { text, .. } if text == "c世界d"
+        ));
+        assert!(matches!(&actions[3], Action::Wait { ms: 47 }));
+        assert!(matches!(
+            &actions[4],
+            Action::Type { text, .. } if text == "ef"
+        ));
+    }
+
+    #[test]
+    fn very_long_text_falls_back_to_one_input_action() {
+        let text = "界".repeat(MAX_CHUNKED_TEXT_CHARS + 1);
+        let actions = text_input_actions(&text, 8, 45, 80, || 7);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], Action::Type { text: actual, .. } if actual == &text));
+    }
+
+    #[test]
+    fn short_text_is_one_input_action_without_pause() {
+        let actions = text_input_actions("hello", 24, 45, 80, || 999);
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(&actions[0], Action::Type { text, .. } if text == "hello"));
     }
 
     #[test]

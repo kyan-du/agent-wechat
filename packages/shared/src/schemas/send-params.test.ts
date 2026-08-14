@@ -19,6 +19,25 @@ test("sendParamsSchema preserves inboundChars and idempotencyKey", () => {
   assert.equal(asGenerated.inboundChars, 12);
 });
 
+test("sendParamsSchema preserves validated fairness and confirmation fields", () => {
+  const parsed = sendParamsSchema.parse({
+    chatId: "wxid_a",
+    text: "hello",
+    source: "openclaw:primary",
+    similarityConfirmed: true,
+  });
+  assert.equal(parsed.source, "openclaw:primary");
+  assert.equal(parsed.similarityConfirmed, true);
+  assert.equal(
+    sendParamsSchema.safeParse({ chatId: "wxid_a", source: "bad source" }).success,
+    false,
+  );
+  assert.equal(
+    sendParamsSchema.safeParse({ chatId: "wxid_a", source: "x".repeat(65) }).success,
+    false,
+  );
+});
+
 test("sendParamsSchema rejects invalid inboundChars", () => {
   assert.equal(
     sendParamsSchema.safeParse({ chatId: "wxid_a", inboundChars: -1 }).success,

@@ -202,6 +202,8 @@ export const sendParamsSchema = z.object({
     filename: z.string(),
   }).optional(),
   inboundChars: z.number().int().nonnegative().optional(),
+  source: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+  similarityConfirmed: z.boolean().optional(),
 });
 
 export const sendResultSchema = z.object({

@@ -742,12 +742,14 @@ async function dispatchSegment(
               caption: text || undefined,
               interPartDelayMs: liveAccount.mediaPartDelayMs,
               inboundChars: lastMsg.rawBody.length,
+              source: "openclaw",
             });
           } else if (text) {
             const result = await client.sendMessage({
               chatId,
               text,
               inboundChars: lastMsg.rawBody.length,
+              source: "openclaw",
             });
             if (!result.success) throw new Error(result.error ?? "Send failed");
           }

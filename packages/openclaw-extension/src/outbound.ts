@@ -24,6 +24,7 @@ export async function sendLogicalMediaTask(opts: {
   requestId?: string;
   inboundChars?: number;
   interPartDelayMs?: number;
+  source?: string;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<string> {
   const requestId = opts.requestId ?? randomUUID();
@@ -43,6 +44,7 @@ export async function sendLogicalMediaTask(opts: {
       partIndex: index,
       partCount: parts.length,
       inboundChars: opts.inboundChars,
+      source: opts.source ?? "openclaw",
     });
     if (!result.success) {
       throw new Error(result.error ?? `Logical send part ${index + 1} failed`);

@@ -875,6 +875,7 @@ async function cmdSend(client: WeChatClient, chatId: string, text?: string, imag
     ...(text ? { text } : {}),
     ...(image ? { image } : {}),
     ...(file ? { file } : {}),
+    source: "cli",
   });
 
   if (result.success) {

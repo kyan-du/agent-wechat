@@ -536,6 +536,12 @@ pub struct SendParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub inbound_chars: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub similarity_confirmed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

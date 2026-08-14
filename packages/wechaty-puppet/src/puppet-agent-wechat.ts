@@ -538,7 +538,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     _mentionIdList?: string[],
   ): Promise<void | string> {
     log.verbose('PuppetAgentWeChat', 'messageSendText(%s, %s)', conversationId, text.slice(0, 50))
-    const result = await this.client.sendMessage({ chatId: conversationId, text })
+    const result = await this.client.sendMessage({ chatId: conversationId, text, source: 'wechaty' })
     if (!result.success) {
       throw new Error(result.error ?? 'Send failed')
     }
@@ -559,10 +559,12 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
       ? await this.client.sendMessage({
           chatId: conversationId,
           image: { data: base64, mimeType },
+          source: 'wechaty',
         })
       : await this.client.sendMessage({
           chatId: conversationId,
           file: { data: base64, filename: file.name },
+          source: 'wechaty',
         })
 
     if (!result.success) {

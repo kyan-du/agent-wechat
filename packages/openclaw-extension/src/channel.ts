@@ -18,7 +18,7 @@ async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<s
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-  const result = await client.sendMessage({ chatId: to, text });
+  const result = await client.sendMessage({ chatId: to, text, source: "openclaw" });
   if (!result.success) throw new Error(result.error ?? "Send failed");
   return `wechat:${to}:${Date.now()}`;
 }
@@ -33,7 +33,11 @@ async function sendWeChatMedia(
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   if (!mediaUrl) {
-    const result = await client.sendMessage({ chatId: to, text: text || undefined });
+    const result = await client.sendMessage({
+      chatId: to,
+      text: text || undefined,
+      source: "openclaw",
+    });
     if (!result.success) throw new Error(result.error ?? "Send failed");
     return `wechat:${to}:${Date.now()}`;
   }
@@ -71,6 +75,7 @@ async function sendWeChatMedia(
       : [{ file: { data: base64, filename } }],
     caption: text || undefined,
     interPartDelayMs: account.mediaPartDelayMs,
+    source: "openclaw",
   });
   return `wechat:${to}:${requestId}`;
 }
