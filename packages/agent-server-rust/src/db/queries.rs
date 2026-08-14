@@ -54,6 +54,7 @@ pub struct OutboundIdempotencyRecord {
     pub result: Option<SendResult>,
     pub expires_at: String,
     pub updated_at: String,
+    pub generation: i64,
 }
 
 fn unix_ms() -> i64 {
@@ -119,6 +120,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboundIdempote
         result,
         expires_at: row.get(6)?,
         updated_at: row.get(7)?,
+        generation: row.get(8).unwrap_or(0),
     })
 }
 
@@ -127,7 +129,7 @@ pub fn get_outbound_idempotency(
     key: &str,
 ) -> rusqlite::Result<Option<OutboundIdempotencyRecord>> {
     conn.query_row(
-        "SELECT key, state, result_success, error_code, error, commit_attempted, expires_at, updated_at
+        "SELECT key, state, result_success, error_code, error, commit_attempted, expires_at, updated_at, generation
          FROM outbound_idempotency WHERE key = ?1",
         params![key],
         record_from_row,
@@ -147,27 +149,27 @@ pub fn insert_outbound_queued(
     conn: &Connection,
     key: &str,
     ttl: std::time::Duration,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
     let changed = conn.execute(
         "INSERT INTO outbound_idempotency
-            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at)
-         VALUES (?1, 'queued', NULL, NULL, NULL, 0, ?2, ?3, ?3, NULL)
+            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
+         VALUES (?1, 'queued', NULL, NULL, NULL, 0, ?2, ?3, ?3, NULL, 1)
          ON CONFLICT(key) DO NOTHING",
         params![key, expires_at, now],
     )?;
-    Ok(changed > 0)
+    Ok((changed > 0).then_some(1))
 }
 
 pub fn claim_reusable_outbound_queued(
     conn: &Connection,
     key: &str,
     ttl: std::time::Duration,
-) -> rusqlite::Result<bool> {
+) -> rusqlite::Result<Option<i64>> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    let changed = conn.execute(
+    conn.query_row(
         "UPDATE outbound_idempotency
          SET state = 'queued',
              result_success = NULL,
@@ -176,52 +178,60 @@ pub fn claim_reusable_outbound_queued(
              commit_attempted = 0,
              expires_at = ?2,
              updated_at = ?3,
-             completed_at = NULL
+             completed_at = NULL,
+             generation = generation + 1
          WHERE key = ?1
-           AND state IN ('rejected', 'expired')",
+           AND state IN ('rejected', 'expired')
+         RETURNING generation",
         params![key, expires_at, now],
-    )?;
-    Ok(changed > 0)
+        |row| row.get(0),
+    )
+    .optional()
 }
 
-pub fn update_outbound_state(
+pub fn mark_outbound_sending(
     conn: &Connection,
     key: &str,
-    state: OutboundIdempotencyState,
-) -> rusqlite::Result<()> {
+    generation: i64,
+) -> rusqlite::Result<bool> {
     let changed = conn.execute(
-        "UPDATE outbound_idempotency SET state = ?2, updated_at = ?3 WHERE key = ?1",
-        params![key, state.as_str(), sqlite_now()],
+        "UPDATE outbound_idempotency
+         SET state = 'sending', updated_at = ?3
+         WHERE key = ?1
+           AND generation = ?2
+           AND state = 'queued'",
+        params![key, generation, sqlite_now()],
     )?;
-    if changed == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    }
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn complete_outbound_result(
     conn: &Connection,
     key: &str,
+    generation: i64,
     result: &SendResult,
     ttl: std::time::Duration,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let sanitized = sanitized_result(result);
     let state = send_result_state(&sanitized);
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
     let changed = conn.execute(
         "UPDATE outbound_idempotency
-         SET state = ?2,
-             result_success = ?3,
-             error_code = ?4,
-             error = ?5,
-             commit_attempted = ?6,
-             expires_at = ?7,
-             updated_at = ?8,
-             completed_at = ?8
-         WHERE key = ?1",
+         SET state = ?3,
+             result_success = ?4,
+             error_code = ?5,
+             error = ?6,
+             commit_attempted = ?7,
+             expires_at = ?8,
+             updated_at = ?9,
+             completed_at = ?9
+         WHERE key = ?1
+           AND generation = ?2
+           AND state = 'sending'",
         params![
             key,
+            generation,
             state.as_str(),
             if sanitized.success { 1 } else { 0 },
             sanitized.error_code,
@@ -231,19 +241,17 @@ pub fn complete_outbound_result(
             now
         ],
     )?;
-    if changed == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    }
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn mark_outbound_needs_reconciliation(
     conn: &Connection,
     key: &str,
+    generation: Option<i64>,
     error_code: &str,
     commit_attempted: bool,
     ttl: std::time::Duration,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<usize> {
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
     conn.execute(
@@ -257,16 +265,17 @@ pub fn mark_outbound_needs_reconciliation(
              updated_at = ?5,
              completed_at = ?5
          WHERE key = ?1
+           AND (?6 IS NULL OR generation = ?6)
            AND state IN ('queued', 'sending', 'needs_reconciliation')",
         params![
             key,
             error_code,
             if commit_attempted { 1 } else { 0 },
             expires_at,
-            now
+            now,
+            generation
         ],
-    )?;
-    Ok(())
+    )
 }
 
 pub fn reconcile_outbound_idempotency(
@@ -306,23 +315,37 @@ pub fn reconcile_outbound_idempotency(
 pub fn reject_outbound_pre_execution(
     conn: &Connection,
     key: &str,
+    generation: Option<i64>,
     state: OutboundIdempotencyState,
     error_code: &str,
     ttl: std::time::Duration,
-) -> rusqlite::Result<()> {
-    let existing = get_outbound_idempotency(conn, key)?;
-    if matches!(
-        existing.as_ref().map(|record| &record.state),
-        Some(state) if state.is_completed_execution()
-    ) {
-        return Ok(());
+) -> rusqlite::Result<bool> {
+    if let Some(generation) = generation {
+        let now = sqlite_now();
+        let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+        let changed = conn.execute(
+            "UPDATE outbound_idempotency
+             SET state = ?3,
+                 result_success = 0,
+                 error_code = ?4,
+                 error = ?4,
+                 commit_attempted = 0,
+                 expires_at = ?5,
+                 updated_at = ?6,
+                 completed_at = ?6
+             WHERE key = ?1
+               AND generation = ?2
+               AND state = 'queued'",
+            params![key, generation, state.as_str(), error_code, expires_at, now],
+        )?;
+        return Ok(changed > 0);
     }
     let now = sqlite_now();
     let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
-    conn.execute(
+    let changed = conn.execute(
         "INSERT INTO outbound_idempotency
-            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at)
-         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5)
+            (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
+         VALUES (?1, ?2, 0, ?3, ?3, 0, ?4, ?5, ?5, ?5, 1)
          ON CONFLICT(key) DO UPDATE SET
             state = excluded.state,
             result_success = 0,
@@ -331,10 +354,12 @@ pub fn reject_outbound_pre_execution(
             commit_attempted = 0,
             expires_at = excluded.expires_at,
             updated_at = excluded.updated_at,
-            completed_at = excluded.completed_at",
+            completed_at = excluded.completed_at,
+            generation = outbound_idempotency.generation + 1
+         WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed', 'needs_reconciliation')",
         params![key, state.as_str(), error_code, expires_at, now],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
 pub fn reject_outbound_unless_active_or_completed(
@@ -359,7 +384,7 @@ pub fn reject_outbound_unless_active_or_completed(
             expires_at = excluded.expires_at,
             updated_at = excluded.updated_at,
             completed_at = excluded.completed_at
-         WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed')",
+         WHERE outbound_idempotency.state NOT IN ('queued', 'sending', 'sent', 'uncertain', 'failed', 'needs_reconciliation')",
         params![key, state.as_str(), error_code, expires_at, now],
     )?;
     Ok(())
@@ -460,6 +485,7 @@ mod tests {
 
     fn open_test_conn(path: &std::path::Path) -> Connection {
         let conn = Connection::open(path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS outbound_idempotency (
@@ -474,7 +500,8 @@ mod tests {
                 expires_at TEXT NOT NULL,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
-                completed_at TEXT
+                completed_at TEXT,
+                generation INTEGER NOT NULL DEFAULT 0
              );",
         )
         .unwrap();
@@ -500,7 +527,10 @@ mod tests {
                         .unwrap()
                         .is_none());
                     barrier.wait();
-                    if insert_outbound_queued(&conn, "same-key", Duration::from_secs(60)).unwrap() {
+                    if insert_outbound_queued(&conn, "same-key", Duration::from_secs(60))
+                        .unwrap()
+                        .is_some()
+                    {
                         inserted.fetch_add(1, Ordering::SeqCst);
                     }
                 });
@@ -526,6 +556,7 @@ mod tests {
         reject_outbound_pre_execution(
             &conn,
             "retry-key",
+            None,
             OutboundIdempotencyState::Rejected,
             "QUEUE_FULL",
             Duration::from_secs(60),
@@ -544,6 +575,7 @@ mod tests {
                     barrier.wait();
                     if claim_reusable_outbound_queued(&conn, "retry-key", Duration::from_secs(60))
                         .unwrap()
+                        .is_some()
                     {
                         claimed.fetch_add(1, Ordering::SeqCst);
                     }
@@ -554,6 +586,132 @@ mod tests {
         assert_eq!(claimed.load(Ordering::SeqCst), 1);
         assert_eq!(
             get_outbound_idempotency(&conn, "retry-key")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Queued
+        );
+    }
+
+    #[test]
+    fn independent_connections_reconcile_blocks_stale_worker_transitions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("reconcile-worker.db");
+        let conn = open_test_conn(&path);
+        let generation = insert_outbound_queued(&conn, "race-key", Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        let worker_conn = open_test_conn(&path);
+        let ops_conn = open_test_conn(&path);
+
+        assert!(reconcile_outbound_idempotency(
+            &ops_conn,
+            "race-key",
+            OutboundIdempotencyState::Uncertain,
+            "MANUAL_RECONCILIATION_REQUIRED",
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        assert!(!mark_outbound_sending(&worker_conn, "race-key", generation).unwrap());
+        assert!(!complete_outbound_result(
+            &worker_conn,
+            "race-key",
+            generation,
+            &SendResult {
+                success: true,
+                error_code: None,
+                error: None,
+                commit_attempted: true,
+            },
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        assert_eq!(
+            get_outbound_idempotency(&conn, "race-key")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Uncertain
+        );
+    }
+
+    #[test]
+    fn independent_connections_reject_cannot_overwrite_reclaim_or_sending() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("reject-reclaim.db");
+        let conn = open_test_conn(&path);
+        assert!(reject_outbound_pre_execution(
+            &conn,
+            "reject-race",
+            None,
+            OutboundIdempotencyState::Rejected,
+            "QUEUE_FULL",
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        let old_generation = get_outbound_idempotency(&conn, "reject-race")
+            .unwrap()
+            .unwrap()
+            .generation;
+        let reclaim_conn = open_test_conn(&path);
+        let new_generation =
+            claim_reusable_outbound_queued(&reclaim_conn, "reject-race", Duration::from_secs(60))
+                .unwrap()
+                .unwrap();
+
+        let stale_reject_conn = open_test_conn(&path);
+        assert!(!reject_outbound_pre_execution(
+            &stale_reject_conn,
+            "reject-race",
+            Some(old_generation),
+            OutboundIdempotencyState::Rejected,
+            "STALE_REJECT",
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        assert_eq!(
+            get_outbound_idempotency(&conn, "reject-race")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Queued
+        );
+
+        assert!(mark_outbound_sending(&reclaim_conn, "reject-race", new_generation).unwrap());
+        assert!(!reject_outbound_pre_execution(
+            &stale_reject_conn,
+            "reject-race",
+            Some(new_generation),
+            OutboundIdempotencyState::Rejected,
+            "LATE_REJECT",
+            Duration::from_secs(60),
+        )
+        .unwrap());
+        assert_eq!(
+            get_outbound_idempotency(&conn, "reject-race")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Sending
+        );
+    }
+
+    #[test]
+    fn independent_connection_claim_waits_for_held_writer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("busy.db");
+        let writer = open_test_conn(&path);
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        let thread_path = path.clone();
+        let handle = std::thread::spawn(move || {
+            let conn = open_test_conn(&thread_path);
+            insert_outbound_queued(&conn, "busy-key", Duration::from_secs(60)).unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        writer.execute_batch("COMMIT;").unwrap();
+        assert_eq!(handle.join().unwrap(), Some(1));
+        assert_eq!(
+            get_outbound_idempotency(&writer, "busy-key")
                 .unwrap()
                 .unwrap()
                 .state,

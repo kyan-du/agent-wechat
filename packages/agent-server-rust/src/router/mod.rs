@@ -226,15 +226,20 @@ mod tests {
                 [],
             )
             .unwrap();
-            crate::db::queries::insert_outbound_queued(
+            let generation = crate::db::queries::insert_outbound_queued(
                 &db,
                 "route-redact",
                 std::time::Duration::from_secs(60),
             )
+            .unwrap()
             .unwrap();
+            assert!(
+                crate::db::queries::mark_outbound_sending(&db, "route-redact", generation).unwrap()
+            );
             crate::db::queries::complete_outbound_result(
                 &db,
                 "route-redact",
+                generation,
                 &crate::ia::types::SendResult {
                     success: false,
                     error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
@@ -301,15 +306,21 @@ mod tests {
                 [],
             )
             .unwrap();
-            crate::db::queries::insert_outbound_queued(
+            let generation = crate::db::queries::insert_outbound_queued(
                 &db,
                 "media-terminal",
                 std::time::Duration::from_secs(60),
             )
+            .unwrap()
             .unwrap();
+            assert!(
+                crate::db::queries::mark_outbound_sending(&db, "media-terminal", generation)
+                    .unwrap()
+            );
             crate::db::queries::complete_outbound_result(
                 &db,
                 "media-terminal",
+                generation,
                 &crate::ia::types::SendResult {
                     success: true,
                     error_code: None,
@@ -405,7 +416,7 @@ mod tests {
         );
 
         match crate::outbound::outbound_sender().admit_idempotency_key(key) {
-            crate::outbound::IdempotencyAdmission::Claimed => {}
+            crate::outbound::IdempotencyAdmission::Claimed(_) => {}
             _ => panic!("rejected materialization failure must be reclaimable after restart"),
         }
         assert_eq!(
@@ -485,7 +496,7 @@ mod tests {
         );
 
         match crate::outbound::outbound_sender().admit_idempotency_key(key) {
-            crate::outbound::IdempotencyAdmission::Claimed => {}
+            crate::outbound::IdempotencyAdmission::Claimed(_) => {}
             _ => panic!("write failure rejection must be reclaimable after restart"),
         }
     }

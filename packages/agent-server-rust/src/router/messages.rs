@@ -155,9 +155,12 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         });
     }
 
+    let mut idempotency_generation = None;
     if let Some(key) = input.idempotency_key.as_deref() {
         match outbound_sender().admit_idempotency_key(key) {
-            IdempotencyAdmission::Claimed => {}
+            IdempotencyAdmission::Claimed(generation) => {
+                idempotency_generation = Some(generation);
+            }
             IdempotencyAdmission::Completed(result) => {
                 return OutboundSendResponse::Result(result);
             }
@@ -198,6 +201,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 Err(e) => {
                     if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                         input.idempotency_key.as_deref(),
+                        idempotency_generation,
                         "TEMP_FILE_WRITE_FAILED",
                     ) {
                         return OutboundSendResponse::Rejected(error);
@@ -213,6 +217,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
             Err(e) => {
                 if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                     input.idempotency_key.as_deref(),
+                    idempotency_generation,
                     "IMAGE_BASE64_DECODE_FAILED",
                 ) {
                     return OutboundSendResponse::Rejected(error);
@@ -270,6 +275,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                     });
                     if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                         input.idempotency_key.as_deref(),
+                        idempotency_generation,
                         "TEMP_FILE_WRITE_FAILED",
                     ) {
                         return OutboundSendResponse::Rejected(error);
@@ -293,6 +299,7 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 });
                 if let Err(error) = outbound_sender().reject_claimed_pre_execution(
                     input.idempotency_key.as_deref(),
+                    idempotency_generation,
                     "FILE_BASE64_DECODE_FAILED",
                 ) {
                     return OutboundSendResponse::Rejected(error);
@@ -316,6 +323,6 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
         inbound_chars: input.inbound_chars.map(|n| n as usize),
     };
     outbound_sender()
-        .send_claimed(params, input.idempotency_key)
+        .send_claimed(params, input.idempotency_key, idempotency_generation)
         .await
 }

@@ -4,10 +4,12 @@ use refinery::embed_migrations;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 embed_migrations!("migrations");
 
 static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Open a SQLite connection and set the SQLCipher encryption key.
 /// PRAGMA key MUST be the first statement after opening.
@@ -16,6 +18,8 @@ fn open_encrypted(path: &str, key: &str) -> Result<Connection, String> {
 
     conn.execute_batch(&format!("PRAGMA key = '{key}';"))
         .map_err(|e| format!("Failed to set encryption key: {e}"))?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .map_err(|e| format!("Failed to set busy timeout: {e}"))?;
 
     conn.execute_batch("PRAGMA journal_mode = WAL;")
         .map_err(|e| format!("Failed to set WAL: {e}"))?;
@@ -35,6 +39,9 @@ fn migrate_to_encrypted(path: &str, key: &str) -> Result<Connection, String> {
 
     // Open the old db without a key
     let old_conn = Connection::open(path).map_err(|e| format!("Failed to open old db: {e}"))?;
+    old_conn
+        .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        .map_err(|e| format!("Failed to set legacy busy timeout: {e}"))?;
 
     // Verify it's actually readable without a key
     old_conn
@@ -62,8 +69,7 @@ fn migrate_to_encrypted(path: &str, key: &str) -> Result<Connection, String> {
     std::fs::remove_file(path).map_err(|e| format!("Failed to remove old db: {e}"))?;
     std::fs::remove_file(format!("{path}-wal")).ok();
     std::fs::remove_file(format!("{path}-shm")).ok();
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("Failed to rename encrypted db: {e}"))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| format!("Failed to rename encrypted db: {e}"))?;
 
     tracing::info!("[DB] Migrated unencrypted database to encrypted");
 
@@ -72,8 +78,7 @@ fn migrate_to_encrypted(path: &str, key: &str) -> Result<Connection, String> {
 
 /// Initialize the database: set encryption key, run migrations, set pragmas.
 pub fn init_db() -> Result<(), String> {
-    let db_path =
-        std::env::var("AGENT_DB_PATH").unwrap_or_else(|_| "/data/agent.db".to_string());
+    let db_path = std::env::var("AGENT_DB_PATH").unwrap_or_else(|_| "/data/agent.db".to_string());
 
     // Ensure directory exists
     if let Some(parent) = Path::new(&db_path).parent() {
@@ -106,8 +111,7 @@ pub fn init_db() -> Result<(), String> {
         }
     } else {
         // New DB — just open encrypted
-        open_encrypted(&db_path, key)
-            .map_err(|e| format!("Failed to create encrypted db: {e}"))?
+        open_encrypted(&db_path, key).map_err(|e| format!("Failed to create encrypted db: {e}"))?
     };
 
     // Run migrations (refinery)
