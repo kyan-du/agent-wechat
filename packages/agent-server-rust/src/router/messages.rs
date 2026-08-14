@@ -189,12 +189,40 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 .as_millis(),
             ext
         );
-        if let Ok(bytes) =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data)
-        {
-            if std::fs::write(&path, &bytes).is_ok() {
-                image_mime = Some(img.mime_type.clone());
-                image_path = Some(path);
+        match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+            Ok(bytes) => match std::fs::write(&path, &bytes) {
+                Ok(_) => {
+                    image_mime = Some(img.mime_type.clone());
+                    image_path = Some(path);
+                }
+                Err(e) => {
+                    if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                        input.idempotency_key.as_deref(),
+                        "TEMP_FILE_WRITE_FAILED",
+                    ) {
+                        return OutboundSendResponse::Rejected(error);
+                    }
+                    return OutboundSendResponse::Result(SendResult {
+                        success: false,
+                        error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
+                        error: Some(format!("Failed to write temp image: {e}")),
+                        commit_attempted: false,
+                    });
+                }
+            },
+            Err(e) => {
+                if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                    input.idempotency_key.as_deref(),
+                    "IMAGE_BASE64_DECODE_FAILED",
+                ) {
+                    return OutboundSendResponse::Rejected(error);
+                }
+                return OutboundSendResponse::Result(SendResult {
+                    success: false,
+                    error_code: Some("IMAGE_BASE64_DECODE_FAILED".to_string()),
+                    error: Some(format!("Failed to decode base64 image data: {e}")),
+                    commit_attempted: false,
+                });
             }
         }
     }
@@ -233,13 +261,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
                 }
                 Err(e) => {
                     cleanup_temp_files(&SendMessageParams {
-                        chat_id: input.chat_id,
-                        message: input.text,
-                        image_path,
-                        image_mime,
-                        file_path,
+                        chat_id: input.chat_id.clone(),
+                        message: input.text.clone(),
+                        image_path: image_path.clone(),
+                        image_mime: image_mime.clone(),
+                        file_path: file_path.clone(),
                         inbound_chars: None,
                     });
+                    if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                        input.idempotency_key.as_deref(),
+                        "TEMP_FILE_WRITE_FAILED",
+                    ) {
+                        return OutboundSendResponse::Rejected(error);
+                    }
                     return OutboundSendResponse::Result(SendResult {
                         success: false,
                         error_code: Some("TEMP_FILE_WRITE_FAILED".to_string()),
@@ -250,13 +284,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse
             },
             Err(e) => {
                 cleanup_temp_files(&SendMessageParams {
-                    chat_id: input.chat_id,
-                    message: input.text,
-                    image_path,
-                    image_mime,
-                    file_path,
+                    chat_id: input.chat_id.clone(),
+                    message: input.text.clone(),
+                    image_path: image_path.clone(),
+                    image_mime: image_mime.clone(),
+                    file_path: file_path.clone(),
                     inbound_chars: None,
                 });
+                if let Err(error) = outbound_sender().reject_claimed_pre_execution(
+                    input.idempotency_key.as_deref(),
+                    "FILE_BASE64_DECODE_FAILED",
+                ) {
+                    return OutboundSendResponse::Rejected(error);
+                }
                 return OutboundSendResponse::Result(SendResult {
                     success: false,
                     error_code: Some("FILE_BASE64_DECODE_FAILED".to_string()),

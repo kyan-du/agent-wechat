@@ -373,6 +373,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_image_base64_after_claim_is_rejected_and_reclaimable() {
+        init_test_server_state().await;
+        crate::outbound::outbound_sender().resume();
+        let app = build_router();
+        let key = "media-invalid-image";
+        {
+            let db = crate::db::get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","idempotencyKey":"media-invalid-image","image":{"mimeType":"image/png","data":"%%%not-base64%%%"}}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["errorCode"], "IMAGE_BASE64_DECODE_FAILED");
+        let record = crate::outbound::get_idempotency_status(key).unwrap();
+        assert_eq!(
+            record.state,
+            crate::db::queries::OutboundIdempotencyState::Rejected
+        );
+
+        match crate::outbound::outbound_sender().admit_idempotency_key(key) {
+            crate::outbound::IdempotencyAdmission::Claimed => {}
+            _ => panic!("rejected materialization failure must be reclaimable after restart"),
+        }
+        assert_eq!(
+            crate::outbound::get_idempotency_status(key).unwrap().state,
+            crate::db::queries::OutboundIdempotencyState::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_file_base64_after_claim_does_not_leave_queued() {
+        init_test_server_state().await;
+        crate::outbound::outbound_sender().resume();
+        let app = build_router();
+        let key = "media-invalid-file";
+        {
+            let db = crate::db::get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(
+                    r#"{"chatId":"chat","idempotencyKey":"media-invalid-file","file":{"filename":"x.txt","data":"%%%not-base64%%%"}}"#,
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["errorCode"], "FILE_BASE64_DECODE_FAILED");
+        assert_eq!(
+            crate::outbound::get_idempotency_status(key).unwrap().state,
+            crate::db::queries::OutboundIdempotencyState::Rejected
+        );
+    }
+
+    #[tokio::test]
+    async fn temp_file_write_failure_after_claim_is_rejected_and_reclaimable() {
+        init_test_server_state().await;
+        crate::outbound::outbound_sender().resume();
+        let app = build_router();
+        let key = "media-write-fail";
+        {
+            let db = crate::db::get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        let long_filename = "a".repeat(300);
+        let payload = serde_json::json!({
+            "chatId": "chat",
+            "idempotencyKey": key,
+            "file": {
+                "filename": long_filename,
+                "data": "aGVsbG8="
+            }
+        });
+
+        let response = app
+            .oneshot(authed(
+                "POST",
+                "/api/messages/send",
+                Body::from(payload.to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_response(response).await;
+        assert_eq!(body["success"], false);
+        assert_eq!(body["errorCode"], "TEMP_FILE_WRITE_FAILED");
+        assert_eq!(
+            crate::outbound::get_idempotency_status(key).unwrap().state,
+            crate::db::queries::OutboundIdempotencyState::Rejected
+        );
+
+        match crate::outbound::outbound_sender().admit_idempotency_key(key) {
+            crate::outbound::IdempotencyAdmission::Claimed => {}
+            _ => panic!("write failure rejection must be reclaimable after restart"),
+        }
+    }
+
+    #[tokio::test]
     async fn send_and_lookup_reject_invalid_idempotency_keys() {
         init_test_server_state().await;
         let app = build_router();

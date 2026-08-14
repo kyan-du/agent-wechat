@@ -626,6 +626,26 @@ impl OutboundSender {
         }
     }
 
+    pub(crate) fn reject_claimed_pre_execution(
+        &self,
+        idempotency_key: Option<&str>,
+        error_code: &str,
+    ) -> Result<(), OutboundError> {
+        if let Some(key) = idempotency_key {
+            if let Err(error) = persist_rejection(
+                key,
+                OutboundIdempotencyState::Rejected,
+                error_code,
+                self.config.idempotency_ttl,
+            ) {
+                tracing::error!("[outbound] failed to persist pre-execution rejection: {error}");
+                self.control.set_runtime_paused(true);
+                return Err(OutboundError::persistence(false));
+            }
+        }
+        Ok(())
+    }
+
     pub fn status(&self) -> OutboundStatus {
         OutboundStatus {
             queue_capacity: self.config.queue_capacity,
@@ -761,6 +781,19 @@ async fn worker_loop(
         if let Some(key) = task.idempotency_key.as_deref() {
             if let Err(error) = persist_sending(key) {
                 tracing::error!("[outbound] failed to persist sending state: {error}");
+                let db = get_db();
+                if let Err(error) = mark_outbound_needs_reconciliation(
+                    &db,
+                    key,
+                    "IDEMPOTENCY_RECONCILIATION_REQUIRED",
+                    false,
+                    config.idempotency_ttl,
+                ) {
+                    tracing::error!(
+                        "[outbound] failed to persist sending reconciliation state: {error}"
+                    );
+                }
+                control.set_runtime_paused(true);
                 cleanup_temp_files(&task.params);
                 let _ = task.result_tx.send(OutboundSendResponse::Rejected(
                     OutboundError::persistence(false),
@@ -1517,6 +1550,78 @@ mod tests {
             Duration::from_secs(60)
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_sending_persistence_failure_marks_reconciliation_and_pauses() {
+        clear_idempotency_rows();
+        let key = "worker-sending-persist-fail";
+        {
+            let db = get_db();
+            db.execute("DELETE FROM outbound_idempotency WHERE key = ?1", [key])
+                .unwrap();
+        }
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::Inserted
+        ));
+        let config = OutboundConfig {
+            queue_capacity: 1,
+            min_spacing: Duration::ZERO,
+            jitter: Duration::ZERO,
+            task_ttl: Duration::from_secs(60),
+            idempotency_ttl: Duration::from_secs(60),
+            chat_cooldown: Duration::ZERO,
+            hourly_budget: 10_000,
+            daily_budget: 10_000,
+            quiet_start_min: 0,
+            quiet_end_min: 0,
+            read_only: false,
+        };
+        let control = Arc::new(OutboundControl::new(false));
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let usage = Arc::new(Mutex::new(Usage::new()));
+        let worker = tokio::spawn(worker_loop(config, Arc::clone(&control), rx, usage));
+        let (result_tx, result_rx) = oneshot::channel();
+
+        FAIL_SENDING_PERSISTENCE.store(true, Ordering::SeqCst);
+        tx.try_send(OutboundTask {
+            params: test_params("will not execute"),
+            enqueued_at: Instant::now(),
+            idempotency_key: Some(key.to_string()),
+            result_tx,
+        })
+        .unwrap();
+
+        match result_rx.await.unwrap() {
+            OutboundSendResponse::Rejected(error) => {
+                assert_eq!(error.kind, OutboundErrorKind::Persistence);
+                assert!(!error.commit_attempted);
+            }
+            _ => panic!("sending persistence failure must fail closed"),
+        }
+        assert!(control.is_runtime_paused());
+        let record = get_idempotency_status(key).unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert_eq!(
+            record.result.unwrap().error_code.as_deref(),
+            Some("IDEMPOTENCY_RECONCILIATION_REQUIRED")
+        );
+        assert!(matches!(
+            claim_idempotency(key, Duration::from_secs(60)),
+            IdempotencyStart::NeedsReconciliation
+        ));
+        assert!(manually_reconcile_idempotency(key, Duration::from_secs(60)).unwrap());
+        match claim_idempotency(key, Duration::from_secs(60)) {
+            IdempotencyStart::Completed(result) => {
+                assert!(!result.success);
+                assert!(result.commit_attempted);
+            }
+            _ => panic!("manual reconciliation must produce terminal replay"),
+        }
+
+        drop(tx);
+        worker.await.unwrap();
     }
 
     #[tokio::test]
