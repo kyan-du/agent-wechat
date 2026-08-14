@@ -125,3 +125,4 @@ test("sendMessage exposes IDEMPOTENCY_CAPACITY on 429", async () => {
   } finally {
     globalThis.fetch = original;
   }
+});

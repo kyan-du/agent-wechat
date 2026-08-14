@@ -253,7 +253,20 @@ export class WeChatClient {
         // Preserve the ordinary HTTP error contract for malformed responses.
       }
     }
-    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    let errorCode: string | undefined;
+    try {
+      const parsed = JSON.parse(body) as { errorCode?: unknown };
+      if (typeof parsed.errorCode === "string") errorCode = parsed.errorCode;
+    } catch {
+      // Non-JSON error bodies stay generic.
+    }
+    throw new WeChatHttpError(
+      res.status,
+      res.statusText,
+      body,
+      errorCode,
+      parseRetryAfter(res.headers.get("retry-after")),
+    );
   }
 
   // ---- Debug ----
