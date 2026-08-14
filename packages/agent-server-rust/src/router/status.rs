@@ -280,13 +280,21 @@ pub async fn logout() -> Json<serde_json::Value> {
     let plan = LogoutPlan;
     let params = LogoutParams;
     let emit = std::sync::Arc::new(|_event: SubscriptionEvent| {});
-    let (result, _) = run_execution_loop(&plan, &params, &mut context, emit, cancel).await;
-
-    if result.success {
-        // Clear logged_in_user from session
-        let db = get_db();
-        crate::db::queries::update_session_logged_in_user(&db, &session.id, None);
-    }
+    let session_id = session.id.clone();
+    let (result, _) = crate::execution::run_execution_loop_then(
+        &plan,
+        &params,
+        &mut context,
+        emit,
+        cancel,
+        |_context, result| {
+            if result.success {
+                let db = get_db();
+                crate::db::queries::update_session_logged_in_user(&db, &session_id, None);
+            }
+        },
+    )
+    .await;
 
     Json(serde_json::json!({
         "success": result.success,

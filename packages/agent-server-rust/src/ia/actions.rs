@@ -60,21 +60,37 @@ pub fn is_supported_wechat_frame(node: &super::types::A11yNode) -> bool {
     node.role == "frame" && (node.name == "WeChat" || node.name == "Weixin")
 }
 
-/// WeChat/Weixin frame that contains both Log In and Switch Account.
-pub fn find_saved_account_login_frame(a11y: &super::types::A11yNode) -> Option<&super::types::A11yNode> {
-    if is_supported_wechat_frame(a11y)
-        && crate::ia::selectors::query_selector(a11y, SAVED_ACCOUNT_LOGIN_SELECTOR).is_some()
-        && crate::ia::selectors::query_selector(a11y, SWITCH_ACCOUNT_SELECTOR).is_some()
+fn collect_saved_account_login_frames<'a>(
+    node: &'a super::types::A11yNode,
+    out: &mut Vec<&'a super::types::A11yNode>,
+) {
+    if is_supported_wechat_frame(node)
+        && crate::ia::selectors::query_selector(node, SAVED_ACCOUNT_LOGIN_SELECTOR).is_some()
+        && crate::ia::selectors::query_selector(node, SWITCH_ACCOUNT_SELECTOR).is_some()
     {
-        return Some(a11y);
+        out.push(node);
     }
-    let children = a11y.children.as_ref()?;
-    for child in children {
-        if let Some(found) = find_saved_account_login_frame(child) {
-            return Some(found);
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_saved_account_login_frames(child, out);
         }
     }
-    None
+}
+
+/// Unique WeChat/Weixin frame that contains exactly one Log In and one Switch Account.
+pub fn find_saved_account_login_frame(a11y: &super::types::A11yNode) -> Option<&super::types::A11yNode> {
+    let mut frames = Vec::new();
+    collect_saved_account_login_frames(a11y, &mut frames);
+    if frames.len() != 1 {
+        return None;
+    }
+    let frame = frames[0];
+    let logins = crate::ia::selectors::query_selector_all(frame, SAVED_ACCOUNT_LOGIN_SELECTOR);
+    let switches = crate::ia::selectors::query_selector_all(frame, SWITCH_ACCOUNT_SELECTOR);
+    if logins.len() != 1 || switches.len() != 1 {
+        return None;
+    }
+    Some(frame)
 }
 
 /// Click the Log In control inside the paired saved-account frame.

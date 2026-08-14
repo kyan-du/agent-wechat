@@ -2068,7 +2068,7 @@ fn consume_persistence_failure(slot: &OnceLock<Mutex<Option<String>>>, key: &str
 static IDEMPOTENCY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
-fn lock_idempotency_tests() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock_idempotency_tests() -> std::sync::MutexGuard<'static, ()> {
     IDEMPOTENCY_TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

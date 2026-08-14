@@ -102,7 +102,8 @@ mod tests {
 
     static TEST_DB_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
 
-    async fn init_test_server_state() {
+    async fn init_test_server_state() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::outbound::lock_idempotency_tests();
         let db_dir = TEST_DB_DIR.get_or_init(|| tempfile::TempDir::new().unwrap());
         std::env::set_var("AGENT_DB_PATH", db_dir.path().join("agent.db"));
         std::env::set_var("AGENT_WECHAT_TOKEN", "test-token");
@@ -117,6 +118,7 @@ mod tests {
         auth::init_token();
         let _ = crate::db::init_db();
         let _ = crate::sessions::manager::get_or_create_default_session().await;
+        guard
     }
 
     fn authed(method: &str, uri: &str, body: Body) -> Request<Body> {
@@ -148,7 +150,7 @@ mod tests {
 
     #[tokio::test]
     async fn outbound_status_contains_only_redacted_diagnostics() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let response = build_router()
             .oneshot(authed("GET", "/api/status/outbound", Body::empty()))
             .await
@@ -172,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn blank_chat_or_text_is_rejected_before_outbound_execution() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         for (payload, code) in [
             (r#"{"chatId":" ","text":"hello"}"#, "INVALID_CHAT_ID"),
@@ -193,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_outbound_pause_rejects_queued_send_until_explicit_resume() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
 
         let resume = app
@@ -266,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_status_requires_auth_and_redacts_sensitive_payload_data() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         {
             let db = crate::db::get_db();
             db.execute(
@@ -345,7 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_terminal_media_request_replays_before_decode_or_temp_write() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         {
             let db = crate::db::get_db();
@@ -398,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_in_progress_media_request_rejects_before_decode_or_temp_write() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         {
             let db = crate::db::get_db();
@@ -433,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_image_base64_after_claim_is_rejected_and_reclaimable() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         crate::outbound::outbound_sender().resume();
         let app = build_router();
         let key = "media-invalid-image";
@@ -475,7 +477,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_file_base64_after_claim_does_not_leave_queued() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         crate::outbound::outbound_sender().resume();
         let app = build_router();
         let key = "media-invalid-file";
@@ -507,7 +509,7 @@ mod tests {
 
     #[tokio::test]
     async fn temp_file_write_failure_after_claim_is_rejected_and_reclaimable() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         crate::outbound::outbound_sender().resume();
         let app = build_router();
         let key = "media-write-fail";
@@ -551,7 +553,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_and_lookup_reject_invalid_idempotency_keys() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         let response = app
             .clone()
@@ -581,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_reconcile_route_marks_stuck_key_uncertain() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         {
             let db = crate::db::get_db();
@@ -629,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_reconcile_failure_response_and_log_code_are_redacted() {
-        init_test_server_state().await;
+        let _idempotency_lock = init_test_server_state().await;
         let app = build_router();
         let key = "hostile-secret-key";
         {

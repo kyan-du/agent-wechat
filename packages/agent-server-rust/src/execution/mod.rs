@@ -54,6 +54,43 @@ where
     PA: Send,
 {
     let _plan_guard = PLAN_LOCK.lock().await;
+    run_execution_loop_holding_plan_lock(plan, params, context, emit, cancel).await
+}
+
+/// Run a plan and invoke `finish` before releasing GUI ownership.
+pub async fn run_execution_loop_then<P, PS, PA, F>(
+    plan: &P,
+    params: &PA,
+    context: &mut Context,
+    emit: std::sync::Arc<dyn Fn(SubscriptionEvent) + Send + Sync>,
+    cancel: CancellationToken,
+    finish: F,
+) -> (ExecutionResult, PS)
+where
+    P: crate::plans::Plan<PlanState = PS, Params = PA>,
+    PS: Send,
+    PA: Send,
+    F: FnOnce(&mut Context, &ExecutionResult),
+{
+    let _plan_guard = PLAN_LOCK.lock().await;
+    let (result, plan_state) =
+        run_execution_loop_holding_plan_lock(plan, params, context, emit, cancel).await;
+    finish(context, &result);
+    (result, plan_state)
+}
+
+async fn run_execution_loop_holding_plan_lock<P, PS, PA>(
+    plan: &P,
+    params: &PA,
+    context: &mut Context,
+    emit: std::sync::Arc<dyn Fn(SubscriptionEvent) + Send + Sync>,
+    cancel: CancellationToken,
+) -> (ExecutionResult, PS)
+where
+    P: crate::plans::Plan<PlanState = PS, Params = PA>,
+    PS: Send,
+    PA: Send,
+{
 
     // Pause health monitoring while an execution loop is active
     crate::sessions::health_monitor::pause_monitoring();

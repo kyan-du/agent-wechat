@@ -591,6 +591,25 @@ mod tests {
     }
 
     #[test]
+    fn logout_must_clear_saved_user_before_releasing_plan_lock() {
+        // LogoutPlan succeeds when the UI is already login_account.
+        // If logged_in_user is still Some when PLAN_LOCK drops, auto-resume clicks.
+        let policy = LoginResumePolicy::default();
+        let now = Instant::now();
+        let after_plan_before_clear = bare_login(true);
+        assert_eq!(
+            policy.decide(&after_plan_before_clear, now),
+            ResumeDecision::Click
+        );
+        let after_clear_under_lock = bare_login(false);
+        assert_eq!(
+            policy.decide(&after_clear_under_lock, now),
+            ResumeDecision::Skip
+        );
+        assert_eq!(policy.clicks, 0);
+    }
+
+    #[test]
     fn from_identified_maps_ordinary_overlays() {
         let popup = LoginResumeSnapshot::from_identified(
             &identified(Some("login_account"), Some("popup_confirm"), false, false),

@@ -348,6 +348,48 @@ mod tests {
     }
 
     #[test]
+    fn two_paired_wechat_frames_are_ambiguous_and_not_identified() {
+        let one = node(
+            "frame",
+            "WeChat",
+            Some(vec![
+                node("push-button", "Log In", None),
+                node("push-button", "Switch Account", None),
+            ]),
+        );
+        let two = node(
+            "frame",
+            "Weixin",
+            Some(vec![
+                node("push-button", "Log In", None),
+                node("push-button", "Switch Account", None),
+            ]),
+        );
+        let tree = node("desktop-frame", "main", Some(vec![one, two]));
+        assert_ne!(identified_main_id(&tree).as_deref(), Some("login_account"));
+        assert!(saved_account_login_click(&tree).is_none());
+    }
+
+    #[test]
+    fn duplicate_login_controls_in_one_frame_fail_closed() {
+        let tree = node(
+            "desktop-frame",
+            "main",
+            Some(vec![node(
+                "frame",
+                "WeChat",
+                Some(vec![
+                    node("push-button", "Log In", None),
+                    node("push-button", "Open WeChat", None),
+                    node("push-button", "Switch Account", None),
+                ]),
+            )]),
+        );
+        assert_ne!(identified_main_id(&tree).as_deref(), Some("login_account"));
+        assert!(saved_account_login_click(&tree).is_none());
+    }
+
+    #[test]
     fn paired_wechat_controls_win_over_earlier_ghost_log_in() {
         let tree = ghost_then_wechat_tree(true, true, true);
         let states = identify_states(&tree, "");
