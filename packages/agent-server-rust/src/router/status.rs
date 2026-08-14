@@ -279,8 +279,8 @@ pub async fn logout() -> Json<serde_json::Value> {
     let cancel = CancellationToken::new();
     let plan = LogoutPlan;
     let params = LogoutParams;
-    let emit = |_event: SubscriptionEvent| {};
-    let (result, _) = run_execution_loop(&plan, &params, &mut context, &emit, cancel).await;
+    let emit = std::sync::Arc::new(|_event: SubscriptionEvent| {});
+    let (result, _) = run_execution_loop(&plan, &params, &mut context, emit, cancel).await;
 
     if result.success {
         // Clear logged_in_user from session
@@ -376,10 +376,10 @@ async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
             create_context(session, &db)
         };
         let plan = LoginPlan;
-        let emit = move |event: SubscriptionEvent| {
+        let emit = std::sync::Arc::new(move |event: SubscriptionEvent| {
             let _ = tx.send(event);
-        };
-        run_execution_loop(&plan, &login_params, &mut context, &emit, cancel_for_exec)
+        });
+        run_execution_loop(&plan, &login_params, &mut context, emit, cancel_for_exec)
             .await
             .0
     });

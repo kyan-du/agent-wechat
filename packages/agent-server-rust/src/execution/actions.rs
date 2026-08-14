@@ -117,6 +117,60 @@ pub fn execute_action<'a>(
     execute_action_inner(action, frame, options, a11y, emit, None)
 }
 
+const DRAFT_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// GUI actions run on a dedicated runtime so cancellation cleanup and commit
+/// observation survive teardown of the request/server runtime.
+fn action_supervisor_handle() -> &'static tokio::runtime::Handle {
+    static HANDLE: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+    HANDLE.get_or_init(|| {
+        let (handle_tx, handle_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("action-supervisor".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("action supervisor runtime");
+                handle_tx
+                    .send(runtime.handle().clone())
+                    .expect("publish action supervisor handle");
+                runtime.block_on(std::future::pending::<()>());
+            })
+            .expect("spawn action supervisor");
+        handle_rx.recv().expect("action supervisor startup")
+    })
+}
+
+struct ActionCompletion {
+    done: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl ActionCompletion {
+    fn new() -> Self {
+        Self {
+            done: std::sync::Mutex::new(false),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn complete(&self) {
+        *self.done.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|error| error.into_inner());
+        while !*done {
+            done = self
+                .changed
+                .wait(done)
+                .unwrap_or_else(|error| error.into_inner());
+        }
+    }
+}
+
 pub async fn execute_action_supervised(
     action: Action,
     frame: Option<FrameHint>,
@@ -126,29 +180,49 @@ pub async fn execute_action_supervised(
     cancel: CancellationToken,
 ) -> ActionExecutionResult {
     let action_cancel = cancel.child_token();
-    let action_task = tokio::spawn(execute_action_owned(
-        action,
-        frame,
-        options,
-        a11y,
-        emit,
-        action_cancel.clone(),
-    ));
-    struct CancelOnDrop(CancellationToken);
-    impl Drop for CancelOnDrop {
+    let completion = Arc::new(ActionCompletion::new());
+    let task_completion = completion.clone();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    action_supervisor_handle().spawn(async move {
+        struct CompleteOnDrop(Arc<ActionCompletion>);
+        impl Drop for CompleteOnDrop {
+            fn drop(&mut self) {
+                self.0.complete();
+            }
+        }
+        let _completion_guard = CompleteOnDrop(task_completion);
+        let result = execute_action_owned(action, frame, options, a11y, emit, action_cancel).await;
+        let _ = result_tx.send(result);
+    });
+
+    struct CancelAndDrainOnDrop {
+        cancel: CancellationToken,
+        completion: Arc<ActionCompletion>,
+        armed: bool,
+    }
+    impl Drop for CancelAndDrainOnDrop {
         fn drop(&mut self) {
-            self.0.cancel();
+            if self.armed {
+                self.cancel.cancel();
+                self.completion.wait();
+            }
         }
     }
-    let _guard = CancelOnDrop(action_cancel);
-    match action_task.await {
-        Ok(result) => result,
-        Err(_) => Err(ActionExecutionError {
+
+    let mut guard = CancelAndDrainOnDrop {
+        cancel,
+        completion,
+        armed: true,
+    };
+    let result = result_rx.await.unwrap_or_else(|_| {
+        Err(ActionExecutionError {
             diagnostic: "action_supervisor_failed",
             commit_attempted: false,
             detail: "action supervisor terminated unexpectedly".to_string(),
-        }),
-    }
+        })
+    });
+    guard.armed = false;
+    result
 }
 
 async fn execute_action_owned(
@@ -343,20 +417,24 @@ fn execute_action_inner<'a>(
                         Ok(attempted) => commit_attempted |= attempted,
                         Err(error) => {
                             if !commit_attempted && !error.commit_attempted {
-                                for cleanup_action in cleanup {
-                                    if execute_action_inner(
-                                        cleanup_action,
-                                        frame,
-                                        options,
-                                        a11y,
-                                        emit,
-                                        None,
-                                    )
-                                    .await
-                                    .is_err()
-                                    {
-                                        return Err(draft_cleanup_error());
-                                    }
+                                let cleanup_result =
+                                    tokio::time::timeout(DRAFT_CLEANUP_TIMEOUT, async {
+                                        for cleanup_action in cleanup {
+                                            execute_action_inner(
+                                                cleanup_action,
+                                                frame,
+                                                options,
+                                                a11y,
+                                                emit,
+                                                None,
+                                            )
+                                            .await?;
+                                        }
+                                        Ok::<(), ActionExecutionError>(())
+                                    })
+                                    .await;
+                                if !matches!(cleanup_result, Ok(Ok(()))) {
+                                    return Err(draft_cleanup_error());
                                 }
                             }
                             return Err(error);
@@ -747,6 +825,98 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_thread_runtime_drop_waits_for_pre_commit_cleanup() {
+        let _path_guard = PATH_LOCK.blocking_lock();
+        let dir = TempDir::new().unwrap();
+        let input_started = dir.path().join("input-started");
+        let cleanup_log = dir.path().join("cleanup.log");
+        write_tool(
+            &dir,
+            "input",
+            &format!("touch '{}'; sleep 30", input_started.display()),
+        );
+        write_tool(
+            &dir,
+            "key",
+            &format!("echo \"$1\" >> '{}'", cleanup_log.display()),
+        );
+        let old_path = with_test_path(&dir);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let supervisor = tokio::spawn(execute_action_supervised(
+                Action::PreCommitSequence {
+                    actions: vec![Action::Type {
+                        text: "first chunk".to_string(),
+                        selector: None,
+                    }],
+                    cleanup: vec![
+                        Action::Key {
+                            combo: "ctrl+a".to_string(),
+                        },
+                        Action::Key {
+                            combo: "BackSpace".to_string(),
+                        },
+                    ],
+                },
+                None,
+                ExecOptions::default(),
+                empty_a11y(),
+                Arc::new(|_| {}),
+                CancellationToken::new(),
+            ));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !input_started.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(input_started.exists(), "first chunk did not start");
+            supervisor.abort();
+        });
+        drop(runtime);
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(
+            fs::read_to_string(cleanup_log).unwrap(),
+            "ctrl+a\nBackSpace\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_sequence_emits_each_event_once() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let event = SubscriptionEvent {
+            event_type: "status".to_string(),
+            data: std::collections::HashMap::new(),
+        };
+        let result = execute_action_supervised(
+            Action::Sequence {
+                actions: vec![Action::Emit {
+                    event: event.clone(),
+                }],
+            },
+            None,
+            ExecOptions::default(),
+            empty_a11y(),
+            Arc::new(move |event| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(event);
+            }),
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), false);
+        let events = events.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, event.event_type);
+    }
+
     #[tokio::test]
     async fn cancellation_cleanup_failure_is_fail_closed() {
         let _path_guard = PATH_LOCK.lock().await;
@@ -852,6 +1022,73 @@ mod tests {
         supervisor.abort();
         let _ = supervisor.await;
         std::env::set_var("PATH", old_path);
+    }
+
+    #[test]
+    fn current_thread_runtime_drop_waits_for_commit_outcome_without_cleanup() {
+        let _path_guard = PATH_LOCK.blocking_lock();
+        let dir = TempDir::new().unwrap();
+        let commit_started = dir.path().join("commit-started");
+        let commit_done = dir.path().join("commit-done");
+        let cleanup_log = dir.path().join("cleanup.log");
+        write_tool(&dir, "input", "exit 0");
+        write_tool(
+            &dir,
+            "key",
+            &format!(
+                "if [ \"$1\" = Return ]; then touch '{}'; sleep 0.2; touch '{}'; exit 26; else echo \"$1\" >> '{}'; fi",
+                commit_started.display(),
+                commit_done.display(),
+                cleanup_log.display()
+            ),
+        );
+        let old_path = with_test_path(&dir);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let supervisor = tokio::spawn(execute_action_supervised(
+                Action::PreCommitSequence {
+                    actions: vec![
+                        Action::Type {
+                            text: "complete draft".to_string(),
+                            selector: None,
+                        },
+                        Action::CommitKey {
+                            combo: "Return".to_string(),
+                        },
+                    ],
+                    cleanup: vec![
+                        Action::Key {
+                            combo: "ctrl+a".to_string(),
+                        },
+                        Action::Key {
+                            combo: "BackSpace".to_string(),
+                        },
+                    ],
+                },
+                None,
+                ExecOptions::default(),
+                empty_a11y(),
+                Arc::new(|_| {}),
+                CancellationToken::new(),
+            ));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !commit_started.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(commit_started.exists(), "commit did not start");
+            supervisor.abort();
+        });
+        drop(runtime);
+        std::env::set_var("PATH", old_path);
+
+        assert!(
+            commit_done.exists(),
+            "runtime drop cancelled the commit outcome"
+        );
+        assert!(!cleanup_log.exists(), "cleanup ran after commit started");
     }
 
     #[tokio::test]

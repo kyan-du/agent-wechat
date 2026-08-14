@@ -203,12 +203,12 @@ pub async fn open_chat(
         clear_unreads,
     };
     let cancel = CancellationToken::new();
-    let noop_emit = |_: SubscriptionEvent| {};
+    let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
 
-    let (_result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
+    let (result, plan_state) =
+        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await;
 
-    if _result.success {
+    if result.success {
         if let Some(open_result) = plan_state.result {
             Json(
                 serde_json::to_value(open_result)

@@ -1290,9 +1290,9 @@ async fn execute_send(params: &SendMessageParams) -> SendResult {
 
     let plan = SendMessagePlan;
     let cancel = CancellationToken::new();
-    let noop_emit = |_: SubscriptionEvent| {};
+    let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
     let (result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, &noop_emit, cancel).await;
+        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await;
     send_result_from_plan(result.success, &plan_state, result.error)
 }
 

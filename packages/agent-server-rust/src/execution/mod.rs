@@ -39,7 +39,7 @@ pub async fn run_execution_loop<P, PS, PA>(
     plan: &P,
     params: &PA,
     context: &mut Context,
-    emit: &(dyn Fn(SubscriptionEvent) + Send + Sync),
+    emit: std::sync::Arc<dyn Fn(SubscriptionEvent) + Send + Sync>,
     cancel: CancellationToken,
 ) -> (ExecutionResult, PS)
 where
@@ -250,13 +250,12 @@ where
 
         // 7. EXECUTE: run the action (emits fire inline via callback)
         if let Some(sel) = &selected {
-            let action_emit: actions::ActionEmitter = std::sync::Arc::new(|_| {});
             let action_result = actions::execute_action_supervised(
                 sel.action.clone(),
                 sel.frame.clone(),
                 exec_options.clone(),
                 a11y.clone(),
-                action_emit,
+                emit.clone(),
                 cancel.child_token(),
             )
             .await;
