@@ -63,6 +63,18 @@ class ChatSelectDiagnosticsTests(unittest.TestCase):
         self.assertTrue(chat_select._DIAGNOSTICS["used_frida"])
         self.assertEqual(chat_select._DIAGNOSTICS["frida_attach_count"], 1)
 
+    @mock.patch.object(chat_select, "read_lines_until", side_effect=OSError("SUPER_SECRET reader"))
+    @mock.patch.object(chat_select.subprocess, "Popen")
+    def test_background_readiness_error_always_detaches(self, popen, _read):
+        proc = FakeProcess()
+        popen.return_value = proc
+        with self.assertRaises(chat_select.FridaError) as caught:
+            chat_select.run_frida_bg("123", "/tmp/private.js")
+        self.assertEqual(caught.exception.code, "FRIDA_ATTACH_FAILED")
+        self.assertEqual(str(caught.exception), "Frida readiness check failed")
+        self.assertTrue(proc.terminated)
+        self.assertNotIn("SECRET", str(caught.exception))
+
     @mock.patch.object(
         chat_select.subprocess,
         "Popen",

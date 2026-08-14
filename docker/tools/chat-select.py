@@ -358,13 +358,18 @@ def run_frida_bg(pid, script_path):
         )
     except OSError as exc:
         raise FridaError("FRIDA_ATTACH_FAILED", "Frida could not start") from exc
-    lines = read_lines_until(proc, FRIDA_READY_TIMEOUT, stop_on="READY")
-    if any("Failed to attach" in line or "Unable to attach" in line for line in lines):
+    try:
+        lines = read_lines_until(proc, FRIDA_READY_TIMEOUT, stop_on="READY")
+        if any("Failed to attach" in line or "Unable to attach" in line for line in lines):
+            raise FridaError("FRIDA_ATTACH_FAILED", "Frida attach failed")
+        if not any("READY" in line for line in lines):
+            raise FridaError("FRIDA_ATTACH_TIMEOUT", "Frida hook readiness timed out")
+    except FridaError:
         kill_frida(proc)
-        raise FridaError("FRIDA_ATTACH_FAILED", "Frida attach failed")
-    if not any("READY" in line for line in lines):
+        raise
+    except (OSError, ValueError) as exc:
         kill_frida(proc)
-        raise FridaError("FRIDA_ATTACH_TIMEOUT", "Frida hook readiness timed out")
+        raise FridaError("FRIDA_ATTACH_FAILED", "Frida readiness check failed") from exc
     return proc
 
 
