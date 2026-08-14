@@ -400,10 +400,14 @@ fn execute_action_inner<'a>(
             Action::PreCommitSequence { actions, cleanup } => {
                 let mut commit_attempted = false;
                 for action in actions {
-                    // Once commit execution starts, cancellation can no longer prove that the
-                    // send key was not delivered, so it must run to an observed outcome.
+                    // Recheck cancellation at the irreversible boundary. Once this check
+                    // passes and commit execution starts, it must run to an observed outcome.
                     let action_result = if matches!(action, Action::CommitKey { .. }) {
-                        execute_action_inner(action, frame, options, a11y, emit, None).await
+                        if cancel.is_some_and(CancellationToken::is_cancelled) {
+                            Err(cancellation_error())
+                        } else {
+                            execute_action_inner(action, frame, options, a11y, emit, None).await
+                        }
                     } else if let Some(cancel) = cancel {
                         tokio::select! {
                             biased;
@@ -956,6 +960,164 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
             .await
             .expect("owned action did not report cleanup failure")
+            .unwrap();
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(result.unwrap_err().diagnostic, "draft_cleanup_failed");
+    }
+
+    #[tokio::test]
+    async fn cancellation_in_gap_before_commit_cleans_without_return() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let key_log = dir.path().join("keys.log");
+        write_tool(
+            &dir,
+            "key",
+            &format!("echo \"$1\" >> '{}'", key_log.display()),
+        );
+        let old_path = with_test_path(&dir);
+        let cancel = CancellationToken::new();
+        let cancel_from_emit = cancel.clone();
+        let result = execute_action_supervised(
+            Action::PreCommitSequence {
+                actions: vec![
+                    Action::Emit {
+                        event: SubscriptionEvent {
+                            event_type: "cancel-before-commit".to_string(),
+                            data: std::collections::HashMap::new(),
+                        },
+                    },
+                    Action::CommitKey {
+                        combo: "Return".to_string(),
+                    },
+                ],
+                cleanup: vec![
+                    Action::Key {
+                        combo: "ctrl+a".to_string(),
+                    },
+                    Action::Key {
+                        combo: "BackSpace".to_string(),
+                    },
+                ],
+            },
+            None,
+            ExecOptions::default(),
+            empty_a11y(),
+            Arc::new(move |_| cancel_from_emit.cancel()),
+            cancel,
+        )
+        .await;
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(result.unwrap_err().diagnostic, "execution_cancelled");
+        assert_eq!(fs::read_to_string(key_log).unwrap(), "ctrl+a\nBackSpace\n");
+    }
+
+    #[tokio::test]
+    async fn media_cancellation_after_paste_cleans_before_return() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let paste_started = dir.path().join("paste-started");
+        let key_log = dir.path().join("keys.log");
+        write_tool(
+            &dir,
+            "paste-file",
+            &format!("touch '{}'", paste_started.display()),
+        );
+        write_tool(
+            &dir,
+            "key",
+            &format!("echo \"$1\" >> '{}'", key_log.display()),
+        );
+        let old_path = with_test_path(&dir);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(execute_action_supervised(
+            Action::PreCommitSequence {
+                actions: vec![
+                    Action::PasteFile {
+                        path: "/tmp/file".to_string(),
+                    },
+                    Action::Wait { ms: 30_000 },
+                    Action::CommitKey {
+                        combo: "Return".to_string(),
+                    },
+                ],
+                cleanup: vec![
+                    Action::Key {
+                        combo: "ctrl+a".to_string(),
+                    },
+                    Action::Key {
+                        combo: "BackSpace".to_string(),
+                    },
+                ],
+            },
+            None,
+            ExecOptions::default(),
+            empty_a11y(),
+            Arc::new(|_| {}),
+            cancel.clone(),
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !paste_started.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(paste_started.exists(), "media paste did not start");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("media cleanup did not complete")
+            .unwrap();
+        std::env::set_var("PATH", old_path);
+
+        assert_eq!(result.unwrap_err().diagnostic, "execution_cancelled");
+        assert_eq!(fs::read_to_string(key_log).unwrap(), "ctrl+a\nBackSpace\n");
+    }
+
+    #[tokio::test]
+    async fn media_cancellation_cleanup_failure_is_fail_closed() {
+        let _path_guard = PATH_LOCK.lock().await;
+        let dir = TempDir::new().unwrap();
+        let paste_started = dir.path().join("paste-started");
+        write_tool(
+            &dir,
+            "paste-image",
+            &format!("touch '{}'", paste_started.display()),
+        );
+        write_tool(&dir, "key", "exit 25");
+        let old_path = with_test_path(&dir);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(execute_action_supervised(
+            Action::PreCommitSequence {
+                actions: vec![
+                    Action::PasteImage {
+                        path: "/tmp/image".to_string(),
+                        mime: Some("image/png".to_string()),
+                    },
+                    Action::Wait { ms: 30_000 },
+                    Action::CommitKey {
+                        combo: "Return".to_string(),
+                    },
+                ],
+                cleanup: vec![Action::Key {
+                    combo: "ctrl+a".to_string(),
+                }],
+            },
+            None,
+            ExecOptions::default(),
+            empty_a11y(),
+            Arc::new(|_| {}),
+            cancel.clone(),
+        ));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !paste_started.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(paste_started.exists(), "media paste did not start");
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("media cleanup failure was not reported")
             .unwrap();
         std::env::set_var("PATH", old_path);
 

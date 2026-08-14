@@ -146,7 +146,28 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
     ))
 }
 
-pub async fn send_message(Json(input): Json<SendParams>) -> OutboundSendResponse {
+pub async fn send_message(Json(mut input): Json<SendParams>) -> OutboundSendResponse {
+    input.chat_id = input.chat_id.trim().to_string();
+    if input.chat_id.is_empty() {
+        return OutboundSendResponse::Result(SendResult {
+            success: false,
+            error_code: Some("INVALID_CHAT_ID".to_string()),
+            error: Some("chatId must contain non-whitespace characters".to_string()),
+            commit_attempted: false,
+        });
+    }
+    if let Some(text) = input.text.as_mut() {
+        *text = text.trim().to_string();
+        if text.is_empty() {
+            return OutboundSendResponse::Result(SendResult {
+                success: false,
+                error_code: Some("INVALID_TEXT".to_string()),
+                error: Some("text must contain non-whitespace characters".to_string()),
+                commit_attempted: false,
+            });
+        }
+    }
+
     if input.source.as_deref().is_some_and(|source| {
         source.is_empty()
             || source.len() > 64

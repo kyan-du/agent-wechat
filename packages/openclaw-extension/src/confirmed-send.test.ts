@@ -11,10 +11,17 @@ test("OpenClaw confirmation path refuses an ordinary unconfirmed call", () => {
 
 test("OpenClaw sets similarity confirmation only after explicit confirmation", () => {
   const params = buildOpenClawConfirmedSend({
-    chatId: "chat",
-    text: "reviewed",
+    chatId: " chat ",
+    text: " reviewed ",
     confirmed: true,
   });
   assert.equal(params?.similarityConfirmed, true);
   assert.equal(params?.source, "openclaw");
+  assert.equal(params?.chatId, "chat");
+  assert.equal(params?.text, "reviewed");
+});
+
+test("OpenClaw confirmed path rejects blank recipient or text", () => {
+  assert.equal(buildOpenClawConfirmedSend({ chatId: " ", text: "hello", confirmed: true }), null);
+  assert.equal(buildOpenClawConfirmedSend({ chatId: "chat", text: "\n", confirmed: true }), null);
 });

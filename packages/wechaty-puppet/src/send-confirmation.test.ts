@@ -7,5 +7,13 @@ test('normal Wechaty sends never confirm similar content automatically', () => {
 })
 
 test('Wechaty confirmation flag requires the explicit confirmed path', () => {
-  assert.equal(buildWechatyTextSend('chat', 'text', true).similarityConfirmed, true)
+  const params = buildWechatyTextSend(' chat ', ' text ', true)
+  assert.equal(params.similarityConfirmed, true)
+  assert.equal(params.chatId, 'chat')
+  assert.equal(params.text, 'text')
+})
+
+test('Wechaty rejects blank recipients or text', () => {
+  assert.throws(() => buildWechatyTextSend(' ', 'text'), /chatId/)
+  assert.throws(() => buildWechatyTextSend('chat', '\n'), /text/)
 })

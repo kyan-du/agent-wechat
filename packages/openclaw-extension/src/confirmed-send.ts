@@ -6,9 +6,12 @@ export function buildOpenClawConfirmedSend(params: {
   confirmed: boolean;
 }): SendParams | null {
   if (params.confirmed !== true) return null;
+  const chatId = params.chatId.trim();
+  const text = params.text.trim();
+  if (!chatId || !text) return null;
   return {
-    chatId: params.chatId,
-    text: params.text,
+    chatId,
+    text,
     source: "openclaw",
     similarityConfirmed: true,
   };

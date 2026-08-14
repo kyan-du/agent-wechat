@@ -16,3 +16,12 @@ test("similarity confirmation is set only by the explicit CLI flag", () => {
   });
   assert.equal(params.similarityConfirmed, true);
 });
+
+test("CLI trims valid fields and rejects blank recipients or text", () => {
+  assert.deepEqual(
+    buildCliSendParams({ chatId: " chat ", text: " hello " }),
+    { chatId: "chat", text: "hello", source: "cli" },
+  );
+  assert.throws(() => buildCliSendParams({ chatId: " ", text: "hello" }), /chatId/);
+  assert.throws(() => buildCliSendParams({ chatId: "chat", text: " \n " }), /text/);
+});

@@ -5,9 +5,13 @@ export function buildWechatyTextSend(
   text: string,
   explicitlyConfirmed: boolean = false,
 ): SendParams {
+  const normalizedChatId = chatId.trim()
+  const normalizedText = text.trim()
+  if (!normalizedChatId) throw new Error('chatId must contain non-whitespace characters')
+  if (!normalizedText) throw new Error('text must contain non-whitespace characters')
   return {
-    chatId,
-    text,
+    chatId: normalizedChatId,
+    text: normalizedText,
     source: 'wechaty',
     ...(explicitlyConfirmed ? { similarityConfirmed: true } : {}),
   }

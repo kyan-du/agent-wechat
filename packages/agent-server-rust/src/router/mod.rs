@@ -171,6 +171,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blank_chat_or_text_is_rejected_before_outbound_execution() {
+        init_test_server_state().await;
+        let app = build_router();
+        for (payload, code) in [
+            (r#"{"chatId":" ","text":"hello"}"#, "INVALID_CHAT_ID"),
+            (r#"{"chatId":"chat","text":" \n\t "}"#, "INVALID_TEXT"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(authed("POST", "/api/messages/send", Body::from(payload)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_response(response).await;
+            assert_eq!(body["success"], false);
+            assert_eq!(body["errorCode"], code);
+            assert_eq!(body["commitAttempted"], false);
+        }
+    }
+
+    #[tokio::test]
     async fn authenticated_outbound_pause_rejects_queued_send_until_explicit_resume() {
         init_test_server_state().await;
         let app = build_router();

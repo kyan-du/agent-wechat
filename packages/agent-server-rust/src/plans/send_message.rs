@@ -244,6 +244,19 @@ impl Plan for SendMessagePlan {
         a11y: &A11yNode,
         _session_id: &str,
     ) -> Option<SelectedAction> {
+        if params.chat_id.trim().is_empty() {
+            plan_state.diagnostic_error = Some("invalid_chat_id".to_string());
+            return None;
+        }
+        if params
+            .message
+            .as_deref()
+            .is_some_and(|text| text.trim().is_empty())
+        {
+            plan_state.diagnostic_error = Some("invalid_text".to_string());
+            return None;
+        }
+
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
         // Security popups freeze outbound; do not click them away.
@@ -400,15 +413,29 @@ impl Plan for SendMessagePlan {
 
                     let beat = 400 + (actions::next_jitter() % 500) as u64;
 
+                    let cleanup = || {
+                        vec![
+                            Action::Key {
+                                combo: "ctrl+a".to_string(),
+                            },
+                            Action::Key {
+                                combo: "BackSpace".to_string(),
+                            },
+                        ]
+                    };
+
                     if let Some(fp) = &params.file_path {
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::PasteFile { path: fp.clone() },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: Action::PreCommitSequence {
+                                actions: vec![
+                                    Action::PasteFile { path: fp.clone() },
+                                    Action::Wait { ms: beat },
+                                    Action::CommitKey {
+                                        combo: "Return".to_string(),
+                                    },
+                                ],
+                                cleanup: cleanup(),
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -418,16 +445,19 @@ impl Plan for SendMessagePlan {
 
                     if let Some(ip) = &params.image_path {
                         return Some(SelectedAction {
-                            action: actions::sequence(vec![
-                                Action::PasteImage {
-                                    path: ip.clone(),
-                                    mime: params.image_mime.clone(),
-                                },
-                                Action::Wait { ms: beat },
-                                Action::CommitKey {
-                                    combo: "Return".to_string(),
-                                },
-                            ]),
+                            action: Action::PreCommitSequence {
+                                actions: vec![
+                                    Action::PasteImage {
+                                        path: ip.clone(),
+                                        mime: params.image_mime.clone(),
+                                    },
+                                    Action::Wait { ms: beat },
+                                    Action::CommitKey {
+                                        combo: "Return".to_string(),
+                                    },
+                                ],
+                                cleanup: cleanup(),
+                            },
                             frame: identified
                                 .main_window
                                 .as_ref()
@@ -471,14 +501,7 @@ impl Plan for SendMessagePlan {
                         return Some(SelectedAction {
                             action: Action::PreCommitSequence {
                                 actions: input,
-                                cleanup: vec![
-                                    Action::Key {
-                                        combo: "ctrl+a".to_string(),
-                                    },
-                                    Action::Key {
-                                        combo: "BackSpace".to_string(),
-                                    },
-                                ],
+                                cleanup: cleanup(),
                             },
                             frame: identified
                                 .main_window
@@ -558,6 +581,58 @@ mod tests {
             duration_ms: Some(0),
             error_code: None,
             error: None,
+        }
+    }
+
+    fn blank_params(chat_id: &str, message: Option<&str>) -> SendMessageParams {
+        SendMessageParams {
+            chat_id: chat_id.to_string(),
+            message: message.map(str::to_string),
+            image_path: None,
+            image_mime: None,
+            file_path: None,
+            inbound_chars: None,
+            source: None,
+            similarity_confirmed: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn blank_chat_or_text_never_selects_an_action() {
+        let state = AppState::default();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: None,
+            contact_card: None,
+            settings: None,
+        };
+        let a11y = A11yNode {
+            role: "desktop".to_string(),
+            name: String::new(),
+            bounds: None,
+            children: None,
+            parent_index: None,
+            window: None,
+            states: None,
+        };
+        for (params, expected) in [
+            (blank_params(" ", Some("hello")), "invalid_chat_id"),
+            (blank_params("chat", Some(" \n ")), "invalid_text"),
+        ] {
+            let mut plan_state = SendMessagePlan.initial_plan_state();
+            let selected = SendMessagePlan
+                .select_action(
+                    &state,
+                    &params,
+                    &identified,
+                    &mut plan_state,
+                    &a11y,
+                    "default",
+                )
+                .await;
+            assert!(selected.is_none());
+            assert_eq!(plan_state.diagnostic_error.as_deref(), Some(expected));
+            assert!(!plan_state.send_action_executed);
         }
     }
 
