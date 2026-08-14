@@ -304,6 +304,95 @@ pub fn mark_outbound_queued_needs_reconciliation(
     )
 }
 
+pub fn mark_outbound_sending_needs_reconciliation(
+    conn: &Connection,
+    key: &str,
+    generation: i64,
+    error_code: &str,
+    ttl: std::time::Duration,
+) -> rusqlite::Result<usize> {
+    let now = sqlite_now();
+    let expires_at = datetime_after_ms(ttl.as_millis().min(i64::MAX as u128) as i64);
+    conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = 'needs_reconciliation',
+             result_success = 0,
+             error_code = ?3,
+             error = ?3,
+             commit_attempted = 1,
+             expires_at = ?4,
+             updated_at = ?5,
+             completed_at = ?5
+         WHERE key = ?1
+           AND generation = ?2
+           AND state = 'sending'",
+        params![key, generation, error_code, expires_at, now],
+    )
+}
+
+/// Delete terminal rows that are past their replay window, then evict the
+/// oldest expired/rejected (and past-TTL sent/failed) rows down to `max_rows`.
+/// Never deletes queued, sending, uncertain, or needs_reconciliation evidence.
+pub fn sweep_outbound_idempotency(conn: &Connection, max_rows: usize) -> rusqlite::Result<usize> {
+    let now = sqlite_now();
+    let mut deleted = conn.execute(
+        "DELETE FROM outbound_idempotency
+         WHERE state IN ('expired', 'rejected')
+           AND julianday(expires_at) <= julianday(?1)",
+        params![now],
+    )?;
+    conn.execute(
+        "UPDATE outbound_idempotency
+         SET state = 'expired',
+             result_success = 0,
+             error_code = 'IDEMPOTENCY_EXPIRED',
+             error = 'IDEMPOTENCY_EXPIRED',
+             commit_attempted = 0,
+             updated_at = ?1,
+             completed_at = ?1
+         WHERE state IN ('sent', 'failed')
+           AND julianday(expires_at) <= julianday(?1)",
+        params![now],
+    )?;
+    deleted += conn.execute(
+        "DELETE FROM outbound_idempotency
+         WHERE state = 'expired'
+           AND julianday(expires_at) <= julianday(?1)",
+        params![now],
+    )?;
+
+    let count = count_outbound_idempotency(conn);
+    if count > max_rows {
+        let excess = (count - max_rows) as i64;
+        deleted += conn.execute(
+            "DELETE FROM outbound_idempotency
+             WHERE key IN (
+                SELECT key FROM outbound_idempotency
+                WHERE state IN ('expired', 'rejected')
+                ORDER BY updated_at ASC
+                LIMIT ?1
+             )",
+            params![excess],
+        )?;
+    }
+    let count = count_outbound_idempotency(conn);
+    if count > max_rows {
+        let excess = (count - max_rows) as i64;
+        deleted += conn.execute(
+            "DELETE FROM outbound_idempotency
+             WHERE key IN (
+                SELECT key FROM outbound_idempotency
+                WHERE state IN ('sent', 'failed')
+                  AND julianday(expires_at) <= julianday(?2)
+                ORDER BY updated_at ASC
+                LIMIT ?1
+             )",
+            params![excess, now],
+        )?;
+    }
+    Ok(deleted)
+}
+
 pub fn reconcile_outbound_idempotency(
     conn: &Connection,
     key: &str,
@@ -743,6 +832,148 @@ mod tests {
                 .state,
             OutboundIdempotencyState::Queued
         );
+    }
+
+    fn insert_state(conn: &Connection, key: &str, state: &str, expires_at: &str) {
+        conn.execute(
+            "INSERT INTO outbound_idempotency
+                (key, state, result_success, error_code, error, commit_attempted, expires_at, created_at, updated_at, completed_at, generation)
+             VALUES (?1, ?2, 0, 'X', 'X', 0, ?3, ?3, ?3, ?3, 1)",
+            params![key, state, expires_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sending_reconciliation_cas_only_matches_sending_generation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sending-recon.db");
+        let conn = open_test_conn(&path);
+        let generation = insert_outbound_queued(&conn, "send-lease", Duration::from_secs(60))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            mark_outbound_sending_needs_reconciliation(
+                &conn,
+                "send-lease",
+                generation,
+                "IDEMPOTENCY_SENDING_DROPPED",
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+            0
+        );
+        assert!(mark_outbound_sending(&conn, "send-lease", generation).unwrap());
+        assert_eq!(
+            mark_outbound_sending_needs_reconciliation(
+                &conn,
+                "send-lease",
+                generation + 1,
+                "IDEMPOTENCY_SENDING_DROPPED",
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            get_outbound_idempotency(&conn, "send-lease")
+                .unwrap()
+                .unwrap()
+                .state,
+            OutboundIdempotencyState::Sending
+        );
+        assert_eq!(
+            mark_outbound_sending_needs_reconciliation(
+                &conn,
+                "send-lease",
+                generation,
+                "IDEMPOTENCY_SENDING_DROPPED",
+                Duration::from_secs(60),
+            )
+            .unwrap(),
+            1
+        );
+        let record = get_outbound_idempotency(&conn, "send-lease")
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, OutboundIdempotencyState::NeedsReconciliation);
+        assert_eq!(record.result.as_ref().unwrap().commit_attempted, true);
+    }
+
+    #[test]
+    fn sweep_deletes_past_ttl_expired_and_rejected_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sweep.db");
+        let conn = open_test_conn(&path);
+        let past = "1970-01-01T00:00:00+00:00";
+        let future = datetime_after_ms(60_000);
+        insert_state(&conn, "old-expired", "expired", past);
+        insert_state(&conn, "old-rejected", "rejected", past);
+        insert_state(&conn, "fresh-rejected", "rejected", &future);
+        insert_state(&conn, "old-sent", "sent", past);
+        insert_state(&conn, "old-failed", "failed", past);
+        insert_state(&conn, "live-queued", "queued", past);
+        insert_state(&conn, "live-sending", "sending", past);
+        insert_state(&conn, "live-uncertain", "uncertain", past);
+        insert_state(&conn, "live-recon", "needs_reconciliation", past);
+
+        let deleted = sweep_outbound_idempotency(&conn, 10_000).unwrap();
+        assert!(deleted >= 4);
+        assert!(get_outbound_idempotency(&conn, "old-expired")
+            .unwrap()
+            .is_none());
+        assert!(get_outbound_idempotency(&conn, "old-rejected")
+            .unwrap()
+            .is_none());
+        assert!(get_outbound_idempotency(&conn, "old-sent")
+            .unwrap()
+            .is_none());
+        assert!(get_outbound_idempotency(&conn, "old-failed")
+            .unwrap()
+            .is_none());
+        assert!(get_outbound_idempotency(&conn, "fresh-rejected")
+            .unwrap()
+            .is_some());
+        for key in [
+            "live-queued",
+            "live-sending",
+            "live-uncertain",
+            "live-recon",
+        ] {
+            assert!(
+                get_outbound_idempotency(&conn, key).unwrap().is_some(),
+                "{key} must be retained"
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_enforces_capacity_without_deleting_active_or_uncertain() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("sweep-cap.db");
+        let conn = open_test_conn(&path);
+        let future = datetime_after_ms(60_000);
+        for i in 0..5 {
+            insert_state(&conn, &format!("rej-{i}"), "rejected", &future);
+        }
+        insert_state(&conn, "keep-queued", "queued", &future);
+        insert_state(&conn, "keep-sending", "sending", &future);
+        insert_state(&conn, "keep-uncertain", "uncertain", &future);
+        insert_state(&conn, "keep-recon", "needs_reconciliation", &future);
+
+        sweep_outbound_idempotency(&conn, 6).unwrap();
+        assert!(count_outbound_idempotency(&conn) <= 6);
+        for key in [
+            "keep-queued",
+            "keep-sending",
+            "keep-uncertain",
+            "keep-recon",
+        ] {
+            assert!(
+                get_outbound_idempotency(&conn, key).unwrap().is_some(),
+                "{key} must survive capacity eviction"
+            );
+        }
     }
 }
 
