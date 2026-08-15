@@ -30,8 +30,10 @@ const stage = mkdtempSync(join(tmpdir(), "agent-wechat-prerelease-manifest-"));
 let packages;
 let changesets;
 try {
-  const archive = execFileSync("git", ["archive", "--format=tar", commit], { cwd: root });
-  execFileSync("tar", ["-xf", "-", "-C", stage], { input: archive });
+  const archivePath = join(stage, ".source.tar");
+  execFileSync("git", ["archive", "--format=tar", `--output=${archivePath}`, commit], { cwd: root });
+  execFileSync("tar", ["-xf", archivePath, "-C", stage]);
+  rmSync(archivePath, { force: true });
   run("pnpm", ["install", "--frozen-lockfile"], stage);
 
   const stageBase = realpathSync(stage);
