@@ -206,8 +206,12 @@ echo "Starting agent-server on port ${AGENT_PORT:-6174}..."
 while true; do
   /opt/agent-server/agent-server &
   SERVER_PID=$!
+  # `set -e` would abort the entrypoint when wait returns 137 (SIGKILL).
+  # That tears down WeChat with the server instead of restarting it.
+  set +e
   wait $SERVER_PID
   EXIT_CODE=$?
+  set -e
   # Exit cleanly on SIGTERM (container shutdown)
   if [ $EXIT_CODE -eq 143 ]; then
     exit 0
