@@ -30,6 +30,24 @@ mutate_and_reject .changeset/config.json \
 mutate_and_reject .changeset/config.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.fixed=j.fixed.map(g=>g.filter(n=>!n.endsWith("agent-server")));fs.writeFileSync(p,JSON.stringify(j));' \
   'fixed-group topology drift'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("---\n", "---\nunknown-workspace: patch\n"));' \
+  'unknown changeset workspace'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "@kyan-du/agent-wechat-cli: minor"));' \
+  'unquoted changeset package key'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\": prerelease"));' \
+  'unsupported changeset bump'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\": [minor]"));' \
+  'unsupported changeset value structure'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),line="\"@kyan-du/agent-wechat-cli\": minor";fs.writeFileSync(p,s.replace(line, line+"\n"+line));' \
+  'duplicate changeset package key'
+mutate_and_reject .changeset/risk-anti-detection.md \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\" minor"));' \
+  'malformed changeset YAML'
 mutate_and_reject .github/workflows/release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: ./scripts/test-prerelease-contract.sh","run: npm publish --tag next"));' \
   'npm publish capability'

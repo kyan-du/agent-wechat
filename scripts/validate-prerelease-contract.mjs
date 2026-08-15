@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 
 const root = resolve(import.meta.dirname, "..");
 const readJson = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
@@ -46,11 +46,19 @@ const changesetFiles = readdirSync(join(root, ".changeset")).filter((name) => na
 const referenced = new Set();
 for (const file of changesetFiles) {
   const text = readFileSync(join(root, ".changeset", file), "utf8");
-  const frontmatter = text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/)?.[1];
+  const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
   if (!frontmatter) fail(`invalid changeset frontmatter: ${file}`);
-  for (const match of frontmatter.matchAll(/^"([^"]+)":\s*(patch|minor|major)$/gm)) {
-    const name = match[1];
+  const document = parseDocument(frontmatter, { prettyErrors: false, uniqueKeys: true });
+  if (document.errors.length) fail(`invalid changeset YAML ${file}: ${document.errors[0].message}`);
+  if (!document.contents || document.contents.type !== undefined || !Array.isArray(document.contents.items)) fail(`changeset frontmatter must be a mapping: ${file}`);
+  const entries = document.contents.items;
+  if (!entries.length) fail(`changeset frontmatter is empty: ${file}`);
+  for (const pair of entries) {
+    if (!pair || !pair.key || !pair.value || typeof pair.key.value !== "string" || typeof pair.value.value !== "string") fail(`unsupported changeset entry in ${file}`);
+    const name = pair.key.value;
+    const bump = pair.value.value;
     if (!workspaces.has(name)) fail(`${file} references unknown workspace ${name}`);
+    if (!new Set(["patch", "minor", "major"]).has(bump)) fail(`${file} has invalid bump ${JSON.stringify(bump)} for ${name}`);
     referenced.add(name);
   }
 }
