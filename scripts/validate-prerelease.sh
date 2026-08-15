@@ -32,7 +32,7 @@ for package_dir in packages/cli packages/openclaw-extension packages/wechaty-pup
   )
 done
 
-unexpected=$(git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' || true)
+unexpected=$(git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/|\.pnpm-store/)' || true)
 test -z "$unexpected" || { printf '%s\n' "$unexpected" >&2; exit 1; }
 
 echo "P1-B1 validation completed without publication side effects"
