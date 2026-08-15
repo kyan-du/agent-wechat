@@ -47,6 +47,7 @@ jobs:
               - 'docker/supervise-agent-server.sh'
               - 'scripts/test-entrypoint-identity.sh'
               - 'scripts/test-entrypoint-supervise.sh'
+              - 'scripts/test-entrypoint-owned-pid1.sh'
               - '.github/workflows/ci.yml'
 
   entrypoint:
@@ -61,6 +62,8 @@ jobs:
         run: bash scripts/test-entrypoint-identity.sh
       - name: Entrypoint supervise lifecycle
         run: bash scripts/test-entrypoint-supervise.sh
+      - name: Ownership guard as PID 1
+        run: bash scripts/test-entrypoint-owned-pid1.sh
 
   ts:
     needs: changes

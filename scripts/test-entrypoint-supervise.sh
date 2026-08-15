@@ -334,13 +334,22 @@ echo "ok: TERM delivered exactly once"
 FOREIGN=$(sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')
 sleep 0.1
 SERVER_PID="$FOREIGN"
+SERVER_START=""
+SERVER_PGID=""
 if _supervise_owned_child; then
   kill "$FOREIGN" 2>/dev/null || true
   fail "foreign pid accepted as owned child"
 fi
+# Even if starttime is copied from the orphan, PPID=1 adoption must not matter:
+# a different recorded starttime still rejects.
+SERVER_START="not-the-real-starttime"
+if _supervise_owned_child; then
+  kill "$FOREIGN" 2>/dev/null || true
+  fail "mismatched starttime accepted as owned child"
+fi
 kill "$FOREIGN" 2>/dev/null || true
 wait "$FOREIGN" 2>/dev/null || true
-SERVER_PID=""
+_supervise_clear_child
 echo "ok: PID-reuse identity rejects foreign process"
 
 echo "entrypoint supervise: 137 recovery, fail-fast, TERM/INT, grace-KILL, launch/sleep races, exact-once"
