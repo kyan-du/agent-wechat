@@ -125,6 +125,19 @@ function assertOwnedVolumes(inventory: InstanceInventory): void {
   }
 }
 
+export function clearContainerIdentity(inventory: InstanceInventory): void {
+  const info = inspectContainer();
+  if (!info) throw new CliError("INSTANCE_NOT_RUNNING", "trusted container is required to clear container identity", EXIT.CLEANUP);
+  assertOwnedContainer(info, inventory);
+  if (!info.State?.Running) docker(["start", info.Id]);
+  try {
+    docker(["exec", info.Id, "/opt/reset-device-identity.sh"]);
+  } catch (error) {
+    if (error instanceof CliError) throw new CliError("AUTH_RESET_IDENTITY_FAILED", "container identity cleanup failed closed", EXIT.CLEANUP);
+    throw error;
+  }
+}
+
 export function removeOwnedVolume(
   inventory: InstanceInventory,
   index: 0 | 1,

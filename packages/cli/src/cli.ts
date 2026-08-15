@@ -32,6 +32,7 @@ import {
 } from "./instance-inventory.js";
 import {
   assertOwnedContainer,
+  clearContainerIdentity,
   dockerAvailable,
   inspectContainer,
   purgeInstance,
@@ -166,6 +167,7 @@ async function resetAuth(yes: boolean): Promise<void> {
   await confirmDestructive("Reset WeChat login/session/cache and device identity for the default instance", yes);
   const result = await client().resetAuth();
   if (!result.success) throw new CliError(result.errorCode || "AUTH_RESET_FAILED", result.error || "auth reset failed", EXIT.CLEANUP);
+  clearContainerIdentity(inventory);
   stopInstance();
   try {
     removeOwnedVolume(inventory, 1, "wechat-home");

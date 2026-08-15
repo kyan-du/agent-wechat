@@ -25,10 +25,10 @@ description: The single-instance wx command contract.
 |---|---|
 | `pnpm cli auth login [--timeout <seconds>] [--new]` | Run the QR login flow |
 | `pnpm cli auth logout` | Verify WeChat logout while retaining the instance and identity |
-| `pnpm cli auth reset [--yes]` | Stop WeChat, clear server auth state, delete WeChat home/session/cache and device identity |
+| `pnpm cli auth reset [--yes]` | Stop WeChat, clear server auth state, delete WeChat home/session/cache, and clear both host and `/data/device-identity` copies |
 | `pnpm cli auth status` | Read-only authentication status |
 
-`auth reset` preserves the agent database, API token, and instance inventory. Full deletion requires `stop --purge`.
+`auth reset` preserves the agent database, API token, and instance inventory while clearing both identity copies so the next `start` can create a verified fresh identity. Full deletion requires `stop --purge`.
 
 ## Chats, contacts, and messages
 

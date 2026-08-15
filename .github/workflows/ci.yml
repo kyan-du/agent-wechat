@@ -67,6 +67,7 @@ jobs:
               - 'scripts/test-entrypoint-identity.sh'
               - 'scripts/test-entrypoint-supervise.sh'
               - 'scripts/test-entrypoint-owned-pid1.sh'
+              - 'scripts/test-auth-reset-identity.sh'
               - '.github/workflows/ci.yml'
 
   entrypoint:
@@ -83,6 +84,8 @@ jobs:
         run: bash scripts/test-entrypoint-supervise.sh
       - name: Ownership guard as PID 1
         run: bash scripts/test-entrypoint-owned-pid1.sh
+      - name: Auth reset identity scope
+        run: bash scripts/test-auth-reset-identity.sh
 
   ts:
     needs: changes

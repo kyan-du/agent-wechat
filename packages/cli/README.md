@@ -61,7 +61,7 @@ The first fork prerelease is deliberately single-instance. Removed `up`, `down`,
 
 ### Authentication and reads
 
-`auth logout` verifies the WeChat UI logout and preserves instance data. `auth reset` stops the session, transactionally clears server-side authentication state, deletes the WeChat home volume and host device identity, and requires a fresh `start`/login. It is narrower than full purge: agent DB, token, and the default instance inventory remain.
+`auth logout` verifies the WeChat UI logout and preserves instance data. `auth reset` stops the session, transactionally clears server-side authentication state, deletes the WeChat home volume, and clears both the host and `/data/device-identity` copies before requiring a fresh `start`/login. It is narrower than full purge: agent DB, token, and the default instance inventory remain.
 
 `chats`, `contacts`, and `messages` are read-only. Their opaque, versioned cursor uses stable keyset ordering; adding new messages does not shift later pages. `chats --unread` means only conversation-level `unreadCount > 0`. Message reads never open the UI or change unread state. `mark-read` is a separate UI operation and succeeds only when the target and before/after unread state are verified.
 
