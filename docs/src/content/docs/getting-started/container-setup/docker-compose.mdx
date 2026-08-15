@@ -22,7 +22,7 @@ chmod 600 ~/.config/agent-wechat/token
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: ghcr.io/kyan-du/agent-wechat:<version>
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined

@@ -5,8 +5,8 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { createRequire } from 'module'
 
-import { WeChatClient } from '@agent-wechat/shared'
-import type { Chat, Contact, Message, LoginSubscriptionEvent } from '@agent-wechat/shared'
+import { WeChatClient } from '@kyan-du/agent-wechat-shared'
+import type { Chat, Contact, Message, LoginSubscriptionEvent } from '@kyan-du/agent-wechat-shared'
 
 const require = createRequire(import.meta.url)
 const { version: VERSION } = require('../package.json')
@@ -82,7 +82,7 @@ export class PuppetAgentWeChat extends PUPPET.Puppet {
     log.verbose('PuppetAgentWeChat', 'constructor(%s)', JSON.stringify(options))
   }
 
-  override name() { return '@agent-wechat/wechaty-puppet' }
+  override name() { return '@kyan-du/agent-wechat-wechaty-puppet' }
   override version() { return VERSION }
 
   // ==================

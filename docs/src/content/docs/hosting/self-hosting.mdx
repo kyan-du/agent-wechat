@@ -48,7 +48,7 @@ docker run --rm -v agent-wechat-data:/data -v $(pwd):/backup ubuntu tar czf /bac
 
 ## Updates
 
-To update to the latest image:
+To update to a reviewed image version (and record its resolved digest):
 
 ```bash
 docker compose pull
@@ -59,7 +59,7 @@ Or with the CLI:
 
 ```bash
 wx down
-docker pull ghcr.io/thisnick/agent-wechat:latest
+docker pull ghcr.io/kyan-du/agent-wechat:<version>
 wx up
 ```
 

@@ -1,4 +1,4 @@
-import type { Message } from "@agent-wechat/shared";
+import type { Message } from "@kyan-du/agent-wechat-shared";
 
 export type CatchUpMode = "read-only" | "latest";
 

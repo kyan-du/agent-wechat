@@ -119,7 +119,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+        run: pnpm install --frozen-lockfile --filter @kyan-du/agent-wechat-docs
 
       - name: Build docs
-        run: pnpm --filter @agent-wechat/docs build
+        run: pnpm --filter @kyan-du/agent-wechat-docs build

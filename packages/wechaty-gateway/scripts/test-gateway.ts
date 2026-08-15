@@ -5,10 +5,10 @@
  *   AGENT_WECHAT_URL=http://localhost:6174 \
  *   AGENT_WECHAT_TOKEN=test \
  *   WECHATY_TOKEN=test \
- *   pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx src/main.ts
+ *   pnpm --filter @kyan-du/agent-wechat-wechaty-gateway exec -- node --import tsx src/main.ts
  *
  * Step 2 — Run this client (in another terminal):
- *   pnpm --filter @agent-wechat/wechaty-gateway exec -- node --import tsx scripts/test-gateway.ts
+ *   pnpm --filter @kyan-du/agent-wechat-wechaty-gateway exec -- node --import tsx scripts/test-gateway.ts
  */
 import { readFileSync } from 'fs'
 import { join } from 'path'

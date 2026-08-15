@@ -1,8 +1,8 @@
-# @agent-wechat/wechat
+# @kyan-du/agent-wechat-openclaw
 
-OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/thisnick/agent-wechat).
+OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/kyan-du/agent-wechat).
 
-**[Documentation](https://thisnick.github.io/agent-wechat/integrations/openclaw/setup/)**
+**[Documentation](https://kyan-du.github.io/agent-wechat/integrations/openclaw/setup/)**
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ If you need to run the server yourself:
 **Option A: CLI** (quickest for local use)
 
 ```bash
-npm install -g @agent-wechat/cli
+npm install -g @kyan-du/agent-wechat-cli
 wx up
 ```
 
@@ -32,7 +32,7 @@ wx up
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: ghcr.io/kyan-du/agent-wechat:<version>
     container_name: agent-wechat
     hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
@@ -73,7 +73,7 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 ### 2. Install the extension
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
+openclaw plugins install @kyan-du/agent-wechat-openclaw
 ```
 
 ### 3. Configure the channel
@@ -170,7 +170,7 @@ All config lives under `channels.wechat` in OpenClaw's config file:
 ### Build from source
 
 ```bash
-git clone https://github.com/thisnick/agent-wechat.git
+git clone https://github.com/kyan-du/agent-wechat.git
 cd agent-wechat
 pnpm install && pnpm build
 ```

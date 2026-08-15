@@ -5,7 +5,7 @@ description: Use agent-wechat as a Wechaty puppet backend.
 
 There are two ways to connect Wechaty bots to agent-wechat:
 
-1. **Puppet mode** — import `@agent-wechat/wechaty-puppet` directly and connect to the agent-wechat REST API
+1. **Puppet mode** — import `@kyan-du/agent-wechat-wechaty-puppet` directly and connect to the agent-wechat REST API
 2. **Gateway mode** — connect via gRPC through a gateway container, using the standard `wechaty-puppet-service` (no agent-wechat dependency needed)
 
 Both require a running agent-wechat server. You can [self-host with Docker](/getting-started/container-setup/cli) or use [Managed Hosting](/hosting/managed-hosting).
@@ -15,7 +15,7 @@ Both require a running agent-wechat server. You can [self-host with Docker](/get
 ### Install
 
 ```bash
-npm install @agent-wechat/wechaty-puppet wechaty wechaty-puppet
+npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
 ```
 
 ### Prerequisites
@@ -23,7 +23,7 @@ npm install @agent-wechat/wechaty-puppet wechaty wechaty-puppet
 - **Docker** — on macOS, install [Colima](https://github.com/abiosoft/colima) (`brew install colima && colima start`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - **An agent-wechat server** — self-hosted or via [Managed Hosting](/hosting/managed-hosting):
   ```bash
-  npx @agent-wechat/cli up
+  npx @kyan-du/agent-wechat-cli up
   ```
 - **Node.js >= 22**
 
@@ -31,7 +31,7 @@ npm install @agent-wechat/wechaty-puppet wechaty wechaty-puppet
 
 ```ts
 import { WechatyBuilder } from 'wechaty'
-import PuppetAgentWeChat from '@agent-wechat/wechaty-puppet'
+import PuppetAgentWeChat from '@kyan-du/agent-wechat-wechaty-puppet'
 
 const bot = WechatyBuilder.build({
   puppet: new PuppetAgentWeChat({
@@ -66,7 +66,7 @@ await bot.start()
 
 ## Option 2: Gateway mode (gRPC)
 
-Gateway mode wraps the puppet in gRPC, so existing Wechaty bots can connect using the standard `wechaty-puppet-service` — no `@agent-wechat/wechaty-puppet` dependency needed. This is the recommended approach for [Managed Hosting](/hosting/managed-hosting) instances, where the gateway is already running.
+Gateway mode wraps the puppet in gRPC, so existing Wechaty bots can connect using the standard `wechaty-puppet-service` — no `@kyan-du/agent-wechat-wechaty-puppet` dependency needed. This is the recommended approach for [Managed Hosting](/hosting/managed-hosting) instances, where the gateway is already running.
 
 ### Install
 

@@ -1,5 +1,5 @@
 {
-  "name": "@agent-wechat/wechaty-puppet",
+  "name": "@kyan-du/agent-wechat-wechaty-puppet",
   "version": "0.11.15",
   "description": "Wechaty Puppet for agent-wechat — bridges Wechaty bots to WeChat via the agent-wechat REST/WebSocket server",
   "type": "module",
@@ -29,7 +29,7 @@
     "file-box": "^1.4.15"
   },
   "devDependencies": {
-    "@agent-wechat/shared": "workspace:*",
+    "@kyan-du/agent-wechat-shared": "workspace:*",
     "@types/node": "^22",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
@@ -42,7 +42,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thisnick/agent-wechat.git",
+    "url": "git+https://github.com/kyan-du/agent-wechat.git",
     "directory": "packages/wechaty-puppet"
   }
 }

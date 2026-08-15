@@ -1,5 +1,5 @@
 import { Command, Option } from "commander";
-import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
+import { WeChatClient, type WeChatClientOptions } from "@kyan-du/agent-wechat-shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
 import { spawn, execFileSync, execSync } from "child_process";
 import {
@@ -19,7 +19,7 @@ import { buildCliSendParams } from "./send-options.js";
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
 const CONTAINER_NAME = "agent-wechat";
-const GHCR_IMAGE = "ghcr.io/thisnick/agent-wechat";
+const GHCR_IMAGE = "ghcr.io/kyan-du/agent-wechat";
 const DEFAULT_PORT = 6174;
 
 // Get monorepo root (cli is at packages/cli)
@@ -1032,7 +1032,7 @@ async function cmdUpdate() {
   const tmpFile = path.join(os.tmpdir(), assetName);
 
   // Download binary from GitHub Releases (no gh CLI dependency)
-  const releaseUrl = `https://github.com/thisnick/agent-wechat/releases/download/v${version}/${assetName}`;
+  const releaseUrl = `https://github.com/kyan-du/agent-wechat/releases/download/v${version}/${assetName}`;
   console.log(`Downloading ${assetName}...`);
   try {
     const resp = await fetch(releaseUrl, { redirect: "follow" });
@@ -1151,21 +1151,10 @@ async function cmdUp(opts: { proxy?: string } = {}) {
     try {
       execSync(`docker pull ${image}`, { stdio: "inherit" });
     } catch {
-      // Versioned tag may not exist yet — fall back to latest
-      const fallback = `${GHCR_IMAGE}:latest`;
-      if (image !== fallback) {
-        console.log(`Tag ${VERSION} not found, trying latest...`);
-        try {
-          execSync(`docker pull ${fallback}`, { stdio: "inherit" });
-          image = fallback;
-        } catch {
-          console.error(`Failed to pull ${fallback}. Check your internet connection and Docker setup.`);
-          process.exit(1);
-        }
-      } else {
-        console.error(`Failed to pull ${image}. Check your internet connection and Docker setup.`);
-        process.exit(1);
-      }
+      console.error(
+        `Failed to pull ${image}. Choose an explicit published version or digest with --image; the fork does not fall back to latest.`,
+      );
+      process.exit(1);
     }
   }
 

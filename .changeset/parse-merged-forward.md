@@ -1,5 +1,5 @@
 ---
-"@agent-wechat/agent-server": patch
+"@kyan-du/agent-wechat-agent-server": patch
 ---
 
 feat: parse merged-forward (chat history) messages (type 49, subtype 19)

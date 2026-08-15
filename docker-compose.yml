@@ -11,7 +11,7 @@
 
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: ghcr.io/kyan-du/agent-wechat:<version>
     container_name: agent-wechat
     hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}

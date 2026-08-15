@@ -1,5 +1,5 @@
 import type { ResolvedWeChatAccount } from "./types.js";
-import { WeChatClient } from "@agent-wechat/shared";
+import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import { loginStart, getActiveLoginState } from "./login.js";
 import { buildOpenClawConfirmedSend } from "./confirmed-send.js";
 

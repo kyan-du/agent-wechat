@@ -68,7 +68,7 @@
   </g>
 
   <!-- Footer -->
-  <text x="80" y="560" font-family="monospace" font-size="18" fill="#475569">github.com/thisnick/agent-wechat</text>
+  <text x="80" y="560" font-family="monospace" font-size="18" fill="#475569">github.com/kyan-du/agent-wechat</text>
 
   <!-- Docs badge -->
   <rect x="1000" y="540" width="120" height="36" rx="8" fill="#38bdf8" opacity="0.15" stroke="#38bdf8" stroke-width="1"/>

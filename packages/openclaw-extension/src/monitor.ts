@@ -1,5 +1,5 @@
-import { WeChatClient } from "@agent-wechat/shared";
-import type { Chat, Message, MediaResult, AuthStatus } from "@agent-wechat/shared";
+import { WeChatClient } from "@kyan-du/agent-wechat-shared";
+import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wechat-shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";

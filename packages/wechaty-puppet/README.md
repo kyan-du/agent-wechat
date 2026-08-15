@@ -1,14 +1,14 @@
-# @agent-wechat/wechaty-puppet
+# @kyan-du/agent-wechat-wechaty-puppet
 
-Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
+Wechaty Puppet for [agent-wechat](https://github.com/kyan-du/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
 
-**[Documentation](https://thisnick.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
+**[Documentation](https://kyan-du.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
 
 ## Prerequisites
 
-- **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/thisnick/agent-wechat):
+- **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/kyan-du/agent-wechat):
   ```bash
-  npx @agent-wechat/cli up     # starts the Docker container
+  npx @kyan-du/agent-wechat-cli up     # starts the Docker container
   ```
   Login is not required as a separate CLI step; you can log in through the puppet QR flow.
 - **Node.js >= 22**
@@ -16,14 +16,14 @@ Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bri
 ## Install
 
 ```bash
-npm install @agent-wechat/wechaty-puppet wechaty wechaty-puppet
+npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
 ```
 
 ## Usage
 
 ```ts
 import { WechatyBuilder } from 'wechaty'
-import PuppetAgentWeChat from '@agent-wechat/wechaty-puppet'
+import PuppetAgentWeChat from '@kyan-du/agent-wechat-wechaty-puppet'
 
 const bot = WechatyBuilder.build({
   puppet: new PuppetAgentWeChat({

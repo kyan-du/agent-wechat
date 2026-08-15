@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SendParams, SendResult } from "@agent-wechat/shared";
+import type { SendParams, SendResult } from "@kyan-du/agent-wechat-shared";
 
 export type LogicalSendParams = SendParams & {
   idempotencyKey?: string;

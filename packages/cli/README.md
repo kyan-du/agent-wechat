@@ -1,13 +1,13 @@
-# @agent-wechat/cli
+# @kyan-du/agent-wechat-cli
 
 Command-line tool for managing agent-wechat containers and interacting with WeChat.
 
-**[Documentation](https://thisnick.github.io/agent-wechat/getting-started/cli/commands/)**
+**[Documentation](https://kyan-du.github.io/agent-wechat/getting-started/cli/commands/)**
 
 ## Install
 
 ```bash
-npm install -g @agent-wechat/cli
+npm install -g @kyan-du/agent-wechat-cli
 ```
 
 This installs the `wx` command globally.
@@ -164,7 +164,7 @@ For production or when running alongside other services (e.g., OpenClaw), use th
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: ghcr.io/kyan-du/agent-wechat:<version>
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined
