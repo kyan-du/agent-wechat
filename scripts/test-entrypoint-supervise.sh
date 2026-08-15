@@ -82,12 +82,18 @@ start_supervisor "$SANDBOX/bin137"
 wait_file "$PID137"
 first_pid=$(cat "$PID137")
 kill -KILL "$first_pid"
-wait_exit "$first_pid"
+# Do not wait for kill -0 to turn false here: the killed child may remain a
+# zombie until the supervisor's wait reaps it. Observe the behavior under test
+# (the second launch) directly instead of spending the whole deadline on a
+# transient zombie state.
 deadline=$((SECONDS + 8))
 while [ "$(cat "$COUNT137" 2>/dev/null || echo 0)" -lt 2 ] && [ "$SECONDS" -lt "$deadline" ]; do
   sleep 0.05
 done
-[ "$(cat "$COUNT137")" -ge 2 ] || fail "137 did not restart (count=$(cat "$COUNT137" 2>/dev/null || echo 0))"
+[ "$(cat "$COUNT137")" -ge 2 ] || {
+  cat "$SANDBOX/sup.out" "$SANDBOX/sup.err" >&2 || true
+  fail "137 did not restart (count=$(cat "$COUNT137" 2>/dev/null || echo 0))"
+}
 second_pid=$(cat "$PID137")
 [ "$second_pid" != "$first_pid" ] || fail "137 restart reused the first pid"
 kill -TERM "$SUP_PID"
