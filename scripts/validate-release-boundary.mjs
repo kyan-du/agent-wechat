@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 
 const failures = [];
 const requireRendered = process.argv.includes("--require-rendered");
-const P1B_GATE = /P1-B[^\n]{0,120}(?:unavailable|not available|publishes?|verif)/i;
+const P1B_GATE = /Release boundary:[^\n]{0,240}P1-B[^\n]{0,160}(?:unavailable|not available|publishes?|verif)/i;
 const OLD_NAMESPACE = /ghcr\.io\/thisnick\/agent-wechat/i;
 const GHCR_LATEST = /ghcr\.io\/[\w./${}-]+(?::|\}:?)latest\b/i;
 const INTERPOLATED_LATEST = /(?:FORK_IMAGE|IMAGE_REPO|REGISTRY_IMAGE)\}:latest\b/i;
@@ -46,6 +47,26 @@ function decodeHtml(text) {
 function visibleText(text, rendered) {
   const withoutComments = text.replace(/<!--[\s\S]*?-->/g, "");
   return rendered ? decodeHtml(withoutComments) : withoutComments;
+}
+
+function hasVisibleP1BGate(text, rendered = false) {
+  return P1B_GATE.test(visibleText(text, rendered));
+}
+
+function gateMutationViolations(path, text, rendered = false) {
+  const found = [];
+  if (!hasVisibleP1BGate(text, rendered)) {
+    found.push(`${path} mutation baseline does not contain a reader-visible P1-B gate`);
+    return found;
+  }
+  const gateRegion = rendered
+    ? /<p(?:\s[^>]*)?>[^<]*(?:<[^>]+>[^<]*)*Release boundary:[\s\S]*?<\/p>/i
+    : /^.*Release boundary:.*P1-B[^\n]*(?:\n|$)/im;
+  const visible = text.replace(gateRegion, "<!-- P1-B is not available until published and verified. -->\n");
+  const removed = text.replace(gateRegion, "");
+  if (hasVisibleP1BGate(visible, rendered)) found.push(`${path} accepts an HTML-comment-only replacement for its real P1-B gate`);
+  if (hasVisibleP1BGate(removed, rendered)) found.push(`${path} accepts removal of its real P1-B gate`);
+  return found;
 }
 
 function commandBlocks(text, rendered = false) {
@@ -101,7 +122,7 @@ function executableReleaseCommands(text, rendered = false) {
 }
 function documentationViolations(path, text, rendered = false) {
   const found = [];
-  if (!P1B_GATE.test(visibleText(text, rendered))) found.push(`${path} does not state the P1-B release gate`);
+  if (!hasVisibleP1BGate(text, rendered)) found.push(`${path} does not state the P1-B release gate`);
   const hits = executableReleaseCommands(text, rendered);
   if (hits.length) found.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
   return found;
@@ -130,7 +151,22 @@ for (const manifest of walk("packages").filter((path) => path.endsWith("package.
   for (const entry of packed.files ?? []) {
     if (!/\.(?:md|mdx)$/i.test(entry.path)) continue;
     const path = join(cwd, entry.path);
-    failures.push(...documentationViolations(path, readFileSync(path, "utf8")).map((failure) => `${failure} (publishable tarball)`));
+    const text = readFileSync(path, "utf8");
+    failures.push(...documentationViolations(path, text).map((failure) => `${failure} (publishable tarball)`));
+    if (/readme\.md$/i.test(entry.path)) failures.push(...gateMutationViolations(path, text).map((failure) => `${failure} (publishable tarball mutation)`));
+  }
+
+  // Exercise the bytes in an actual npm tarball too, rather than trusting only the source path/dry-run listing.
+  const destination = mkdtempSync(join(tmpdir(), "release-boundary-pack-"));
+  try {
+    const actual = JSON.parse(execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", destination], { cwd, encoding: "utf8" }))[0];
+    for (const entry of actual.files ?? []) {
+      if (!/readme\.md$/i.test(entry.path)) continue;
+      const text = execFileSync("tar", ["-xOf", join(destination, actual.filename), `package/${entry.path}`], { encoding: "utf8" });
+      failures.push(...gateMutationViolations(`${manifest}:${entry.path}`, text).map((failure) => `${failure} (actual npm-packed README mutation)`));
+    }
+  } finally {
+    rmSync(destination, { recursive: true, force: true });
   }
 }
 
@@ -141,7 +177,10 @@ for (const root of ["docs/src/content", "docs/dist"]) {
     const text = readFileSync(path, "utf8");
     const rendered = path.endsWith(".html");
     const hasReleaseChannel = /@kyan-du\/agent-wechat|ghcr\.io\/kyan-du\/agent-wechat/i.test(text);
-    if (hasReleaseChannel) failures.push(...documentationViolations(path, text, rendered));
+    if (hasReleaseChannel) {
+      failures.push(...documentationViolations(path, text, rendered));
+      failures.push(...gateMutationViolations(path, text, rendered).map((failure) => `${failure} (${rendered ? "rendered" : "source"} mutation)`));
+    }
     else {
       const hits = executableReleaseCommands(text, rendered);
       if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
