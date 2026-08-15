@@ -1,47 +1,113 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const failures = [];
 const OLD_NAMESPACE = /ghcr\.io\/thisnick\/agent-wechat/i;
-const LATEST_IMAGE = /(?:ghcr\.io\/[^\s"'`]+|agent-wechat):latest\b/i;
-const FIXED_FORK_DEFAULT = /(?:DEFAULT|FALLBACK|IMAGE|image)\w*\s*(?:=|:)\s*["'`]ghcr\.io\/kyan-du\/agent-wechat:\d+\.\d+\.\d+/i;
-const REGISTRY_FALLBACK = /(?:fallback|default)[^\n]{0,100}ghcr\.io\/|ghcr\.io\/[^\n]{0,100}(?:fallback|default)/i;
+const GHCR_LATEST = /ghcr\.io\/[\w./${}-]+(?::|\}:?)latest\b/i;
+const INTERPOLATED_LATEST = /(?:FORK_IMAGE|IMAGE_REPO|REGISTRY_IMAGE)\}:latest\b/i;
+const LOCAL_LATEST = /agent-wechat:latest\b/i;
+const FIXED_FORK_VERSION = /ghcr\.io\/kyan-du\/agent-wechat:\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/i;
+const DEFAULT_CONTEXT = /(?:default|fallback|image[_a-z-]*\s*(?:=|:)|\$\{[^}\n]*(?::-|:-)[^}\n]*ghcr\.io)/i;
+const FALLBACK_CONTEXT = /(?:fallback|default)[\w-]*\s*(?:=|:)[^\n]{0,160}(?:ghcr\.io|registry)|(?:ghcr\.io|registry)[^\n]{0,160}\?\?[^\n]{0,80}(?:fallback|default)/i;
 
 function runtimeViolations(path, text) {
   const found = [];
   if (OLD_NAMESPACE.test(text)) found.push(`${path} references the old GHCR namespace`);
-  if (LATEST_IMAGE.test(text)) found.push(`${path} references a mutable :latest image`);
-  if (FIXED_FORK_DEFAULT.test(text)) found.push(`${path} defines a fixed published fork version as a runtime default`);
-  if (REGISTRY_FALLBACK.test(text)) found.push(`${path} defines or describes a registry default/fallback`);
+  if (GHCR_LATEST.test(text) || INTERPOLATED_LATEST.test(text) || LOCAL_LATEST.test(text)) found.push(`${path} references a mutable :latest image`);
+  for (const line of text.split("\n")) {
+    if (FIXED_FORK_VERSION.test(line) && DEFAULT_CONTEXT.test(line)) {
+      found.push(`${path} defines a fixed published fork version as a runtime default`);
+      break;
+    }
+  }
+  if (FALLBACK_CONTEXT.test(text)) found.push(`${path} defines or describes a registry default/fallback`);
   return found;
 }
-const workflows = readdirSync(".github/workflows").filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"));
+
+function walk(dir) {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).flatMap((name) => {
+    if (name === "node_modules" || name === ".git") return [];
+    const path = join(dir, name);
+    return statSync(path).isDirectory() ? walk(path) : [path];
+  });
+}
+
+function executableReleaseCommands(text, rendered = false) {
+  if (rendered) {
+    const stripped = text.replace(/<!--[\s\S]*?-->/g, "");
+    return /(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)[^<\n]*@kyan-du\/agent-wechat|(?:docker\s+pull|image\s*:)[^<\n]*ghcr\.io\/kyan-du\/agent-wechat|<code[^>]*>\s*wx(?:\s|<)/i.test(stripped) ? [1] : [];
+  }
+  const hits = [];
+  let fenced = false;
+  for (const [index, line] of text.split("\n").entries()) {
+    if (line.trimStart().startsWith("```")) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!fenced || line.trimStart().startsWith("#")) continue;
+    if (/\b(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)\b[^\n]*@kyan-du\/agent-wechat/i.test(line)
+      || /(?:docker\s+pull|image\s*:)[^\n]*ghcr\.io\/kyan-du\/agent-wechat/i.test(line)
+      || /^\s*wx(?:\s|$)/.test(line) || /&&\s*wx(?:\s|$)/.test(line)) {
+      hits.push(index + 1);
+    }
+  }
+  return hits;
+}
+
+const workflows = readdirSync(".github/workflows").filter((name) => /\.ya?ml$/.test(name));
 for (const name of workflows) {
   const path = join(".github/workflows", name);
   const text = readFileSync(path, "utf8");
-  const dockerPublisher = /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text);
-  const movesLatest = LATEST_IMAGE.test(text);
-  if (dockerPublisher) failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
-  if (movesLatest) failures.push(`${path} can reference or move :latest before first-release authorization`);
+  if (/docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
+    failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
+  }
+  if (GHCR_LATEST.test(text) || LOCAL_LATEST.test(text)) failures.push(`${path} can reference or move :latest before first-release authorization`);
 }
 
 for (const path of ["src/cli.ts", "src/lib/session.ts", "packages/cli/src/cli.ts", "packages/cli/src/image-reference.ts", "docker-compose.yml"]) {
   failures.push(...runtimeViolations(path, readFileSync(path, "utf8")));
 }
 
+// Inspect exactly the Markdown files npm says it will put in every public package tarball.
+for (const manifest of walk("packages").filter((path) => path.endsWith("package.json"))) {
+  const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+  if (pkg.private) continue;
+  const cwd = dirname(manifest);
+  const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], { cwd, encoding: "utf8" }))[0];
+  for (const entry of packed.files ?? []) {
+    if (!/\.(?:md|mdx)$/i.test(entry.path)) continue;
+    const path = join(cwd, entry.path);
+    const hits = executableReleaseCommands(readFileSync(path, "utf8"));
+    if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands in the publishable tarball`);
+  }
+}
+
+// Scan source docs and rendered output (when present); CI builds docs before this guard.
+for (const root of ["docs/src/content", "docs/dist"]) {
+  for (const path of walk(root).filter((p) => /\.(?:md|mdx|html)$/i.test(p))) {
+    const hits = executableReleaseCommands(readFileSync(path, "utf8"), path.endsWith(".html"));
+    if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
+  }
+}
+
 const negativeCases = [
   ["old namespace", "const image = 'ghcr.io/thisnick/agent-wechat:1.2.3'"],
   ["latest", "image: ghcr.io/kyan-du/agent-wechat:latest"],
-  ["fixed default", "const DEFAULT_IMAGE = 'ghcr.io/kyan-du/agent-wechat:1.2.3'"],
-  ["registry fallback", "const fallbackImage = 'ghcr.io/kyan-du/agent-wechat:' + version"],
+  ["interpolated latest", "const image = `${FORK_IMAGE}:latest`"],
+  ["fixed default", "export AGENT_WECHAT_IMAGE=ghcr.io/kyan-du/agent-wechat:1.2.3"],
+  ["fixed yaml default", "image: ghcr.io/kyan-du/agent-wechat:2.0.0-rc.1"],
+  ["registry fallback", "const fallbackImage = registry + '/agent-wechat:' + version"],
+  ["compose registry default", "image: ${IMAGE:-ghcr.io/kyan-du/agent-wechat:1.2.3}"],
 ];
 for (const [name, sample] of negativeCases) {
   if (runtimeViolations(`<negative:${name}>`, sample).length === 0) failures.push(`guard negative test failed: ${name}`);
 }
 
 if (failures.length) {
-  console.error(failures.join("\n"));
+  console.error([...new Set(failures)].join("\n"));
   process.exit(1);
 }
-console.log("release boundary is fail-closed: no publication, registry default/fallback, :latest, fixed fork default, or old namespace");
+console.log("release boundary is fail-closed across workflows, runtimes, publishable tarball docs, and rendered/reference docs");

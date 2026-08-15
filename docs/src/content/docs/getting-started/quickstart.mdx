@@ -33,7 +33,7 @@ After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>
 ## 3. Log in to WeChat
 
 ```bash
-wx auth login
+pnpm cli -- auth login
 ```
 
 A QR code is displayed in your terminal. Scan it with WeChat on your phone (tap **+** > **Scan**), then confirm the login.
@@ -46,21 +46,21 @@ Scan the QR code in WeChat if prompted.
 
 ```bash
 # List your chats
-wx chats list
+pnpm cli -- chats list
 
 # Find a chat by name
-wx chats find "John"
+pnpm cli -- chats find "John"
 
 # Send a message (--text, --image, or --file)
-wx messages send <chatId> --text "Hello from agent-wechat!"
-wx messages send <chatId> --image photo.jpg
-wx messages send <chatId> --file document.pdf
+pnpm cli -- messages send <chatId> --text "Hello from agent-wechat!"
+pnpm cli -- messages send <chatId> --image photo.jpg
+pnpm cli -- messages send <chatId> --file document.pdf
 
 # Read messages
-wx messages list <chatId>
+pnpm cli -- messages list <chatId>
 
 # Download media (images, voice, video) from a message
-wx messages media <chatId> <messageId>
+pnpm cli -- messages media <chatId> <messageId>
 ```
 
 ## 5. View the container via VNC
@@ -74,7 +74,7 @@ cat ~/.config/agent-wechat/token
 ## 6. Stop the container
 
 ```bash
-wx down
+pnpm cli -- down
 ```
 
 ## Next steps

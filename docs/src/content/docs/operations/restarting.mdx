@@ -8,7 +8,7 @@ description: How to restart the container and recover from common issues.
 ### Via the CLI
 
 ```bash
-wx down && wx up
+pnpm cli -- down && pnpm cli -- up
 ```
 
 ### Via Docker Compose
@@ -45,14 +45,14 @@ If restarting doesn't fix the issue, you can wipe the WeChat data and start from
 
 ```bash
 # Stop the container
-wx down
+pnpm cli -- down
 # or: docker compose down
 
 # Remove the WeChat home volume
 docker volume rm agent-wechat-home
 
 # Start fresh
-wx up
+pnpm cli -- up
 # or: docker compose up -d
 ```
 
@@ -65,9 +65,9 @@ This deletes all WeChat data inside the container including the login session, c
 To completely reset both agent data and WeChat data:
 
 ```bash
-wx down
+pnpm cli -- down
 docker volume rm agent-wechat-data agent-wechat-home
-wx up
+pnpm cli -- up
 ```
 
 This removes:
