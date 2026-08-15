@@ -40,8 +40,9 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 ### 3. Add the WeChat channel
 
 ```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+openclaw plugins inspect wechat --runtime
 ```
 
 ### 4. Restart the gateway
@@ -66,7 +67,10 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 ### 2. Add the WeChat channel
 
 ```bash
-openclaw channels add --channel wechat --url <your-server-url> --token <your-token>
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl <your-server-url>
+openclaw config set channels.wechat.token <your-token>
+openclaw plugins inspect wechat --runtime
 ```
 
 ### 3. Restart the gateway

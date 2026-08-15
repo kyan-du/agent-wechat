@@ -86,12 +86,14 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 
 ### 3. Configure the channel
 
-```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+OpenClaw's channel catalog may map `openclaw channels add --channel wechat` to its official Weixin plugin rather than this source plugin. Configure the staged plugin through its schema keys and verify the runtime load explicitly:
 
-# Override server URL and token
-openclaw channels add --channel wechat --url <url> --token <token>
+```bash
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+# Optional when the server requires an explicit token:
+openclaw config set channels.wechat.token <token>
+openclaw plugins inspect wechat --runtime
 ```
 
 Or edit `~/.openclaw/openclaw.json` directly:

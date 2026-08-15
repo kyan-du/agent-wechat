@@ -25,7 +25,9 @@ pnpm cli -- up
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 node scripts/prepare-openclaw-plugin.mjs
 openclaw plugins install -l ./.artifacts/openclaw-extension
-openclaw channels add --channel wechat
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+openclaw plugins inspect wechat --runtime
 ```
 
 No additional configuration is needed — the defaults (`http://localhost:6174` and the shared token file) work automatically.
