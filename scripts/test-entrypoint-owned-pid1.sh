@@ -11,6 +11,13 @@ if [ "$$" -ne 1 ]; then
   if unshare --user --pid --fork --mount-proc --map-root-user true >/dev/null 2>&1; then
     exec unshare --user --pid --fork --mount-proc --map-root-user bash "$0"
   fi
+  if sudo -n unshare --pid --fork --mount-proc true >/dev/null 2>&1; then
+    exec sudo -n unshare --pid --fork --mount-proc bash "$0"
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    exec docker run --rm -v "$ROOT:/src:ro" -w /src debian:bookworm-slim \
+      bash /src/scripts/test-entrypoint-owned-pid1.sh
+  fi
   echo "FAIL: cannot become PID 1 to run ownership regression" >&2
   exit 1
 fi
