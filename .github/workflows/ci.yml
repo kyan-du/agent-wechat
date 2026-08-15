@@ -39,7 +39,7 @@ jobs:
               - 'scripts/validate-docker-context.mjs'
               - 'scripts/test-release-audit.sh'
               - 'docs/release-audit/**'
-              - 'docker/.dockerignore'
+              - 'docker/**'
             rust:
               - 'packages/agent-server-rust/**'
               - '.github/workflows/ci.yml'

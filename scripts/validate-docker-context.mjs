@@ -59,9 +59,26 @@ for (const path of required) {
   }
 }
 if (invalid.length) throw new Error(`required Docker context tools invalid: ${invalid.join(', ')}`);
-// Keep this aligned with every local-material class in docker/.dockerignore. In
-// particular, credential/secret/token are filename substrings, not directories.
-const forbiddenPattern = /(^|\/)(fixtures?|captures?|screenshots|qrcodes?|qr|cache|__pycache__|\.data)(\/|$)|(^|\/)[^/]*(?:credential|secret|token)[^/]*$|(^|\/)(?:wechat\.deb|\.env(?:\..*)?|[^/]*\.(?:deb|partial|db|db-wal|db-shm|sqlite|sqlite3|pem|key|p12|log|screenshot|qr|qrcode|pyc))$|^tools\/test_/i;
-const leaked = walk(context).filter(path => forbiddenPattern.test(path) && !ignored(path));
+
+// Complete semantic mirror of every local-material class in docker/.dockerignore.
+// This deliberately evaluates all path components so an accidental negation cannot
+// expose a secret directory merely because its final filename looks harmless.
+function forbidden(path) {
+  const lower = path.toLowerCase();
+  const parts = lower.split('/');
+  const base = parts.at(-1);
+  const hasComponent = value => parts.includes(value);
+  return base === 'wechat.deb' || base.endsWith('.deb') || base.endsWith('.partial') ||
+    hasComponent('cache') ||
+    base === '.env' || base.startsWith('.env.') ||
+    parts.some(part => /credential|secret|token/.test(part)) ||
+    /\.(?:pem|key|p12|db|log)$/.test(base) || /\.db-/.test(base) || /\.sqlite/.test(base) ||
+    ['screenshots', 'captures', 'fixtures', 'qr', 'qrcode', '.data'].some(hasComponent) ||
+    /\.(?:screenshot|qr|qrcode)(?:\.|$)/.test(base) ||
+    base === '.ds_store' || hasComponent('__pycache__') || base.endsWith('.pyc') ||
+    (parts[0] === 'tools' && base.startsWith('test_')) ||
+    (parts[0] === 'agent-server-rust' && parts[1] === 'target');
+}
+const leaked = walk(context).filter(path => forbidden(path) && !ignored(path));
 if (leaked.length) throw new Error(`forbidden Docker context paths present: ${leaked.join(', ')}`);
 console.log(`Docker context validated: ${required.length} required /opt/tools sources are regular and safe; forbidden local material absent.`);

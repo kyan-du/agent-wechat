@@ -26,10 +26,17 @@ probe_forbidden() {
   sed -i.bak '$d' docker/.dockerignore && rm docker/.dockerignore.bak
   rm -f "docker/$path"
 }
-for path in tools/mycredential.txt tools/mysecret.txt tools/mytoken.txt arbitrary.deb arbitrary.log cache/probe.txt nested/cache/probe.txt; do
+for path in \
+  tools/mycredential.txt tools/mysecret.txt tools/mytoken.txt \
+  mysecret-dir/probe.txt mycredential-dir/probe.txt mytoken-dir/probe.txt \
+  dist/mysecret.txt dist/mycredential.txt dist/mytoken.txt dist/.env.local \
+  arbitrary.deb arbitrary.log cache/probe.txt nested/cache/probe.txt \
+  state.db-journal state.sqlite-wal .DS_Store agent-server-rust/target/probe.txt; do
   probe_forbidden "$path"
 done
-rmdir docker/cache docker/nested/cache docker/nested 2>/dev/null || true
+rmdir docker/cache docker/nested/cache docker/nested \
+  docker/mysecret-dir docker/mycredential-dir docker/mytoken-dir docker/dist \
+  docker/agent-server-rust/target docker/agent-server-rust 2>/dev/null || true
 
 # Required sources must be real regular files contained by the context. Wrapper
 # commands (everything except imported .py modules) must already be executable.
