@@ -1,4 +1,42 @@
-cache/
+# Local/downloaded payloads are not release build-context inputs. Release builds
+# must download and verify an approved payload only after redistribution is cleared.
+wechat.deb
+*.deb
 *.partial
+cache/
+**/cache/
+# Secrets, local state, captures and databases.
+.env
+.env.*
+**/.env
+**/.env.*
+*credential*
+*secret*
+*token*
+*.pem
+*.key
+*.p12
+*.db
+*.db-*
+*.sqlite*
+*.log
+# Captures are local state; keep production tools such as tools/screenshot.
+screenshots/
+captures/
+fixtures/
+qr/
+qrcode/
+*.screenshot
+*.screenshot.*
+*.qr
+*.qr.*
+*.qrcode
+*.qrcode.*
+.data/
+**/.data/
+# Development-only material.
 .DS_Store
+**/__pycache__/
+**/*.pyc
+tools/test_*
 agent-server-rust/target/

@@ -4,10 +4,11 @@
   "type": "module",
   "files": [
     "dist",
-    "openclaw.plugin.json"
+    "openclaw.plugin.json",
+    "!dist/.release-metafile.json"
   ],
   "scripts": {
-    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --external:openclaw",
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --metafile=dist/.release-metafile.json --external:openclaw",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types src/*.test.ts"
   },
