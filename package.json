@@ -9,6 +9,7 @@
     "build:watch": "turbo watch build",
     "typecheck": "turbo run typecheck",
     "test:release-boundary": "node scripts/validate-release-boundary.mjs",
+    "test:release-inputs": "node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs",
     "test:root-cli-image": "node --test --experimental-strip-types src/lib/image.test.mts",
     "download:wechat": "bash scripts/download-wechat.sh",
     "build:image": "bash scripts/build-images-local.sh",

@@ -1,7 +1,7 @@
 # ============================================
 # Stage 1: Build the Rust server binary
 # ============================================
-FROM rust:1.93-bookworm AS builder
+FROM rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS builder
 
 ARG BUILD_MODE=release
 
@@ -31,7 +31,7 @@ RUN mkdir -p /output && cp target/${BUILD_MODE}/agent-server /output/agent-serve
 # ============================================
 # Stage 2: Final runtime image
 # ============================================
-FROM ubuntu:22.04
+FROM ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -80,20 +80,35 @@ RUN pip3 install frida-tools silk-python
 # noVNC (browser-based VNC viewer) + websockify
 # ============================================
 ARG NOVNC_VERSION=1.5.0
+ARG NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
+ARG NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a
 RUN pip3 install websockify \
-    && curl -L https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz | tar xz -C /opt \
-    && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc
+    && curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
+    && echo "$NOVNC_SHA256  /tmp/novnc.tar.gz" | sha256sum --check --strict \
+    && tar xzf /tmp/novnc.tar.gz -C /opt \
+    && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc \
+    && mkdir -p /usr/share/doc/agent-wechat/licenses/novnc \
+    && cp /opt/novnc/LICENSE.txt /opt/novnc/docs/LICENSE.* /usr/share/doc/agent-wechat/licenses/novnc/ \
+    && cp /opt/novnc/vendor/pako/LICENSE /usr/share/doc/agent-wechat/licenses/novnc/PAKO-LICENSE \
+    && rm /tmp/novnc.tar.gz
 
 # ============================================
 # SQLCipher 4 CLI (needed for wechat-db reads)
 # ============================================
+ARG SQLCIPHER_VERSION=4.6.1
+ARG SQLCIPHER_URL=https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz
+ARG SQLCIPHER_SHA256=d8f9afcbc2f4b55e316ca4ada4425daf3d0b4aab25f45e11a802ae422b9f53a3
 RUN cd /tmp \
-    && curl -L https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz | tar xz \
-    && cd sqlcipher-4.6.1 \
+    && curl --fail --location --retry 3 -o sqlcipher.tar.gz "$SQLCIPHER_URL" \
+    && echo "$SQLCIPHER_SHA256  sqlcipher.tar.gz" | sha256sum --check --strict \
+    && tar xzf sqlcipher.tar.gz \
+    && cd sqlcipher-${SQLCIPHER_VERSION} \
+    && mkdir -p /usr/share/doc/agent-wechat/licenses/sqlcipher \
+    && cp LICENSE.md /usr/share/doc/agent-wechat/licenses/sqlcipher/ \
     && ./configure --enable-tempstore=yes CFLAGS="-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_OPENSSL" LDFLAGS="-lcrypto" \
     && make -j$(nproc) \
     && cp sqlcipher /usr/local/bin/sqlcipher \
-    && cd / && rm -rf /tmp/sqlcipher-4.6.1
+    && cd / && rm -rf /tmp/sqlcipher-${SQLCIPHER_VERSION} /tmp/sqlcipher.tar.gz
 
 # ============================================
 # X11 socket directory
@@ -102,21 +117,29 @@ RUN mkdir -p /tmp/.X11-unix && chown root:root /tmp/.X11-unix && chmod 1777 /tmp
 
 # ============================================
 # WeChat
-# If docker/wechat.deb exists in the build context, it is used directly.
-# Otherwise the .deb is downloaded at build time (CI path).
-# Run `pnpm download:wechat` to cache locally for faster builds.
+# The proprietary payload is fetched from the recorded source and verified
+# fail closed. This provenance evidence is not a redistribution grant.
 # ============================================
 ARG TARGETARCH
-COPY wechat.de[b] /tmp/
-RUN if [ -f /tmp/wechat.deb ]; then \
-      echo "Installing WeChat from local .deb"; \
-    else \
-      ARCH_SUFFIX=$([ "$TARGETARCH" = "arm64" ] && echo "arm64" || echo "x86_64") \
-      && echo "Downloading WeChat for ${ARCH_SUFFIX}..." \
-      && curl -L -o /tmp/wechat.deb "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${ARCH_SUFFIX}.deb"; \
-    fi \
+ARG WECHAT_VERSION=4.1.1.8
+ARG WECHAT_AMD64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb
+ARG WECHAT_AMD64_SHA256=c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b
+ARG WECHAT_ARM64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb
+ARG WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f
+RUN case "$TARGETARCH" in \
+      amd64) WECHAT_URL="$WECHAT_AMD64_URL"; WECHAT_SHA256="$WECHAT_AMD64_SHA256"; DEB_ARCH=amd64 ;; \
+      arm64) WECHAT_URL="$WECHAT_ARM64_URL"; WECHAT_SHA256="$WECHAT_ARM64_SHA256"; DEB_ARCH=arm64 ;; \
+      *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --location --retry 3 -o /tmp/wechat.deb "$WECHAT_URL" \
+    && echo "$WECHAT_SHA256  /tmp/wechat.deb" | sha256sum --check --strict \
+    && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat \
+    && test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION" \
+    && test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH" \
     && (dpkg -i /tmp/wechat.deb || (apt-get update && apt-get install -y -f)) \
-    && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb
+    && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb \
+    && test -s /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt \
+    && test -s /usr/share/doc/agent-wechat/licenses/sqlcipher/LICENSE.md
 
 RUN useradd -m -s /bin/bash wechat
 

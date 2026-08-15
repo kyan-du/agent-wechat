@@ -20,14 +20,14 @@ Private workspaces (`agent-server`, `shared`, `wechaty-gateway`, root/docs) are 
 * noVNC: tagged source `https://github.com/novnc/noVNC/blob/v1.5.0/LICENSE.txt` (the Dockerfile fetches that tag). Preserve the complete tagged distribution and notices; review MPL source-availability and asset attribution/share-alike duties before shipping.
 * SQLCipher: tagged source `https://github.com/sqlcipher/sqlcipher/blob/v4.6.1/LICENSE.md`. Binary distributions must reproduce its copyright, conditions, and disclaimer in documentation/materials.
 * WeChat: payload URL `https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_{x86_64,arm64}.deb` proves origin only. It is mutable, unhashed, unversioned in the build, and is not a redistribution grant.
-* `rust:1.93-bookworm` and `ubuntu:22.04` are mutable tags. Their exact digest and installed package set cannot be concluded from source alone.
+* `rust:1.93-bookworm` and `ubuntu:22.04` are now pinned to audited multi-architecture index digests in `docker/release-inputs.json`; exact installed package/license conclusions still require the P1-C1b image report.
 
 ## Release blockers
 
 1. Written, authoritative licensing provenance for upstream project code and the fork's right to redistribute it; then an approved root `LICENSE`/`NOTICE` and matching package metadata.
 2. WeChat terms that explicitly permit the intended third-party container redistribution. If permission cannot be established, redesign release artifacts to require user-side acquisition; a Tencent download URL alone is insufficient.
-3. Pin every base image and remote input by immutable digest/hash. Record WeChat package version, SHA-256, architecture and retrieval source without committing its binary/cache.
-4. Preserve complete noVNC and SQLCipher notices in the image and release materials; establish and satisfy noVNC's file-level mixed-license obligations.
+3. **Mechanically addressed by P1-C1a:** base images and direct archives/payloads are pinned or hash-verified, and WeChat version/SHA-256/architecture/source evidence is recorded without committing its binary/cache. Re-verify freshness and exact evidence at publication approval.
+4. **Notice carriage addressed by P1-C1a:** complete identified noVNC and SQLCipher notices are retained in the image. Legal review must still establish and satisfy noVNC's file-level mixed-license obligations.
 5. Produce an SBOM and license report from each exact final multi-arch image, including apt, pip, Rust/vendored C/OpenSSL, noVNC/web assets, SQLCipher and WeChat package contents. Review all `NOASSERTION`, unknown and copyleft entries.
 6. Produce dependency license evidence for the exact npm lock/build graph and include notices required by code bundled by esbuild.
 7. P1-A release identities/manifests are not final. Re-run `scripts/audit-release.sh` after its merge and review the resulting tarball lists before release approval.
@@ -45,3 +45,25 @@ Run `corepack pnpm install --frozen-lockfile`, build the three public packages, 
 `npm-materials.json` is generated from the exact `pnpm-lock.yaml`, package manifests, dry-run tarball manifests, and esbuild metafiles. It records packed paths plus bundled, external runtime, peer, and dev dependencies with resolved version/license metadata. In particular: CLI bundles commander and zod, leaves qrcode-terminal external, and ships project file `dist/device_identity.py`; OpenClaw bundles zod and qrcode-terminal; Wechaty puppet bundles zod while file-box is external and wechaty-puppet is a peer. `NOASSERTION` is a blocker, not a permissive conclusion. MIT components (commander/zod) require preservation of their license notice; Apache-2.0 components (file-box/wechaty-puppet) require license/notice handling. The repository currently ships none of these notices, so npm release remains blocked.
 
 The committed inventory describes the tree content, not a self-referential commit SHA. CI proves the exact audited head by regenerating it and requiring a zero diff. The GitHub Actions run and head SHA are the external immutable evidence pair.
+
+## P1-C1a immutable-input and notice update
+
+P1-C1a pins the multi-architecture Docker base-image indexes by digest and
+records all release-relevant direct downloads in `docker/release-inputs.json`.
+noVNC 1.5.0 and SQLCipher 4.6.1 archives are SHA-256 verified before extraction;
+the complete noVNC top-level/docs/pako license set and SQLCipher `LICENSE.md`
+are retained in `/usr/share/doc/agent-wechat/licenses` and asserted during the
+image build. The WeChat 4.1.1.8 amd64/arm64 downloads are independently
+recorded by source, package architecture, and SHA-256, and the build verifies
+hash plus Debian package metadata before installation. Local payloads remain
+excluded from the Docker context and are not committed.
+
+`scripts/validate-release-inputs.mjs` checks manifest/Dockerfile/workflow
+consistency, and `scripts/test-release-inputs.mjs` proves digest, verification,
+and notice drift fail closed. Docker CI remains build-only for amd64 and arm64;
+it has no registry permissions or publication step.
+
+**Publication remains blocked.** Immutable provenance and retained third-party
+notices do not supply the absent upstream source-code grant, do not establish
+permission to redistribute WeChat, and do not replace the exact-image SBOM and
+license report required by P1-C1b.

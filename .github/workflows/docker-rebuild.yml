@@ -9,6 +9,9 @@ on:
       - 'docker/**'
       - 'packages/agent-server-rust/**'
       - 'scripts/validate-release-boundary.mjs'
+      - 'docker/release-inputs.json'
+      - 'scripts/validate-release-inputs.mjs'
+      - 'scripts/test-release-inputs.mjs'
       - '.github/workflows/docker-rebuild.yml'
   push:
     branches: [main]
@@ -16,6 +19,9 @@ on:
       - 'docker/**'
       - 'packages/agent-server-rust/**'
       - 'scripts/validate-release-boundary.mjs'
+      - 'docker/release-inputs.json'
+      - 'scripts/validate-release-inputs.mjs'
+      - 'scripts/test-release-inputs.mjs'
       - '.github/workflows/docker-rebuild.yml'
 
 permissions:
@@ -28,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: node scripts/validate-release-boundary.mjs
+      - run: node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs
 
   build:
     name: Build only (${{ matrix.arch }})
