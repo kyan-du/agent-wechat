@@ -76,7 +76,7 @@ Global `--json` emits exactly one versioned JSON envelope on stdout. Diagnostics
 ## Upgrade
 
 - `wx upgrade --check` is read-only.
-- `wx upgrade --cli` prints an exact npm command; it never invokes npm, requests sudo, or replaces itself.
+- `pnpm cli upgrade --cli` fails with `CLI_UPGRADE_UNAVAILABLE` until P1-B npm publication is independently verified; it never prints or executes a premature install command.
 - `wx upgrade --image <reference>` resolves an immutable digest, rebuilds the container with persistent volumes, verifies health, and rolls the container/image back on failure. It does not claim atomic CLI+image rollback.
 
 The hidden `pnpm cli dev sync-server --binary <path> --sha256 <hex>` command is only for checked local development artifacts. It checksum-verifies the binary and restores the previous server if health validation fails.

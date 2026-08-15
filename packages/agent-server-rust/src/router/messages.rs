@@ -14,8 +14,7 @@ use crate::outbound::{
 };
 use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
-use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_image_keys, get_stored_keys, store_keys};
+use crate::tools::wechat_keys::{get_image_keys, get_stored_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
 
@@ -60,30 +59,10 @@ pub async fn list_messages(
         None => return empty_page(),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if message_*.db files exist on disk without stored keys, re-extract
-    let on_disk = list_account_dbs(&logged_in_user);
-    let has_missing_message_db = on_disk.iter().any(|name| {
-        name.starts_with("message_")
-            && name.ends_with(".db")
-            && !name.contains("fts")
-            && !name.contains("resource")
-            && !keys.contains_key(name.as_str())
-    });
-    if has_missing_message_db {
-        if let Some(pid) = find_wechat_pid() {
-            let extracted = extract_keys_async(pid).await;
-            if !extracted.is_empty() {
-                let db = get_db();
-                store_keys(&db, &session.id, &logged_in_user, &extracted);
-                keys = get_stored_keys(&db, &session.id, &logged_in_user);
-            }
-        }
-    }
 
     if !keys.keys().any(|k| {
         k.starts_with("message_")
@@ -101,8 +80,7 @@ pub async fn list_messages(
         params.limit + 1,
         params.cursor.as_deref(),
     );
-    let has_more = messages.len() > params.limit as usize;
-    messages.truncate(params.limit as usize);
+    let has_more = crate::tools::page_cursor::truncate_lookahead(&mut messages, params.limit);
     let next_cursor = has_more.then(|| messages.last()).flatten().and_then(|message| {
         crate::tools::page_cursor::encode(
             &format!("messages:{chat_id}"),
@@ -138,26 +116,10 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         }
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if media_*.db files exist on disk without stored keys, extract them
-    let on_disk = list_account_dbs(&logged_in_user);
-    let has_missing_media = on_disk.iter().any(|name| {
-        name.starts_with("media_") && name.ends_with(".db") && !keys.contains_key(name.as_str())
-    });
-    if has_missing_media {
-        if let Some(pid) = find_wechat_pid() {
-            let extracted = extract_keys_async(pid).await;
-            if !extracted.is_empty() {
-                let db = get_db();
-                store_keys(&db, &session.id, &logged_in_user, &extracted);
-                keys = get_stored_keys(&db, &session.id, &logged_in_user);
-            }
-        }
-    }
 
     let image_keys = {
         let db = get_db();

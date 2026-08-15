@@ -20,6 +20,16 @@ pub fn encode<T: Serialize>(kind: &str, value: T) -> Result<String, &'static str
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+pub fn lookahead_query_limit(requested: i64, public_max: i64) -> i64 {
+    requested.clamp(1, public_max + 1)
+}
+
+pub fn truncate_lookahead<T>(items: &mut Vec<T>, public_limit: i64) -> bool {
+    let has_more = items.len() > public_limit as usize;
+    items.truncate(public_limit as usize);
+    has_more
+}
+
 pub fn decode<T: DeserializeOwned>(kind: &str, raw: &str) -> Result<T, &'static str> {
     if raw.is_empty() || raw.len() > 1024 || !raw.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err("INVALID_CURSOR");
@@ -35,6 +45,19 @@ pub fn decode<T: DeserializeOwned>(kind: &str, raw: &str) -> Result<T, &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookahead_limits_retain_the_boundary_row() {
+        assert_eq!(lookahead_query_limit(101, 100), 101);
+        assert_eq!(lookahead_query_limit(201, 200), 201);
+        assert_eq!(lookahead_query_limit(999, 200), 201);
+        let mut chats = (0..101).collect::<Vec<_>>();
+        assert!(truncate_lookahead(&mut chats, 100));
+        assert_eq!(chats.len(), 100);
+        let mut messages = (0..201).collect::<Vec<_>>();
+        assert!(truncate_lookahead(&mut messages, 200));
+        assert_eq!(messages.len(), 200);
+    }
 
     #[test]
     fn cursors_are_versioned_and_kind_bound() {

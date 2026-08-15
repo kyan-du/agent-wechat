@@ -14,14 +14,14 @@ export const EXIT = {
 
 export type OutputEnvelope<T = unknown> =
   | { schemaVersion: 1; ok: true; code: "OK"; data: T }
-  | { schemaVersion: 1; ok: false; code: string; error: string; retryAfter?: number; commitAttempted?: boolean };
+  | { schemaVersion: 1; ok: false; code: string; error: string; retryAfter?: number; commitAttempted?: boolean; diagnostics?: unknown };
 
 export class CliError extends Error {
   constructor(
     readonly code: string,
     message: string,
     readonly exitCode: number,
-    readonly details?: { retryAfter?: number; commitAttempted?: boolean },
+    readonly details?: { retryAfter?: number; commitAttempted?: boolean; diagnostics?: unknown },
   ) {
     super(message);
     this.name = "CliError";

@@ -5,8 +5,7 @@ use crate::db::get_db;
 use crate::ia::types::Contact;
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_contacts;
-use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, store_keys};
+use crate::tools::wechat_keys::get_stored_keys;
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -45,25 +44,10 @@ pub async fn list_contacts(Query(params): Query<ListParams>) -> Response {
         None => return empty_page(),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if contact.db exists on disk without stored key, re-extract
-    if !keys.contains_key("contact.db") {
-        let on_disk = list_account_dbs(&logged_in_user);
-        if on_disk.iter().any(|name| name == "contact.db") {
-            if let Some(pid) = find_wechat_pid() {
-                let extracted = extract_keys_async(pid).await;
-                if !extracted.is_empty() {
-                    let db = get_db();
-                    store_keys(&db, &session.id, &logged_in_user, &extracted);
-                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
-                }
-            }
-        }
-    }
 
     if !keys.contains_key("contact.db") {
         return empty_page();
@@ -75,8 +59,7 @@ pub async fn list_contacts(Query(params): Query<ListParams>) -> Response {
         params.limit + 1,
         params.cursor.as_deref(),
     );
-    let has_more = contacts.len() > params.limit as usize;
-    contacts.truncate(params.limit as usize);
+    let has_more = crate::tools::page_cursor::truncate_lookahead(&mut contacts, params.limit);
     let next_cursor = has_more.then(|| contacts.last()).flatten().and_then(|contact| {
         let label = contact.remark.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| contact.nick_name.clone());
         crate::tools::page_cursor::encode("contacts", (contact.remark.is_none(), label.to_lowercase(), contact.username.clone())).ok()
@@ -99,25 +82,10 @@ pub async fn find_contacts(Query(params): Query<FindParams>) -> Json<Vec<Contact
         None => return Json(Vec::new()),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if contact.db exists on disk without stored key, re-extract
-    if !keys.contains_key("contact.db") {
-        let on_disk = list_account_dbs(&logged_in_user);
-        if on_disk.iter().any(|name| name == "contact.db") {
-            if let Some(pid) = find_wechat_pid() {
-                let extracted = extract_keys_async(pid).await;
-                if !extracted.is_empty() {
-                    let db = get_db();
-                    store_keys(&db, &session.id, &logged_in_user, &extracted);
-                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
-                }
-            }
-        }
-    }
 
     Json(wechat_contacts::find_contacts(
         &logged_in_user,

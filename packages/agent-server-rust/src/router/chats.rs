@@ -14,8 +14,7 @@ use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan};
 use crate::sessions::manager::get_session;
 use crate::tools::wechat_chats;
-use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, store_keys};
+use crate::tools::wechat_keys::get_stored_keys;
 
 #[derive(Deserialize)]
 pub struct ListParams {
@@ -56,28 +55,10 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Response {
         None => return empty_page(),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
-    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
-        let on_disk = list_account_dbs(&logged_in_user);
-        let has_missing = on_disk.iter().any(|name| {
-            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
-        });
-        if has_missing {
-            if let Some(pid) = find_wechat_pid() {
-                let extracted = extract_keys_async(pid).await;
-                if !extracted.is_empty() {
-                    let db = get_db();
-                    store_keys(&db, &session.id, &logged_in_user, &extracted);
-                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
-                }
-            }
-        }
-    }
 
     if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
         return empty_page();
@@ -90,8 +71,7 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Response {
         params.cursor.as_deref(),
         params.unread_only,
     );
-    let has_more = chats.len() > params.limit as usize;
-    chats.truncate(params.limit as usize);
+    let has_more = crate::tools::page_cursor::truncate_lookahead(&mut chats, params.limit);
     let next_cursor = has_more.then(|| chats.last()).flatten().and_then(|chat| {
         let sort = chat.sort_timestamp;
         crate::tools::page_cursor::encode("chats", (sort, chat.id.clone())).ok()
@@ -109,28 +89,10 @@ pub async fn get_chat(Path(id): Path<String>) -> Json<Option<Chat>> {
         None => return Json(None),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
-    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
-        let on_disk = list_account_dbs(&logged_in_user);
-        let has_missing = on_disk.iter().any(|name| {
-            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
-        });
-        if has_missing {
-            if let Some(pid) = find_wechat_pid() {
-                let extracted = extract_keys_async(pid).await;
-                if !extracted.is_empty() {
-                    let db = get_db();
-                    store_keys(&db, &session.id, &logged_in_user, &extracted);
-                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
-                }
-            }
-        }
-    }
 
     Json(wechat_chats::get_chat_by_username(
         &logged_in_user,
@@ -154,28 +116,10 @@ pub async fn find_chats(Query(params): Query<FindParams>) -> Json<Vec<Chat>> {
         None => return Json(Vec::new()),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if session.db or contact.db exist on disk without stored keys, re-extract
-    if !keys.contains_key("session.db") || !keys.contains_key("contact.db") {
-        let on_disk = list_account_dbs(&logged_in_user);
-        let has_missing = on_disk.iter().any(|name| {
-            (name == "session.db" || name == "contact.db") && !keys.contains_key(name.as_str())
-        });
-        if has_missing {
-            if let Some(pid) = find_wechat_pid() {
-                let extracted = extract_keys_async(pid).await;
-                if !extracted.is_empty() {
-                    let db = get_db();
-                    store_keys(&db, &session.id, &logged_in_user, &extracted);
-                    keys = get_stored_keys(&db, &session.id, &logged_in_user);
-                }
-            }
-        }
-    }
 
     Json(wechat_chats::find_chats_by_name(
         &logged_in_user,

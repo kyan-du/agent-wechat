@@ -101,7 +101,7 @@ pub fn list_contacts(
         }
         None => String::new(),
     };
-    let safe_limit = limit.clamp(1, 200);
+    let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 200);
     // local_type: 0=system notifications, 1=contacts+official, 2=chatrooms, 3=contacts, 5=openim
     let rows = query_wechat_db(
         &contact_db,

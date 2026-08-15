@@ -187,14 +187,15 @@ async function resetAuth(yes: boolean): Promise<void> {
 
 function programStatus(): Record<string, unknown> {
   const inventory = loadInventory();
-  const container = dockerAvailable() ? inspectContainer() : undefined;
+  if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT, { diagnostics: { docker: "unavailable", inventory: inventory ? "trusted" : "absent" } });
+  const container = inspectContainer();
   if (container) {
     if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
     assertOwnedContainer(container, inventory);
   }
   return {
     cliVersion: VERSION,
-    docker: dockerAvailable() ? "available" : "unavailable",
+    docker: "available",
     container: container ? (container.State?.Running ? "running" : "stopped") : "absent",
     imageDigest: inventory?.imageDigest,
     inventory: inventory ? "trusted" : "absent",
@@ -266,13 +267,15 @@ program.command("restart").description("Restart while preserving data").action((
 program.command("status").description("Show read-only lifecycle and authentication status").action(() => action(async () => {
   const status: Record<string, unknown> = programStatus();
   if (status.container === "running") {
-    try {
-      const server = await client().status();
-      status.serverVersion = server.version;
-      status.apiVersion = server.apiVersion;
-      status.compatible = server.apiVersion === 1;
-      status.auth = await client().authStatus();
-    } catch { status.auth = { status: "unknown" }; status.compatible = false; }
+    let server: Awaited<ReturnType<WeChatClient["status"]>>;
+    try { server = await client().status(); }
+    catch { throw new CliError("SERVER_UNREACHABLE", "agent-wechat server is unreachable", EXIT.SERVICE, { diagnostics: status }); }
+    status.serverVersion = server.version;
+    status.apiVersion = server.apiVersion;
+    status.compatible = server.apiVersion === 1;
+    if (!status.compatible) throw new CliError("IMAGE_API_INCOMPATIBLE", "server API version is incompatible", EXIT.SERVICE, { diagnostics: status });
+    try { status.auth = await client().authStatus(); }
+    catch { throw new CliError("AUTH_PROBE_FAILED", "authentication status probe failed", EXIT.SERVICE, { diagnostics: status }); }
   }
   output(status, () => Object.entries(status).forEach(([key, value]) => console.log(`${key}: ${typeof value === "object" ? JSON.stringify(value) : value}`)));
 }));
@@ -283,7 +286,16 @@ program.command("doctor").description("Run read-only environment and compatibili
   checks.token = readToken() ? "present" : "absent";
   checks.configPermissions = fs.existsSync(CONFIG_DIR) ? (fs.statSync(CONFIG_DIR).mode & 0o777).toString(8) : "absent";
   if (checks.container === "running") {
-    try { checks.health = (await fetch(`http://localhost:${DEFAULT_PORT}/health`)).ok ? "ok" : "failed"; } catch { checks.health = "unreachable"; }
+    try { checks.health = (await fetch(`http://localhost:${DEFAULT_PORT}/health`)).ok ? "ok" : "failed"; }
+    catch { checks.health = "unreachable"; }
+    if (checks.health !== "ok") throw new CliError("HEALTH_CHECK_FAILED", "service health check failed", EXIT.SERVICE, { diagnostics: checks });
+    let server: Awaited<ReturnType<WeChatClient["status"]>>;
+    try { server = await client().status(); }
+    catch { throw new CliError("SERVER_UNREACHABLE", "agent-wechat server is unreachable", EXIT.SERVICE, { diagnostics: checks }); }
+    checks.apiVersion = server.apiVersion;
+    if (server.apiVersion !== 1) throw new CliError("IMAGE_API_INCOMPATIBLE", "server API version is incompatible", EXIT.SERVICE, { diagnostics: checks });
+    try { checks.auth = await client().authStatus(); }
+    catch { throw new CliError("AUTH_PROBE_FAILED", "authentication status probe failed", EXIT.SERVICE, { diagnostics: checks }); }
   }
   output(checks, () => Object.entries(checks).forEach(([key, value]) => console.log(`${key}: ${value}`)));
 }));
@@ -350,7 +362,7 @@ program.command("upgrade").description("Check CLI/image upgrades without claimin
   .action((options) => action(async () => {
     const selected = [options.check === true, options.cli === true, typeof options.image === "string"].filter(Boolean).length;
     if (selected > 1) throw new CliError("ARGUMENT_CONFLICT", "--check, --cli, and --image are mutually exclusive", EXIT.ARGUMENT);
-    if (options.cli) return output({ command: `npm install -g @kyan-du/agent-wechat-cli@${VERSION}` }, () => console.log(`npm install -g @kyan-du/agent-wechat-cli@${VERSION}`));
+    if (options.cli) throw new CliError("CLI_UPGRADE_UNAVAILABLE", "P1-B npm publication has not been independently verified; use the repository-only pnpm cli workflow", EXIT.ENVIRONMENT);
     if (options.image) {
       const result = await replaceImage({ image: options.image, identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken() });
       return output({ upgraded: true, imageDigest: result.imageDigest }, () => console.log(`Image upgraded to ${result.imageDigest}`));

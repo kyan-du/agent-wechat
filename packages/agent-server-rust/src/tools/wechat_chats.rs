@@ -33,7 +33,7 @@ pub fn list_chats(
         None => String::new(),
     };
     let unread_clause = if unread_only { " AND unread_count > 0" } else { "" };
-    let safe_limit = limit.clamp(1, 100);
+    let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 100);
     let sessions = query_wechat_db(
         &session_db,
         session_key,

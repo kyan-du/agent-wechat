@@ -288,7 +288,7 @@ pub fn list_messages(
         }
         None => String::new(),
     };
-    let safe_limit = limit.clamp(1, 200);
+    let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 200);
     // Stable keyset pagination prevents inserts from shifting subsequent pages.
     let rows = query_wechat_db(
         &db_path,

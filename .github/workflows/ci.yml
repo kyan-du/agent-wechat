@@ -47,6 +47,7 @@ jobs:
               - 'scripts/test-prerelease-contract.sh'
               - 'scripts/test-prerelease-manifest.sh'
               - 'scripts/test-packed-cli.sh'
+              - 'scripts/test-packed-cli-health.mjs'
               - 'release/**'
               - 'docs/release/**'
               - '.github/workflows/release.yml'

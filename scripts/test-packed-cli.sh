@@ -14,6 +14,8 @@ mkdir -p "$STAGE/node_modules/qrcode-terminal"
 cp -R packages/cli/node_modules/qrcode-terminal/* "$STAGE/node_modules/qrcode-terminal/"
 tar -xzf "$PACKS/$TARBALL" -C "$STAGE"
 CLI="$STAGE/package/dist/cli.js"
+NODE=$(command -v node)
+NO_DOCKER_PATH=$(dirname "$NODE"):/usr/bin:/bin
 
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.apiVersion!==1||x.repository!=="ghcr.io/kyan-du/agent-wechat"||x.floatingTagsAllowed!==false||!x.allowedReferences.includes("sha256-digest"))process.exit(1)' "$STAGE/package/dist/image-compatibility.json"
 node "$CLI" --help | grep -q 'start'
@@ -42,5 +44,23 @@ set -e
 test "$conflict_code" -eq 2
 test ! -s "$STAGE/conflict-err"
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.ok||x.code!=="ARGUMENT_CONFLICT")process.exit(1)' "$STAGE/conflict-json"
+for command in status doctor; do
+  set +e
+  PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" --json "$command" >"$STAGE/$command-json" 2>"$STAGE/$command-err"
+  command_code=$?
+  set -e
+  test "$command_code" -eq 3
+  test ! -s "$STAGE/$command-err"
+  node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.ok||x.code!=="DOCKER_UNAVAILABLE"||x.diagnostics?.docker!=="unavailable")process.exit(1)' "$STAGE/$command-json"
+done
+set +e
+PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" --json upgrade --cli >"$STAGE/upgrade-json" 2>"$STAGE/upgrade-err"
+upgrade_code=$?
+set -e
+test "$upgrade_code" -eq 3
+test ! -s "$STAGE/upgrade-err"
+! grep -q 'npm install' "$STAGE/upgrade-json"
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.ok||x.code!=="CLI_UPGRADE_UNAVAILABLE")process.exit(1)' "$STAGE/upgrade-json"
+node "$ROOT/scripts/test-packed-cli-health.mjs" "$CLI" "$STAGE"
 
 echo 'Packed CLI clean-consumer journeys passed.'

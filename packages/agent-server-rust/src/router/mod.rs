@@ -619,6 +619,20 @@ mod tests {
         assert_eq!(crate::outbound::outbound_sender().status().queue_depth, 0);
     }
 
+    #[test]
+    fn ordinary_read_routes_have_no_key_acquisition_capability() {
+        let sources = [
+            include_str!("chats.rs"),
+            include_str!("contacts.rs"),
+            include_str!("messages.rs"),
+        ];
+        for source in sources {
+            assert!(!source.contains("extract_keys_async"));
+            assert!(!source.contains("store_keys"));
+            assert!(!source.contains("find_wechat_pid"));
+        }
+    }
+
     #[tokio::test]
     async fn list_routes_reject_invalid_limits_and_cursors() {
         let _idempotency_lock = init_test_server_state().await;

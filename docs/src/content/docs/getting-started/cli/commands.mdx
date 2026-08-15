@@ -58,7 +58,7 @@ The recipient must be a stable chat ID. Exactly one payload is accepted. The CLI
 | Command | Behavior |
 |---|---|
 | `pnpm cli upgrade --check` | Read-only current CLI/image report |
-| `pnpm cli upgrade --cli` | Print an exact npm install command; never execute it |
+| `pnpm cli upgrade --cli` | Fail closed until P1-B npm publication is independently verified; never print or execute a premature install command |
 | `pnpm cli upgrade --image <ref>` | Resolve a digest, recreate, health-check, and roll back the container/image on failure |
 
 CLI installation and image rollback are separate boundaries. The hidden development command `pnpm cli dev sync-server --binary <path> --sha256 <hex>` checksum-verifies local output and restores the old binary on health failure.
