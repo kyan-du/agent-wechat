@@ -336,16 +336,26 @@ sleep 0.1
 SERVER_PID="$FOREIGN"
 SERVER_START=""
 SERVER_PGID=""
+SERVER_SID=""
 if _supervise_owned_child; then
   kill "$FOREIGN" 2>/dev/null || true
   fail "foreign pid accepted as owned child"
 fi
-# Even if starttime is copied from the orphan, PPID=1 adoption must not matter:
-# a different recorded starttime still rejects.
+# Live pid + foreign pgid/sid still reject when starttime does not match.
 SERVER_START="not-the-real-starttime"
+SERVER_PGID=$(_supervise_child_pgid "$FOREIGN")
+SERVER_SID=$(_supervise_child_sid "$FOREIGN")
 if _supervise_owned_child; then
   kill "$FOREIGN" 2>/dev/null || true
   fail "mismatched starttime accepted as owned child"
+fi
+# Record the real identity, then corrupt session: must reject.
+_supervise_record_child
+_supervise_owned_child || { kill "$FOREIGN" 2>/dev/null || true; fail "just-recorded child not owned"; }
+SERVER_SID="not-the-real-sid"
+if _supervise_owned_child; then
+  kill "$FOREIGN" 2>/dev/null || true
+  fail "mismatched session accepted as owned child"
 fi
 kill "$FOREIGN" 2>/dev/null || true
 wait "$FOREIGN" 2>/dev/null || true

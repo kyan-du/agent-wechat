@@ -14,6 +14,7 @@
 SERVER_PID=""
 SERVER_START=""
 SERVER_PGID=""
+SERVER_SID=""
 SHUTDOWN_REQUESTED=0
 _SUPERVISE_RECENT_RESTARTS=""
 
@@ -40,13 +41,14 @@ _supervise_rapid_restart_exceeded() {
   [ "$n" -gt "$AGENT_SERVER_RAPID_RESTART_LIMIT" ]
 }
 
-# Field after the comm in /proc/<pid>/stat: 1=state 2=ppid 3=pgrp 20=starttime.
+# Field after the comm in /proc/<pid>/stat: 1=state 2=ppid 3=pgrp 4=session 20=starttime.
 _supervise_stat_field() {
   local pid="$1" field="$2" stat rest n=1 tok
   stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
   rest=${stat##*) }
   for tok in $rest; do
     if [ "$n" -eq "$field" ]; then
+      [ -n "$tok" ] || return 1
       echo "$tok"
       return 0
     fi
@@ -56,33 +58,44 @@ _supervise_stat_field() {
 }
 
 _supervise_child_pgid() {
+  local v
   if [ -r "/proc/$1/stat" ]; then
-    _supervise_stat_field "$1" 3
-    return 0
+    v=$(_supervise_stat_field "$1" 3) && [ -n "$v" ] && { echo "$v"; return 0; }
   fi
   ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+_supervise_child_sid() {
+  local v
+  if [ -r "/proc/$1/stat" ]; then
+    v=$(_supervise_stat_field "$1" 4) && [ -n "$v" ] && { echo "$v"; return 0; }
+  fi
+  ps -o sess= -p "$1" 2>/dev/null | tr -d ' '
 }
 
 # Immutable process identity: Linux starttime from /proc, else lstart.
 # Do not use PPID — container PID 1 adopts orphans.
 _supervise_starttime() {
-  local pid="$1"
+  local pid="$1" v
   if [ -r "/proc/$pid/stat" ]; then
-    _supervise_stat_field "$pid" 20
-    return 0
+    v=$(_supervise_stat_field "$pid" 20) && [ -n "$v" ] && { echo "$v"; return 0; }
   fi
   ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 _supervise_record_child() {
-  local tries=0 start=""
+  local tries=0 start="" pgid="" sid=""
   SERVER_START=""
   SERVER_PGID=""
+  SERVER_SID=""
   while [ "$tries" -lt 20 ]; do
     start=$(_supervise_starttime "$SERVER_PID")
-    if [ -n "$start" ]; then
+    pgid=$(_supervise_child_pgid "$SERVER_PID")
+    sid=$(_supervise_child_sid "$SERVER_PID")
+    if [ -n "$start" ] && [ -n "$pgid" ]; then
       SERVER_START="$start"
-      SERVER_PGID=$(_supervise_child_pgid "$SERVER_PID")
+      SERVER_PGID="$pgid"
+      SERVER_SID="$sid"
       return 0
     fi
     tries=$((tries + 1))
@@ -95,15 +108,25 @@ _supervise_clear_child() {
   SERVER_PID=""
   SERVER_START=""
   SERVER_PGID=""
+  SERVER_SID=""
 }
 
-# True only while SERVER_PID is the process we launched (pid + starttime).
+# True only while live pid + starttime + pgid + session match launch.
 _supervise_owned_child() {
-  local start=""
+  local start="" pgid="" sid=""
   [ -n "${SERVER_PID:-}" ] && [ -n "${SERVER_START:-}" ] || return 1
   kill -0 "$SERVER_PID" 2>/dev/null || return 1
   start=$(_supervise_starttime "$SERVER_PID")
-  [ -n "$start" ] && [ "$start" = "$SERVER_START" ]
+  [ -n "$start" ] && [ "$start" = "$SERVER_START" ] || return 1
+  if [ -n "${SERVER_PGID:-}" ]; then
+    pgid=$(_supervise_child_pgid "$SERVER_PID")
+    [ "$pgid" = "$SERVER_PGID" ] || return 1
+  fi
+  if [ -n "${SERVER_SID:-}" ]; then
+    sid=$(_supervise_child_sid "$SERVER_PID")
+    [ "$sid" = "$SERVER_SID" ] || return 1
+  fi
+  return 0
 }
 
 _supervise_start() {
