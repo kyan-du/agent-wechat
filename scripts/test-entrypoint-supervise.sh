@@ -55,6 +55,14 @@ wait_file() {
   fi
 }
 
+wait_log() {
+  local needle="$1" deadline=$((SECONDS + 8))
+  while ! grep -Fq "$needle" "$SANDBOX/sup.out" "$SANDBOX/sup.err" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.05
+  done
+  grep -Fq "$needle" "$SANDBOX/sup.out" "$SANDBOX/sup.err" 2>/dev/null || fail "timed out waiting for log: $needle"
+}
+
 wait_exit() {
   local pid="$1" deadline=$((SECONDS + 8))
   while alive "$pid" && [ "$SECONDS" -lt "$deadline" ]; do
@@ -80,6 +88,10 @@ chmod +x "$SANDBOX/bin137"
 
 start_supervisor "$SANDBOX/bin137"
 wait_file "$PID137"
+# The child writes its PID before the supervisor has necessarily captured the
+# immutable launch identity. Kill only after supervision is ready; otherwise
+# the test races setup and tests an unrecorded launch rather than 137 recovery.
+wait_log "agent-server supervisor ready"
 first_pid=$(cat "$PID137")
 kill -KILL "$first_pid"
 # Do not wait for kill -0 to turn false here: the killed child may remain a
