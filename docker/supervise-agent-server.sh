@@ -7,6 +7,9 @@
 : "${AGENT_SERVER_RECOVERABLE_EXITS:=0 137 143}"
 : "${AGENT_SERVER_RAPID_RESTART_LIMIT:=5}"
 : "${AGENT_SERVER_RAPID_RESTART_WINDOW_SEC:=15}"
+: "${AGENT_SERVER_SHUTDOWN_GRACE_SEC:=5}"
+: "${AGENT_SERVER_RESTART_SLEEP_SEC:=1}"
+: "${AGENT_SERVER_START_DELAY_SEC:=0}"
 
 SERVER_PID=""
 SHUTDOWN_REQUESTED=0
@@ -35,8 +38,28 @@ _supervise_rapid_restart_exceeded() {
   [ "$n" -gt "$AGENT_SERVER_RAPID_RESTART_LIMIT" ]
 }
 
+_supervise_child_pgid() {
+  ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+_supervise_child_ppid() {
+  ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '
+}
+
+# True only while SERVER_PID is still our live child. Rejects PID reuse.
+_supervise_owned_child() {
+  local ppid=""
+  [ -n "${SERVER_PID:-}" ] || return 1
+  kill -0 "$SERVER_PID" 2>/dev/null || return 1
+  ppid=$(_supervise_child_ppid "$SERVER_PID")
+  [ "$ppid" = "$$" ]
+}
+
 _supervise_start() {
   local bin="$1"
+  if [ "${AGENT_SERVER_START_DELAY_SEC:-0}" != 0 ]; then
+    sleep "$AGENT_SERVER_START_DELAY_SEC"
+  fi
   if command -v setsid >/dev/null 2>&1; then
     setsid "$bin" &
   else
@@ -45,18 +68,15 @@ _supervise_start() {
   SERVER_PID=$!
 }
 
+# Exactly one delivery: group signal iff the owned child is the leader.
 _supervise_signal_child() {
-  local sig="$1"
-  local pgid=""
-  if [ -z "${SERVER_PID:-}" ]; then
-    return 0
-  fi
-  # Always signal the child first so its graceful handler runs.
-  kill -s "$sig" "$SERVER_PID" 2>/dev/null || true
-  # If it is a process-group leader (setsid), also stop owned grandchildren.
-  pgid=$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')
+  local sig="$1" pgid=""
+  _supervise_owned_child || return 0
+  pgid=$(_supervise_child_pgid "$SERVER_PID")
   if [ -n "$pgid" ] && [ "$pgid" = "$SERVER_PID" ]; then
     kill -s "$sig" -- "-$SERVER_PID" 2>/dev/null || true
+  else
+    kill -s "$sig" "$SERVER_PID" 2>/dev/null || true
   fi
 }
 
@@ -64,6 +84,28 @@ _supervise_on_signal() {
   echo "agent-server supervisor caught $1 (child=${SERVER_PID:-none})"
   SHUTDOWN_REQUESTED=1
   _supervise_signal_child "$1"
+}
+
+_supervise_finish_shutdown() {
+  local exit_code=0
+  local grace="${AGENT_SERVER_SHUTDOWN_GRACE_SEC:-5}"
+  local deadline=$((SECONDS + grace))
+  if _supervise_owned_child; then
+    while _supervise_owned_child && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.05
+    done
+    if _supervise_owned_child; then
+      echo "agent-server still running after ${grace}s, sending KILL"
+      _supervise_signal_child KILL
+    fi
+    set +e
+    wait "$SERVER_PID"
+    exit_code=$?
+    set -e
+  fi
+  SERVER_PID=""
+  echo "agent-server shutdown ($exit_code), stopping."
+  exit 0
 }
 
 supervise_agent_server() {
@@ -81,29 +123,26 @@ supervise_agent_server() {
   while true; do
     if [ "$SHUTDOWN_REQUESTED" -ne 0 ]; then
       echo "agent-server supervisor stopping before launch."
-      exit 0
+      _supervise_finish_shutdown
     fi
 
     _supervise_start "$bin"
+    # TERM/INT may have arrived after the pre-launch check and before
+    # SERVER_PID was assigned. Signal that child before waiting.
+    if [ "$SHUTDOWN_REQUESTED" -ne 0 ]; then
+      echo "agent-server launched after shutdown, stopping."
+      _supervise_signal_child TERM
+      _supervise_finish_shutdown
+    fi
 
     set +e
     wait "$SERVER_PID"
     exit_code=$?
     set -e
-    # If wait was interrupted, the trap runs before the next command.
-    # `true` gives a known status after that flush.
     true
 
     if [ "$SHUTDOWN_REQUESTED" -ne 0 ]; then
-      if kill -0 "$SERVER_PID" 2>/dev/null; then
-        set +e
-        wait "$SERVER_PID"
-        exit_code=$?
-        set -e
-      fi
-      SERVER_PID=""
-      echo "agent-server shutdown ($exit_code), stopping."
-      exit 0
+      _supervise_finish_shutdown
     fi
     SERVER_PID=""
 
@@ -117,9 +156,13 @@ supervise_agent_server() {
       exit "$exit_code"
     fi
 
-    echo "agent-server exited ($exit_code), restarting in 1s..."
+    echo "agent-server exited ($exit_code), restarting in ${AGENT_SERVER_RESTART_SLEEP_SEC}s..."
     set +e
-    sleep 1
+    sleep "$AGENT_SERVER_RESTART_SLEEP_SEC"
     set -e
+    if [ "$SHUTDOWN_REQUESTED" -ne 0 ]; then
+      echo "agent-server shutdown during restart delay, stopping."
+      _supervise_finish_shutdown
+    fi
   done
 }

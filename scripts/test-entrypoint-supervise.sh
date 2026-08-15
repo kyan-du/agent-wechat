@@ -178,4 +178,169 @@ EOF
 run_signal_case TERM term
 run_signal_case INT int
 
-echo "entrypoint supervise: 137 recovery, fail-fast, TERM/INT forward"
+# --- ignoring child: grace then KILL, supervisor must not hang ---
+IGNORE_DIR="$SANDBOX/ignore"
+mkdir -p "$IGNORE_DIR"
+cat >"$IGNORE_DIR/bin" <<EOF
+#!/bin/sh
+echo launch >> "$IGNORE_DIR/launches"
+exec python3 -c "import os, signal, time, pathlib
+pathlib.Path('$IGNORE_DIR/pid').write_text(str(os.getpid()))
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+time.sleep(60)
+"
+EOF
+chmod +x "$IGNORE_DIR/bin"
+export AGENT_SERVER_SHUTDOWN_GRACE_SEC=1
+start=$(date +%s)
+start_supervisor "$IGNORE_DIR/bin"
+wait_file "$IGNORE_DIR/pid"
+ignore_child=$(cat "$IGNORE_DIR/pid")
+kill -TERM "$SUP_PID"
+set +e
+wait_deadline=$((SECONDS + 5))
+while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
+  sleep 0.05
+done
+if alive "$SUP_PID"; then
+  fail "ignoring child hung supervisor"
+fi
+wait "$SUP_PID"
+set -e
+SUP_PID=""
+elapsed=$(( $(date +%s) - start ))
+wait_exit "$ignore_child"
+[ "$elapsed" -lt 4 ] || fail "ignoring-child shutdown took ${elapsed}s"
+if alive "$ignore_child"; then
+  fail "ignoring child survived KILL"
+fi
+grep -Fq "sending KILL" "$SANDBOX/sup.out" "$SANDBOX/sup.err" || fail "missing KILL escalation log"
+echo "ok: ignoring child escalates to KILL within bound"
+unset AGENT_SERVER_SHUTDOWN_GRACE_SEC
+
+# --- launch race: TERM during start delay, no orphan child ---
+RACE_DIR="$SANDBOX/race"
+mkdir -p "$RACE_DIR"
+cat >"$RACE_DIR/bin" <<EOF
+#!/bin/sh
+echo launch >> "$RACE_DIR/launches"
+echo \$\$ > "$RACE_DIR/pid"
+while true; do sleep 30; done
+EOF
+chmod +x "$RACE_DIR/bin"
+export AGENT_SERVER_START_DELAY_SEC=1
+export AGENT_SERVER_SHUTDOWN_GRACE_SEC=1
+start_supervisor "$RACE_DIR/bin"
+# Signal before the delayed launch assigns SERVER_PID.
+sleep 0.15
+kill -TERM "$SUP_PID"
+set +e
+wait_deadline=$((SECONDS + 6))
+while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
+  sleep 0.05
+done
+if alive "$SUP_PID"; then
+  fail "start-delay race hung supervisor"
+fi
+wait "$SUP_PID"
+set -e
+SUP_PID=""
+if [ -f "$RACE_DIR/pid" ]; then
+  race_child=$(cat "$RACE_DIR/pid")
+  wait_exit "$race_child"
+fi
+if [ -f "$RACE_DIR/launches" ]; then
+  launches=$(wc -l < "$RACE_DIR/launches" | tr -d ' ')
+else
+  launches=0
+fi
+[ "$launches" -le 1 ] || fail "start-delay race launched $launches times"
+echo "ok: start-delay shutdown reaps any late child"
+unset AGENT_SERVER_START_DELAY_SEC
+unset AGENT_SERVER_SHUTDOWN_GRACE_SEC
+
+# --- restart-sleep race: TERM during the 1s delay, no second launch ---
+SLEEP_DIR="$SANDBOX/sleep"
+mkdir -p "$SLEEP_DIR"
+cat >"$SLEEP_DIR/bin" <<EOF
+#!/bin/sh
+n=\$(( \$(cat "$SLEEP_DIR/count" 2>/dev/null || echo 0) + 1 ))
+echo "\$n" > "$SLEEP_DIR/count"
+echo \$\$ > "$SLEEP_DIR/pid"
+exit 0
+EOF
+chmod +x "$SLEEP_DIR/bin"
+export AGENT_SERVER_RESTART_SLEEP_SEC=2
+start_supervisor "$SLEEP_DIR/bin"
+wait_file "$SLEEP_DIR/count"
+# First child already exited 0; supervisor is in restart sleep.
+sleep 0.2
+kill -TERM "$SUP_PID"
+set +e
+wait_deadline=$((SECONDS + 6))
+while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
+  sleep 0.05
+done
+if alive "$SUP_PID"; then
+  fail "restart-sleep race hung supervisor"
+fi
+wait "$SUP_PID"
+set -e
+SUP_PID=""
+[ "$(cat "$SLEEP_DIR/count")" -eq 1 ] || fail "restart-sleep launched $(cat "$SLEEP_DIR/count") times"
+echo "ok: shutdown during restart sleep does not relaunch"
+unset AGENT_SERVER_RESTART_SLEEP_SEC
+
+# --- exact-once TERM delivery ---
+ONCE_DIR="$SANDBOX/once"
+mkdir -p "$ONCE_DIR"
+cat >"$ONCE_DIR/bin" <<EOF
+#!/bin/sh
+echo launch >> "$ONCE_DIR/launches"
+exec python3 -c "import os, signal, time, pathlib
+pathlib.Path('$ONCE_DIR/pid').write_text(str(os.getpid()))
+n = 0
+def handle(signum, _frame):
+    global n
+    n += 1
+    pathlib.Path('$ONCE_DIR/count').write_text(str(n))
+    if signum in (signal.SIGTERM, signal.SIGINT):
+        raise SystemExit(0)
+signal.signal(signal.SIGTERM, handle)
+signal.signal(signal.SIGINT, handle)
+time.sleep(60)
+"
+EOF
+chmod +x "$ONCE_DIR/bin"
+start_supervisor "$ONCE_DIR/bin"
+wait_file "$ONCE_DIR/pid"
+once_child=$(cat "$ONCE_DIR/pid")
+kill -TERM "$SUP_PID"
+set +e
+wait_deadline=$((SECONDS + 8))
+while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
+  sleep 0.05
+done
+wait "$SUP_PID" 2>/dev/null
+set -e
+SUP_PID=""
+wait_file "$ONCE_DIR/count"
+[ "$(cat "$ONCE_DIR/count")" -eq 1 ] || fail "TERM delivered $(cat "$ONCE_DIR/count") times"
+wait_exit "$once_child"
+echo "ok: TERM delivered exactly once"
+
+# --- owned-child identity rejects a reused / foreign pid ---
+FOREIGN=$(sh -c 'sleep 30 >/dev/null 2>&1 & echo $!')
+sleep 0.1
+SERVER_PID="$FOREIGN"
+if _supervise_owned_child; then
+  kill "$FOREIGN" 2>/dev/null || true
+  fail "foreign pid accepted as owned child"
+fi
+kill "$FOREIGN" 2>/dev/null || true
+wait "$FOREIGN" 2>/dev/null || true
+SERVER_PID=""
+echo "ok: PID-reuse identity rejects foreign process"
+
+echo "entrypoint supervise: 137 recovery, fail-fast, TERM/INT, grace-KILL, launch/sleep races, exact-once"
