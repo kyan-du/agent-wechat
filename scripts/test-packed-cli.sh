@@ -15,7 +15,8 @@ cp -R packages/cli/node_modules/qrcode-terminal/* "$STAGE/node_modules/qrcode-te
 tar -xzf "$PACKS/$TARBALL" -C "$STAGE"
 CLI="$STAGE/package/dist/cli.js"
 NODE=$(command -v node)
-NO_DOCKER_PATH=$(dirname "$NODE"):/usr/bin:/bin
+NO_DOCKER_PATH="$STAGE/no-docker-bin"
+mkdir -p "$NO_DOCKER_PATH"
 
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.apiVersion!==1||x.repository!=="ghcr.io/kyan-du/agent-wechat"||x.floatingTagsAllowed!==false||!x.allowedReferences.includes("sha256-digest"))process.exit(1)' "$STAGE/package/dist/image-compatibility.json"
 node "$CLI" --help | grep -q 'start'
