@@ -22,6 +22,7 @@ export function validateImageReference(reference: string): string {
 
 export function migrateSessionImage(reference: string): { image: string; migrated: boolean } {
   const staleDefaults = new Set([
+    "ghcr.io/agent-wechat/agent-wechat:latest",
     "ghcr.io/kyan-du/agent-wechat:latest",
     "ghcr.io/kyan-du/agent-wechat:0.11.15",
     "ghcr.io/thisnick/agent-wechat:latest",
