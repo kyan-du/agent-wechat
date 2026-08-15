@@ -1,3 +1,5 @@
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 # @kyan-du/agent-wechat-cli
 
 Command-line tool for managing agent-wechat containers and interacting with WeChat.
@@ -7,7 +9,7 @@ Command-line tool for managing agent-wechat containers and interacting with WeCh
 ## Install
 
 ```bash
-npm install -g @kyan-du/agent-wechat-cli
+# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
 ```
 
 This installs the `wx` command globally.
@@ -16,7 +18,7 @@ This installs the `wx` command globally.
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
 
-`wx up` automatically pulls the Docker image from ghcr.io if it isn't found locally.
+`wx up` uses the locally built `agent-wechat:arm64` or `agent-wechat:amd64` image by default. After P1-B publishes fork images, select one exactly with `wx up --image ghcr.io/kyan-du/agent-wechat:1.2.3` or `wx up --image ghcr.io/kyan-du/agent-wechat@sha256:<64-lowercase-hex>`. No `latest` or default-registry fallback is used.
 
 > **Note:** agent-wechat requires `SYS_PTRACE` and `seccomp=unconfined` to interact with the WeChat desktop process. It cannot run in serverless or restricted container environments (AWS Fargate, Cloud Run, etc.). Use a VM or bare-metal Docker host.
 
@@ -164,7 +166,7 @@ For production or when running alongside other services (e.g., OpenClaw), use th
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/kyan-du/agent-wechat:<version>
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined

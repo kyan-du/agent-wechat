@@ -15,6 +15,7 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import { buildCliSendParams } from "./send-options.js";
+import { localBuildImage, validatePublishedImageReference } from "./image-reference.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
@@ -145,7 +146,7 @@ function getConfig(): Config {
 }
 
 function getImageTag(): string {
-  return `${GHCR_IMAGE}:${VERSION}`;
+  return localBuildImage();
 }
 
 // Create program
@@ -187,6 +188,7 @@ program
   .command("up")
   .description("Start the WeChat container")
   .option("--proxy <url>", "Transparent proxy (user:pass@host:port)")
+  .option("--image <reference>", `Published ${GHCR_IMAGE} version tag or sha256 digest`)
   .action((opts) => cmdUp(opts));
 
 program
@@ -1097,9 +1099,15 @@ async function cmdUpdate() {
 // Container Commands Implementation
 // ============================================
 
-async function cmdUp(opts: { proxy?: string } = {}) {
+async function cmdUp(opts: { proxy?: string; image?: string } = {}) {
   const identity = ensureDeviceIdentity();
-  let image = getImageTag();
+  let image: string;
+  try {
+    image = opts.image ? validatePublishedImageReference(opts.image) : getImageTag();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 
   const existingRaw = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
     encoding: "utf-8",
@@ -1145,11 +1153,17 @@ async function cmdUp(opts: { proxy?: string } = {}) {
 
   // Check if image exists locally, pull if not
   try {
-    execSync(`docker image inspect ${image}`, { stdio: "ignore" });
+    execFileSync("docker", ["image", "inspect", image], { stdio: "ignore" });
   } catch {
-    console.log(`Image ${image} not found locally. Pulling...`);
     try {
-      execSync(`docker pull ${image}`, { stdio: "inherit" });
+      if (!opts.image) {
+        console.error(
+          `Local image ${image} is missing. Build it with pnpm build:image, or choose a published fork image with wx up --image ${GHCR_IMAGE}:<version>.`,
+        );
+        process.exit(1);
+      }
+      console.log(`Image ${image} not found locally. Pulling exact reference...`);
+      execFileSync("docker", ["pull", image], { stdio: "inherit" });
     } catch {
       console.error(
         `Failed to pull ${image}. Choose an explicit published version or digest with --image; the fork does not fall back to latest.`,

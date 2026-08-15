@@ -3,6 +3,8 @@ title: OpenClaw Local Setup
 description: Run OpenClaw with agent-wechat locally without Docker networking.
 ---
 
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 When running OpenClaw and agent-wechat on the same machine (not in containers), the setup is straightforward — everything communicates over `localhost`.
 
 ## Setup
@@ -10,7 +12,7 @@ When running OpenClaw and agent-wechat on the same machine (not in containers), 
 ### 1. Start agent-wechat
 
 ```bash
-npm install -g @kyan-du/agent-wechat-cli
+# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
 wx up
 ```
 

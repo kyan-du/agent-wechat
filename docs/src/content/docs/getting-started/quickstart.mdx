@@ -3,6 +3,8 @@ title: Quick Start
 description: Get agent-wechat running in under 5 minutes.
 ---
 
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 The fastest way to get started is with the CLI. If you'd rather not manage infrastructure yourself, see [Managed Hosting](/hosting/managed-hosting).
 
 :::note[Prerequisites]
@@ -12,7 +14,7 @@ You need **Docker** running on your machine. On macOS, install [Colima](https://
 ## 1. Install the CLI
 
 ```bash
-npm install -g @kyan-du/agent-wechat-cli
+# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
 ```
 
 This installs the `wx` command globally.
@@ -23,7 +25,7 @@ This installs the `wx` command globally.
 wx up
 ```
 
-This automatically pulls the Docker image from `ghcr.io/kyan-du/agent-wechat` and starts the container with the correct flags, volume mounts, and auth token.
+After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>` selects the verified fork image. Before then, build locally and plain `wx up` uses the architecture-specific local image; there is no registry fallback.
 
 ## 3. Log in to WeChat
 

@@ -2,9 +2,10 @@
 
 A programmable WeChat interface. Controls a WeChat client running in a Docker container — receive and send messages, see chat heads, and more via API, CLI, Wechaty puppet, or OpenClaw plugin.
 
-**[Documentation](https://kyan-du.github.io/agent-wechat/)**
+> [!IMPORTANT]
+> Fork npm packages, GHCR images, and hosted documentation are **not released yet**. P1-B must verify and publish them before those channels are usable. Until then, clone this repository and use the source/local-image workflow below; do not run the npm/GHCR examples as availability claims.
 
-## Packages
+## Packages (reserved names; pending P1-B)
 
 | Package | npm | Description |
 |---------|-----|-------------|
@@ -26,14 +27,17 @@ A programmable WeChat interface. Controls a WeChat client running in a Docker co
 - pnpm (for development)
 - **Not compatible with serverless environments** — requires ptrace capabilities
 
-## Quick Start
+## Quick Start from source
 
 ```bash
-# Install the CLI
-npm install -g @kyan-du/agent-wechat-cli
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+pnpm install
+pnpm build
+pnpm build:image
 
-# Start the container (auto-pulls Docker image)
-wx up
+# Start the locally built container
+pnpm cli up
 
 # Login (displays QR code in terminal)
 wx auth login
@@ -55,7 +59,7 @@ wx down
 
 | Command | Description |
 |---------|-------------|
-| `wx up [--proxy user:pass@host:port]` | Start the WeChat container (auto-pulls image) |
+| `wx up [--proxy user:pass@host:port] [--image <reference>]` | Start a local image, or an explicit published fork version/digest |
 | `wx down` | Stop and remove container |
 | `wx logs` | Stream container logs |
 | `wx status` | Show server and login status |
@@ -89,13 +93,14 @@ wx down
 
 ## Docker Setup
 
-**Option A: Via CLI** (recommended)
+**Option A: locally built image via CLI** (available now)
 
 ```bash
-wx up    # auto-pulls ghcr.io/kyan-du/agent-wechat
+pnpm build:image
+pnpm cli up    # uses agent-wechat:<host architecture>
 ```
 
-**Option B: Docker Compose** (for custom networking)
+**Option B: local image with Docker Compose** (for custom networking)
 
 See [`docker-compose.yml`](./docker-compose.yml) for a full example. Key points:
 
@@ -108,7 +113,7 @@ See [`docker-compose.yml`](./docker-compose.yml) for a full example. Key points:
 
 services:
   agent-wechat:
-    image: ghcr.io/kyan-du/agent-wechat:<version>
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
     security_opt:
