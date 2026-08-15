@@ -24,11 +24,9 @@ Repository history identifies the former CLI package as `@thisnick/agent-wechat-
 
 ```bash
 npm uninstall -g @thisnick/agent-wechat-cli
-# Pending P1-B (run only after npm publication is verified):
-# npm install -g @kyan-du/agent-wechat-cli
 ```
 
-Before P1-B, use the source installation above and run `pnpm cli -- up`. If an old session contains a rejected image, recover it explicitly after building locally:
+Only after P1-B verifies npm publication, install the fork with `npm install -g @kyan-du/agent-wechat-cli`. Before P1-B, use the source installation above and run `pnpm cli -- up`. If an old session contains a rejected image, recover it explicitly after building locally:
 
 ```bash
 pnpm build:image
