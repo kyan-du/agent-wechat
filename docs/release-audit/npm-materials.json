@@ -3,7 +3,7 @@
   "lockfile": "pnpm-lock.yaml",
   "artifacts": [
     {
-      "name": "@agent-wechat/cli",
+      "name": "@kyan-du/agent-wechat-cli",
       "packedPaths": [
         "README.md",
         "dist/cli.js",
@@ -33,7 +33,7 @@
       "peer": [],
       "dev": [
         {
-          "name": "@agent-wechat/shared",
+          "name": "@kyan-du/agent-wechat-shared",
           "specifier": "workspace:*",
           "version": "0.1.0",
           "license": "NOASSERTION"
@@ -77,7 +77,7 @@
       ]
     },
     {
-      "name": "@agent-wechat/wechat",
+      "name": "@kyan-du/agent-wechat-openclaw",
       "packedPaths": [
         "README.md",
         "dist/index.js",
@@ -100,7 +100,7 @@
       "peer": [],
       "dev": [
         {
-          "name": "@agent-wechat/shared",
+          "name": "@kyan-du/agent-wechat-shared",
           "specifier": "workspace:*",
           "version": "0.1.0",
           "license": "NOASSERTION"
@@ -133,7 +133,7 @@
       "projectFiles": []
     },
     {
-      "name": "@agent-wechat/wechaty-puppet",
+      "name": "@kyan-du/agent-wechat-wechaty-puppet",
       "packedPaths": [
         "README.md",
         "dist/mod.d.ts",
@@ -169,7 +169,7 @@
       ],
       "dev": [
         {
-          "name": "@agent-wechat/shared",
+          "name": "@kyan-du/agent-wechat-shared",
           "specifier": "workspace:*",
           "version": "0.1.0",
           "license": "NOASSERTION"

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd); cd "$root"
-pnpm --filter @agent-wechat/shared build
-pnpm --filter @agent-wechat/cli build
-pnpm --filter @agent-wechat/wechat build
-pnpm --filter @agent-wechat/wechaty-puppet build
+pnpm --filter @kyan-du/agent-wechat-shared build
+pnpm --filter @kyan-du/agent-wechat-cli build
+pnpm --filter @kyan-du/agent-wechat-openclaw build
+pnpm --filter @kyan-du/agent-wechat-wechaty-puppet build
 ./scripts/audit-release.sh
 ./scripts/audit-release.sh
 mv packages/cli/dist packages/cli/dist.audit-test
