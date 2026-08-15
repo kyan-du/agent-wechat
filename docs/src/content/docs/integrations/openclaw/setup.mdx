@@ -22,14 +22,17 @@ If you're running agent-wechat locally or on your own server, you'll need Docker
 See [Container Setup](/getting-started/container-setup/cli) for options. The quickest:
 
 ```bash
-# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
-wx up
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
+pnpm cli -- up
 ```
 
 ### 2. Install the plugin
 
 ```bash
-openclaw plugins install @kyan-du/agent-wechat-openclaw
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 ```
 
 ### 3. Add the WeChat channel
@@ -52,7 +55,7 @@ If you don't want to run Docker or manage infrastructure, use [Managed Hosting](
 ### 1. Install the plugin
 
 ```bash
-openclaw plugins install @kyan-du/agent-wechat-openclaw
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 ```
 
 ### 2. Add the WeChat channel

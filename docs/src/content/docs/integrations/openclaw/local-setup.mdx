@@ -12,14 +12,17 @@ When running OpenClaw and agent-wechat on the same machine (not in containers), 
 ### 1. Start agent-wechat
 
 ```bash
-# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
-wx up
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
+pnpm cli -- up
 ```
 
 ### 2. Install and configure the plugin
 
 ```bash
-openclaw plugins install @kyan-du/agent-wechat-openclaw
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 openclaw channels add --channel wechat
 ```
 

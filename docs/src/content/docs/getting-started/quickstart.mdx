@@ -14,7 +14,10 @@ You need **Docker** running on your machine. On macOS, install [Colima](https://
 ## 1. Install the CLI
 
 ```bash
-# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
 ```
 
 This installs the `wx` command globally.
@@ -22,7 +25,7 @@ This installs the `wx` command globally.
 ## 2. Start the container
 
 ```bash
-wx up
+pnpm cli -- up
 ```
 
 After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>` selects the verified fork image. Before then, build locally and plain `wx up` uses the architecture-specific local image; there is no registry fallback.

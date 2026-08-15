@@ -25,7 +25,7 @@ Both require a running agent-wechat server. You can [self-host with Docker](/get
 - **Docker** — on macOS, install [Colima](https://github.com/abiosoft/colima) (`brew install colima && colima start`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - **An agent-wechat server** — self-hosted or via [Managed Hosting](/hosting/managed-hosting):
   ```bash
-  npx @kyan-du/agent-wechat-cli up
+  pnpm cli -- up # from the repository checkout after pnpm build && pnpm build:image
   ```
 - **Node.js >= 22**
 

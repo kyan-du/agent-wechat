@@ -19,3 +19,14 @@ export function validateImageReference(reference: string): string {
     `Invalid image reference. Use agent-wechat:arm64, agent-wechat:amd64, ${FORK_IMAGE}:<semver>, or ${FORK_IMAGE}@sha256:<64 lowercase hex characters>.`,
   );
 }
+
+export function migrateSessionImage(reference: string): { image: string; migrated: boolean } {
+  const staleDefaults = new Set([
+    "ghcr.io/kyan-du/agent-wechat:latest",
+    "ghcr.io/kyan-du/agent-wechat:0.11.15",
+    "ghcr.io/thisnick/agent-wechat:latest",
+    "ghcr.io/thisnick/agent-wechat:0.11.15",
+  ]);
+  if (staleDefaults.has(reference)) return { image: localBuildImage(), migrated: true };
+  return { image: validateImageReference(reference), migrated: false };
+}

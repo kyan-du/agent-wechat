@@ -245,9 +245,18 @@ async function startContainer(session: SessionConfig, image: string, build: bool
   }
 
   if (!containerExists(session.containerName) && !dockerImageExists(image)) {
-    console.error(`image ${image} was not found locally; no registry fallback was attempted.`);
-    console.error("Build it with `pnpm build:image` (or `pnpm build:image:arm64` / `pnpm build:image:amd64`), then retry. After P1-B publishes a verified image, pass its exact semver or digest with --image.");
-    process.exit(1);
+    if (typeof flags.image === "string" && image.startsWith("ghcr.io/kyan-du/agent-wechat")) {
+      console.log(`image ${image} was not found locally; pulling the exact requested reference.`);
+      const pull = execDocker(["pull", image], { stdio: "inherit" });
+      if (pull.exitCode !== 0) {
+        console.error(`failed to pull exact image ${image}; no latest or alternate-registry fallback was attempted.`);
+        process.exit(pull.exitCode || 1);
+      }
+    } else {
+      console.error(`image ${image} was not found locally; no registry fallback was attempted.`);
+      console.error("Build it with `pnpm build:image` (or `pnpm build:image:arm64` / `pnpm build:image:amd64`), then retry. After P1-B publishes a verified image, pass its exact semver or digest with --image.");
+      process.exit(1);
+    }
   }
 
   if (containerExists(session.containerName)) {

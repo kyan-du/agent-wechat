@@ -2,13 +2,15 @@
 
 Wechaty Puppet for [agent-wechat](https://github.com/kyan-du/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
 
+> **Release boundary:** Fork npm, GHCR, and hosted documentation are unavailable until P1-B publishes and verifies them. Clone this repository, run `corepack enable && pnpm install --frozen-lockfile && pnpm build && pnpm build:image`, and start the local image with `pnpm cli -- up`.
+
 **[Documentation](https://kyan-du.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
 
 ## Prerequisites
 
 - **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/kyan-du/agent-wechat):
   ```bash
-  npx @kyan-du/agent-wechat-cli up     # starts the Docker container
+  pnpm cli -- up     # from a built repository checkout
   ```
   Login is not required as a separate CLI step; you can log in through the puppet QR flow.
 - **Node.js >= 22**
@@ -16,7 +18,8 @@ Wechaty Puppet for [agent-wechat](https://github.com/kyan-du/agent-wechat). Brid
 ## Install
 
 ```bash
-npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
+# Pending P1-B (not available yet): npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
+# Today, import/build packages/wechaty-puppet from this repository workspace.
 ```
 
 ## Usage
