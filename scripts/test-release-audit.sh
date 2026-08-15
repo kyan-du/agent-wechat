@@ -15,20 +15,43 @@ mv packages/cli/dist.audit-test packages/cli/dist; trap - EXIT
 
 # Docker context positive and negative regressions.
 node scripts/validate-docker-context.mjs
+probe_forbidden() {
+  local path=$1
+  mkdir -p "$(dirname "docker/$path")"
+  printf 'negative probe\n' > "docker/$path"
+  printf '!%s\n' "$path" >> docker/.dockerignore
+  if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then
+    echo "Docker audit accepted forbidden context path: $path" >&2; exit 1
+  fi
+  sed -i.bak '$d' docker/.dockerignore && rm docker/.dockerignore.bak
+  rm -f "docker/$path"
+}
+for path in tools/mycredential.txt tools/mysecret.txt tools/mytoken.txt arbitrary.deb arbitrary.log cache/probe.txt nested/cache/probe.txt; do
+  probe_forbidden "$path"
+done
+rmdir docker/cache docker/nested/cache docker/nested 2>/dev/null || true
+
+# Required sources must be real regular files contained by the context. Wrapper
+# commands (everything except imported .py modules) must already be executable.
 tmp_tool=docker/tools/screenshot.audit-test
 mv docker/tools/screenshot "$tmp_tool"
-trap 'mv "$tmp_tool" docker/tools/screenshot 2>/dev/null || true' EXIT
+trap 'rm -f docker/tools/screenshot; mv "$tmp_tool" docker/tools/screenshot 2>/dev/null || true' EXIT
 if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted missing production tool' >&2; exit 1; fi
+ln -s screenshot.audit-test docker/tools/screenshot
+if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted symlinked production tool' >&2; exit 1; fi
+rm docker/tools/screenshot
+ln -s /etc/passwd docker/tools/screenshot
+if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted context escape' >&2; exit 1; fi
+rm docker/tools/screenshot
+mkdir docker/tools/screenshot
+if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted non-regular production tool' >&2; exit 1; fi
+rmdir docker/tools/screenshot
+cp "$tmp_tool" docker/tools/screenshot
+chmod a-x docker/tools/screenshot
+if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted non-executable production tool' >&2; exit 1; fi
+rm docker/tools/screenshot
 mv "$tmp_tool" docker/tools/screenshot; trap - EXIT
-
-tmp_secret=docker/tools/secret.audit-test.pem
-printf 'negative probe\n' > "$tmp_secret"
-trap 'rm -f "$tmp_secret"' EXIT
 node scripts/validate-docker-context.mjs
-printf '!tools/secret.audit-test.pem\n' >> docker/.dockerignore
-if node scripts/validate-docker-context.mjs >/dev/null 2>&1; then echo 'Docker audit accepted forbidden secret in context' >&2; exit 1; fi
-sed -i.bak '$d' docker/.dockerignore && rm docker/.dockerignore.bak
-rm "$tmp_secret"; trap - EXIT
 
 # The workflow clean-tree idiom must accept empty filtered output and reject dirt.
 tmp_repo=$(mktemp -d)
