@@ -20,9 +20,18 @@ cache/
 *.db-*
 *.sqlite*
 *.log
-screenshot*
-qr*
-qrcode*
+# Captures are local state; keep production tools such as tools/screenshot.
+screenshots/
+captures/
+fixtures/
+qr/
+qrcode/
+*.screenshot
+*.screenshot.*
+*.qr
+*.qr.*
+*.qrcode
+*.qrcode.*
 .data/
 **/.data/
 # Development-only material.

@@ -35,6 +35,7 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'scripts/audit-release.sh'
               - 'scripts/release-audit.mjs'
+              - 'scripts/validate-docker-context.mjs'
               - 'scripts/test-release-audit.sh'
               - 'docs/release-audit/**'
               - 'docker/.dockerignore'
@@ -76,7 +77,8 @@ jobs:
           node scripts/release-audit.mjs --write
           git diff --exit-code -- docs/release-audit/npm-materials.json
           ./scripts/test-release-audit.sh
-          git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' | (! grep .)
+          unexpected=$(git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' || true)
+          test -z "$unexpected" || { printf '%s\n' "$unexpected"; exit 1; }
 
       - name: Typecheck
         run: pnpm typecheck
