@@ -45,6 +45,7 @@ jobs:
               - 'scripts/generate-prerelease-manifest.mjs'
               - 'scripts/validate-prerelease.sh'
               - 'scripts/test-prerelease-contract.sh'
+              - 'scripts/test-prerelease-manifest.sh'
               - 'release/**'
               - 'docs/release/**'
               - '.github/workflows/release.yml'

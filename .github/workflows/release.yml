@@ -15,6 +15,7 @@ on:
       - 'scripts/validate-prerelease-contract.mjs'
       - 'scripts/validate-prerelease.sh'
       - 'scripts/test-prerelease-contract.sh'
+      - 'scripts/test-prerelease-manifest.sh'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -31,6 +32,7 @@ on:
       - 'scripts/validate-prerelease-contract.mjs'
       - 'scripts/validate-prerelease.sh'
       - 'scripts/test-prerelease-contract.sh'
+      - 'scripts/test-prerelease-manifest.sh'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -67,6 +69,9 @@ jobs:
 
       - name: Prove validation-only contract
         run: ./scripts/test-prerelease-contract.sh
+
+      - name: Prove canonical prerelease manifest
+        run: pnpm test:prerelease-manifest
 
       - name: Validate clean release inputs and real pack reports
         env:
