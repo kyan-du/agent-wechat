@@ -18,6 +18,24 @@ pnpm build && pnpm build:image
 
 Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli -- <arguments>` from this checkout.
 
+### Migrating an older global CLI installation
+
+Repository history identifies the former CLI package as `@thisnick/agent-wechat-cli` and both packages expose the same `wx` binary. Remove the former global package before installing the fork package, so the active `wx` executable is unambiguous:
+
+```bash
+npm uninstall -g @thisnick/agent-wechat-cli
+# Pending P1-B (run only after npm publication is verified):
+# npm install -g @kyan-du/agent-wechat-cli
+```
+
+Before P1-B, use the source installation above and run `pnpm cli -- up`. If an old session contains a rejected image, recover it explicitly after building locally:
+
+```bash
+pnpm build:image
+pnpm cli -- up --image agent-wechat:arm64 # Apple Silicon / Linux ARM64
+# Use agent-wechat:amd64 on x86-64 hosts.
+```
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running

@@ -2,6 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { localBuildImage, migrateSessionImage, validateImageReference } from "./image.ts";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { ensureSession, getSessionPath, loadSession, saveSession, type SessionConfig } from "./session.ts";
+
+function persistedSession(dataDir: string, image: string): SessionConfig {
+  const sessionDir = path.join(dataDir, "sessions", "default");
+  return {
+    name: "default", containerName: "agent-wechat-default", image, dataDir: sessionDir,
+    downloadsDir: path.join(sessionDir, "downloads"),
+    wechatConfigDir: path.join(sessionDir, "wechat-config"),
+    wechatDataDir: path.join(sessionDir, "wechat-data"),
+  };
+}
 
 test("default image is the local architecture build", () => {
   assert.equal(localBuildImage("darwin", "arm64"), "agent-wechat:arm64");
@@ -20,6 +33,29 @@ test("stale known session defaults migrate locally while arbitrary values fail",
   assert.deepEqual(migrateSessionImage("ghcr.io/kyan-du/agent-wechat:latest"), { image: localBuildImage(), migrated: true });
   assert.deepEqual(migrateSessionImage("ghcr.io/thisnick/agent-wechat:0.11.15"), { image: localBuildImage(), migrated: true });
   assert.throws(() => migrateSessionImage("evil.example/image:7"), /Invalid image reference/);
+});
+
+test("unsafe persisted sessions fail closed without an explicit recovery image", () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wechat-session-"));
+  try {
+    saveSession(dataDir, "default", persistedSession(dataDir, "registry.invalid/retired/image:latest"));
+    assert.throws(() => loadSession(dataDir, "default"), /unsafe image reference/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("ensureSession validates and persists an explicit image before recovering an unsafe session", () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-wechat-session-"));
+  const explicit = "ghcr.io/kyan-du/agent-wechat:1.2.3";
+  try {
+    saveSession(dataDir, "default", persistedSession(dataDir, "registry.invalid/retired/image:latest"));
+    assert.equal(ensureSession(dataDir, "default", { image: explicit }).image, explicit);
+    assert.equal(JSON.parse(fs.readFileSync(getSessionPath(dataDir, "default"), "utf8")).image, explicit);
+    assert.throws(() => ensureSession(dataDir, "default", { image: "ghcr.io/kyan-du/agent-wechat:latest" }), /Invalid image reference/);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("accepts local images and explicit immutable release selections", () => {

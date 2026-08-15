@@ -15,6 +15,24 @@ The `wx` CLI lets you manage the agent-wechat container and interact with WeChat
 
 This installs the `wx` command globally.
 
+## Migrate an older global installation
+
+Repository package history identifies the former CLI as `@thisnick/agent-wechat-cli`; it and the fork package both install the `wx` binary. Remove the former package first:
+
+```bash
+npm uninstall -g @thisnick/agent-wechat-cli
+# Pending P1-B (run only after npm publication is verified):
+# npm install -g @kyan-du/agent-wechat-cli
+```
+
+Until P1-B, follow the repository source installation and invoke `pnpm cli --`. To recover a persisted session rejected for an unsafe image, build the local image and explicitly replace the session selection:
+
+```bash
+pnpm build:image
+pnpm cli -- up --image agent-wechat:arm64 # Apple Silicon / Linux ARM64
+# Use agent-wechat:amd64 on x86-64 hosts.
+```
+
 ## Prerequisites
 
 - **Node.js >= 22**
