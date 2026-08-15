@@ -61,6 +61,9 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Install validation dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Prove validation-only contract
         run: ./scripts/test-prerelease-contract.sh
 
