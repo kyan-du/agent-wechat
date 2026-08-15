@@ -312,19 +312,17 @@ test("exclusivePublish survives remnant cleanup of its temp link", () => {
   assert.deepEqual(ensureDeviceIdentity(dir), identity);
 });
 
-test("cmdUp validates identity before docker start", () => {
+test("start validates identity before lifecycle Docker operations", () => {
   const src = fs.readFileSync(fileURLToPath(new URL("./cli.ts", import.meta.url)), "utf-8");
-  const start = src.indexOf("async function cmdUp");
-  assert.ok(start >= 0);
-  const body = src.slice(start);
-  const identityAt = body.indexOf("ensureDeviceIdentity()");
-  const inspectAt = body.indexOf("bindExistingContainer");
-  const startAt = body.indexOf('["start"');
+  const command = src.indexOf('program.command("start")');
+  assert.ok(command >= 0);
+  const body = src.slice(command, src.indexOf('program.command("stop")', command));
+  const identityAt = body.indexOf("ensureDeviceIdentity(CONFIG_DIR)");
+  const lifecycleAt = body.indexOf("startInstance(");
   assert.ok(identityAt >= 0);
-  assert.ok(inspectAt >= 0);
-  assert.ok(startAt >= 0);
-  assert.ok(identityAt < inspectAt);
-  assert.ok(inspectAt < startAt);
+  assert.ok(lifecycleAt >= 0);
+  assert.ok(identityAt > lifecycleAt, "identity must be evaluated as a startInstance argument");
+  assert.match(body, /startInstance\(\{ identity: ensureDeviceIdentity\(CONFIG_DIR\)/);
   assert.equal(body.includes("ContainerNotFoundError"), false);
 });
 

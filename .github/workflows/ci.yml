@@ -46,6 +46,7 @@ jobs:
               - 'scripts/validate-prerelease.sh'
               - 'scripts/test-prerelease-contract.sh'
               - 'scripts/test-prerelease-manifest.sh'
+              - 'scripts/test-packed-cli.sh'
               - 'release/**'
               - 'docs/release/**'
               - '.github/workflows/release.yml'
@@ -120,6 +121,9 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+      - name: Packed CLI clean-consumer journeys
+        run: ./scripts/test-packed-cli.sh
 
       - name: Validate prerelease contract without publication
         run: pnpm test:prerelease-contract

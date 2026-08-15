@@ -1,241 +1,86 @@
-> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
-
 # @kyan-du/agent-wechat-cli
 
-Command-line tool for managing agent-wechat containers and interacting with WeChat.
+Single-instance CLI for managing agent-wechat and interacting with WeChat.
 
-**[Documentation](https://kyan-du.github.io/agent-wechat/getting-started/cli/commands/)**
+> **Release boundary: P1-B remains unavailable until an owner/legal-approved prerelease publishes and independently verifies npm and GHCR artifacts.** All commands in this document use the repository-only `pnpm cli` form; do not substitute bare `wx` before that gate is cleared.
 
-## Install from source (current P1-A path)
+## Install
 
-```bash
-# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
-git clone https://github.com/kyan-du/agent-wechat.git
-cd agent-wechat
-corepack enable && pnpm install --frozen-lockfile
-pnpm build && pnpm build:image
-```
-
-Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli <arguments>` from this checkout.
-
-### Migrating an older global CLI installation
-
-Repository history identifies the former CLI package as `@thisnick/agent-wechat-cli` and both packages expose the same `wx` binary. Remove the former global package before installing the fork package, so the active `wx` executable is unambiguous:
+The fork package is not published yet. From a repository checkout run:
 
 ```bash
-npm uninstall -g @thisnick/agent-wechat-cli
-```
-
-The fork package is not published yet, so do not try to install it globally. Use the source checkout above. If the historical root CLI left an unsafe persisted session, do not repair or migrate it: remove its session directory and authenticate fresh.
-
-First stop any old agent-wechat containers. Then delete **only** the root CLI's `sessions` directory at the source-defined data location (this removes its saved WeChat session data):
-
-- macOS: `rm -rf "$HOME/Library/Application Support/agent-wechat/sessions"`
-- Linux: `rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/agent-wechat/sessions"`
-- Windows PowerShell: `Remove-Item -Recurse -Force "$([Environment]::GetFolderPath('ApplicationData'))\agent-wechat\sessions" -ErrorAction SilentlyContinue`
-
-From the built checkout, start clean and scan a new login QR code:
-
-```bash
-pnpm cli up
-pnpm cli auth login
-```
-
-After a future P1-B has actually published and verified `@kyan-du/agent-wechat-cli`, the global equivalent will be `npm install -g @kyan-du/agent-wechat-cli`, followed by `wx up` and `wx auth login`.
-
-## Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) installed and running
-
-`wx up` uses the locally built `agent-wechat:arm64` or `agent-wechat:amd64` image by default. After P1-B publishes fork images, select one exactly with `wx up --image ghcr.io/kyan-du/agent-wechat:1.2.3` or `wx up --image ghcr.io/kyan-du/agent-wechat@sha256:<64-lowercase-hex>`. No `latest` or default-registry fallback is used.
-
-> **Note:** agent-wechat requires `SYS_PTRACE` and `seccomp=unconfined` to interact with the WeChat desktop process. It cannot run in serverless or restricted container environments (AWS Fargate, Cloud Run, etc.). Use a VM or bare-metal Docker host.
-
-## Quick Start
-
-```bash
-# Start the container
-pnpm cli up
-
-# Check status
-pnpm cli status
-
-# Log in (displays QR code in terminal)
-pnpm cli auth login
-
-# List chats
-pnpm cli chats list
-
-# Send a message
-pnpm cli messages send <chatId> --text "Hello"
-# Only after reviewing a SIMILAR_CONTENT_CONFIRMATION_REQUIRED response:
-pnpm cli messages send <chatId> --text "Reviewed text" --confirm-similar
-```
-
-## Commands
-
-### Container
-
-| Command | Description |
-|---------|-------------|
-| `wx up [--proxy user:pass@host:port] [--image <reference>]` | Start the local image or an explicit published fork semver/digest |
-| `wx down` | Stop and remove the container |
-| `wx logs` | Tail container logs |
-| `wx status` | Show container up/down status and login status (when available) |
-
-### Auth
-
-| Command | Description |
-|---------|-------------|
-| `wx auth login` | Log in to WeChat (shows QR code) |
-| `wx auth logout` | Log out of WeChat |
-| `wx auth status` | Check login status |
-| `wx auth token` | Show current auth token |
-| `wx auth token --regenerate` | Generate a new auth token |
-
-Login options:
-- `--timeout <seconds>` — login timeout (default: 300)
-- `--new` — switch to a new account instead of existing
-
-### Chats
-
-| Command | Description |
-|---------|-------------|
-| `wx chats list` | List chats from WeChat |
-| `wx chats get <chatId>` | Get details for a specific chat |
-| `wx chats find <name>` | Search chats by display name |
-| `wx chats open <chatId>` | Open a chat in the WeChat UI |
-
-Options: `--limit <n>`, `--offset <n>`, `--json`
-
-### Messages
-
-| Command | Description |
-|---------|-------------|
-| `wx messages list <chatId>` | List messages in a chat |
-| `wx messages send <chatId>` | Send a message |
-| `wx messages media <chatId> <localId>` | Download a media attachment |
-
-Send options:
-- `--text "message"` — send text
-- `--image photo.jpg` — send an image
-- `--file document.pdf` — send a file
-
-Media options:
-- `--output <path>` — save to a specific file path
-
-### Sessions
-
-| Command | Description |
-|---------|-------------|
-| `wx session list` | List all sessions |
-| `wx session create <name>` | Create a new session |
-| `wx session start <id>` | Start a session |
-| `wx session stop <id>` | Stop a session |
-| `wx session delete <id>` | Delete a session |
-
-### Debug
-
-| Command | Description |
-|---------|-------------|
-| `wx screenshot [file]` | Save a screenshot (default: screenshot.png) |
-| `wx a11y` | Dump the accessibility tree (`--format json|aria`) |
-
-## Global Options
-
-| Option | Description |
-|--------|-------------|
-| `-s, --session <name>` | Use a specific session (default: "default") |
-| `-V, --version` | Show version |
-| `-h, --help` | Show help |
-
-## Configuration
-
-The CLI reads configuration from environment variables and a local token file:
-
-| Source | Description |
-|--------|-------------|
-| `AGENT_WECHAT_URL` | Server URL (default: `http://localhost:6174`) |
-| `AGENT_WECHAT_TOKEN` | Auth token (overrides token file) |
-| `~/.config/agent-wechat/token` | Auto-generated auth token |
-
-The auth token is generated automatically on first run and shared with the container via a read-only volume mount.
-
-## Running the Container
-
-There are two ways to run the agent-wechat container.
-
-> **Note:** agent-wechat requires `SYS_PTRACE` and `seccomp=unconfined` because it uses ptrace to interact with the WeChat desktop process. It cannot run in serverless or restricted container environments (AWS Fargate, Cloud Run, Azure Container Instances, etc.). Use a VM or bare-metal Docker host.
-
-### Option 1: `wx up` (local development)
-
-The simplest way. `wx up` starts the architecture-specific local image (or pulls only an explicitly selected fork semver/digest) with the right flags, volume mounts, and auth token:
-
-```bash
-pnpm cli up
-```
-
-This starts a container named `agent-wechat` with:
-- **Port 6174** — REST API + VNC web viewer at `/vnc/` (exposed to all interfaces)
-- Persistent volumes for data and WeChat home directory
-- Auth token from `~/.config/agent-wechat/token` (auto-generated on first run)
-
-To route all container traffic through a proxy:
-
-```bash
-pnpm cli up --proxy user:pass@host:port
-```
-
-This sets up a transparent proxy (redsocks + iptables) inside the container — invisible to WeChat. Prefix with `socks5://` for SOCKS5 proxies.
-
-### Option 2: Docker Compose (production / networked)
-
-For production or when running alongside other services (e.g., OpenClaw), use the `docker-compose.yml` in the repo root as a reference:
-
-```yaml
-services:
-  agent-wechat:
-    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
-    container_name: agent-wechat
-    security_opt:
-      - seccomp=unconfined
-    cap_add:
-      - SYS_PTRACE
-      - NET_ADMIN
-    ports:
-      - "6174:6174"
-    volumes:
-      - agent-wechat-data:/data
-      - agent-wechat-home:/home/wechat
-      - ~/.config/agent-wechat/token:/data/auth-token:ro
-    environment:
-      - PROXY=${PROXY:-}    # optional: user:pass@host:port
-    restart: unless-stopped
-
-volumes:
-  agent-wechat-data:
-  agent-wechat-home:
-```
-
-Generate a token before starting:
-
-```bash
-mkdir -p ~/.config/agent-wechat
-openssl rand -hex 32 > ~/.config/agent-wechat/token
-chmod 600 ~/.config/agent-wechat/token
-```
-
-If running alongside OpenClaw on the same Docker network, set `serverUrl` to `http://agent-wechat:6174` in your OpenClaw config.
-
-### Building locally
-
-To build the Docker image from source instead of pulling from ghcr.io:
-
-```bash
-# From the repo root — auto-detects host architecture
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
 pnpm build:image
-
-# Or specify architecture
-pnpm build:image:arm64
-pnpm build:image:amd64
+pnpm cli start
+pnpm cli auth login
 ```
+
+After publication is independently verified, the release runbook will provide the exact npm installation command and bare `wx` invocation. Until then, do not attempt a global install.
+
+Uninstall with npm after a real install exists. The CLI intentionally has no uninstall subcommand. To erase the trusted default instance first, use the repository form `pnpm cli stop --purge` and confirm the displayed resource list, then use the package manager that installed it.
+
+## Command surface
+
+```text
+pnpm cli start [--image <fork-semver-or-digest>] [--pull | --offline] [--proxy <url>]
+pnpm cli stop [--purge] [--yes]
+pnpm cli restart
+pnpm cli status
+pnpm cli doctor
+pnpm cli logs
+
+pnpm cli auth login [--timeout <seconds>] [--new]
+pnpm cli auth logout
+pnpm cli auth reset [--yes]
+pnpm cli auth status
+
+pnpm cli chats [--unread] [--limit <n>] [--cursor <cursor>]
+pnpm cli chats show <chat-id>
+pnpm cli chats mark-read <chat-id>
+pnpm cli contacts [--limit <n>] [--cursor <cursor>]
+pnpm cli contacts find <name>
+pnpm cli messages <chat-id> [--limit <n>] [--cursor <cursor>]
+pnpm cli send <chat-id> (--text <message> | --image <path> | --file <path>)
+  [--idempotency-key <key>] [--confirm-similar]
+
+pnpm cli upgrade [--check | --cli | --image <fork-semver-or-digest>]
+```
+
+The first fork prerelease is deliberately single-instance. Removed `up`, `down`, `update`, and `session` commands exit nonzero with migration guidance; they never execute old behavior and do not migrate historical state.
+
+### Lifecycle guarantees
+
+- `start` runs a local architecture build during source development, or an explicit fork semver/digest. Floating `latest`, foreign repositories, and malformed references are rejected.
+- A published tag is pulled and resolved to its immutable fork repository digest. The inventory records the exact container ID, digest, port, volumes, token path, and identity directory.
+- Offline `--offline` succeeds only when the selected compatible image already exists locally.
+- Existing containers are reused only when their ID, ownership label, volumes, identity, port, and requested image match the trusted inventory.
+- `status` and `doctor` are read-only. They never pull, start, migrate, repair, or expose token/proxy contents.
+- `stop` removes only the trusted container and keeps data. `stop --purge` deletes only resources named by the validated default-instance inventory; `--yes` skips confirmation but never validation.
+
+### Authentication and reads
+
+`auth logout` verifies the WeChat UI logout and preserves instance data. `auth reset` stops the session, transactionally clears server-side authentication state, deletes the WeChat home volume and host device identity, and requires a fresh `start`/login. It is narrower than full purge: agent DB, token, and the default instance inventory remain.
+
+`chats`, `contacts`, and `messages` are read-only. Their opaque, versioned cursor uses stable keyset ordering; adding new messages does not shift later pages. `chats --unread` means only conversation-level `unreadCount > 0`. Message reads never open the UI or change unread state. `mark-read` is a separate UI operation and succeeds only when the target and before/after unread state are verified.
+
+### Sending
+
+The first prerelease accepts only a stable chat ID. It never resolves a display name or guesses among contacts. Exactly one payload flag is required. Uploads must be regular, non-symlink files no larger than the server limit. `--idempotency-key` exposes durable retry/reconciliation behavior. Similar-content confirmation, `429` metadata, and `commitAttempted` uncertain outcomes remain distinct; an uncertain send is never automatically retried.
+
+### Machine output
+
+Global `--json` emits exactly one versioned JSON envelope on stdout. Diagnostics are written to stderr. Stable exit categories distinguish arguments (`2`), environment (`3`), service (`4`), authentication (`5`), target (`6`), confirmation (`7`), rate limit (`8`), uncertain send (`9`), cleanup (`10`), and rollback (`11`).
+
+## Upgrade
+
+- `wx upgrade --check` is read-only.
+- `wx upgrade --cli` prints an exact npm command; it never invokes npm, requests sudo, or replaces itself.
+- `wx upgrade --image <reference>` resolves an immutable digest, rebuilds the container with persistent volumes, verifies health, and rolls the container/image back on failure. It does not claim atomic CLI+image rollback.
+
+The hidden `pnpm cli dev sync-server --binary <path> --sha256 <hex>` command is only for checked local development artifacts. It checksum-verifies the binary and restores the previous server if health validation fails.
+
+## Release boundary
+
+No npm package, GHCR image, tag, or GitHub Release is available until the separate validation, licensing, owner, and redistribution gates are satisfied. Repository instructions must continue to use `pnpm cli` until real publication is independently verified.

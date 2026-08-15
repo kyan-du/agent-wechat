@@ -13,5 +13,4 @@ export type { OpenChatResult } from "./OpenChatResult.js";
 export type { ReplyInfo } from "./ReplyInfo.js";
 export type { SendParams } from "./SendParams.js";
 export type { SendResult } from "./SendResult.js";
-export type { Session } from "./Session.js";
 export type { SettingsState } from "./SettingsState.js";

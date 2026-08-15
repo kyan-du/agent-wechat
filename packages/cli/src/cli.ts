@@ -1,1248 +1,383 @@
-import { Command, Option } from "commander";
-import { WeChatClient, type WeChatClientOptions } from "@kyan-du/agent-wechat-shared";
-import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
-import { spawn, execFileSync, execSync } from "child_process";
-import {
-  buildDockerRunArgs,
-  ensureDeviceIdentity as loadDeviceIdentity,
-  type DeviceIdentity,
-} from "./device-identity.js";
-import { bindExistingContainer, parseExactlyOneDockerId } from "./container-inspect.js";
-import { randomBytes } from "crypto";
-import fs from "fs";
+import { Command, CommanderError, Option } from "commander";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import readline from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import qrTerminal from "qrcode-terminal";
-import os from "os";
-import path from "path";
-import { fileURLToPath } from "url";
+import {
+  WeChatClient,
+  WeChatHttpError,
+  type CursorPage,
+  type Message,
+  type SendParams,
+} from "@kyan-du/agent-wechat-shared";
+import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
+import { ensureDeviceIdentity } from "./device-identity.js";
 import { buildCliSendParams } from "./send-options.js";
-import { localBuildImage, validatePublishedImageReference } from "./image-reference.js";
+import { localBuildImage } from "./image-reference.js";
+import {
+  CONFIG_DIR,
+  CONTAINER_NAME,
+  DEFAULT_PORT,
+  GHCR_IMAGE,
+  INSTANCE_PATH,
+  TOKEN_PATH,
+  assertSafePurgePath,
+  loadInventory,
+  saveInventory,
+  secureRegularFile,
+} from "./instance-inventory.js";
+import {
+  assertOwnedContainer,
+  dockerAvailable,
+  inspectContainer,
+  purgeInstance,
+  removeOwnedVolume,
+  replaceImage,
+  startInstance,
+  stopInstance,
+  waitHealthy,
+} from "./lifecycle.js";
+import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
-const CONTAINER_NAME = "agent-wechat";
-const GHCR_IMAGE = "ghcr.io/kyan-du/agent-wechat";
-const DEFAULT_PORT = 6174;
-
-// Get monorepo root (cli is at packages/cli)
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MONOREPO_ROOT = path.resolve(__dirname, "../../..");
-
-// Auth token paths
-const TOKEN_DIR = path.join(os.homedir(), ".config", "agent-wechat");
-const TOKEN_PATH = path.join(TOKEN_DIR, "token");
-
-function failExistingContainer(message: string): never {
-  console.error(message);
-  process.exit(1);
-}
-
-function inspectExistingContainer(id: string): { ok: true; raw: string } | { ok: false } {
-  try {
-    return {
-      ok: true,
-      raw: execFileSync("docker", ["inspect", id], { encoding: "utf-8" }),
-    };
-  } catch {
-    return { ok: false };
-  }
-}
-
-function ensureDeviceIdentity(): DeviceIdentity {
-  try {
-    return loadDeviceIdentity(TOKEN_DIR);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    console.error(`Invalid device identity in ${TOKEN_DIR}. ${detail}`);
-    process.exit(1);
-  }
-}
-
-function looksLikeDatacenterHint(text: string): boolean {
-  return /aliyun|tencent|amazonaws|googleusercontent|azure|digitalocean|linode|vultr|cloudflare/i.test(
-    text,
-  );
-}
-
-function printIdentityCheck() {
-  const identity = ensureDeviceIdentity();
-  console.log(
-    `device: ${identity.machineId.slice(0, 8)}…  hostname: ${identity.hostname}  mac: ${identity.mac}`,
-  );
-  try {
-    const dockerenv = execSync(
-      `docker exec ${CONTAINER_NAME} sh -c 'if [ -e /.dockerenv ]; then echo present; else echo absent; fi'`,
-      { encoding: "utf-8" },
-    ).trim();
-    const mid = execSync(
-      `docker exec ${CONTAINER_NAME} sh -c 'head -c 8 /etc/machine-id 2>/dev/null || echo missing'`,
-      { encoding: "utf-8" },
-    ).trim();
-    const actualHn = execSync(
-      `docker exec ${CONTAINER_NAME} hostname`,
-      { encoding: "utf-8" },
-    ).trim();
-    const actualMac = execSync(
-      `docker exec ${CONTAINER_NAME} sh -c 'cat /sys/class/net/eth0/address 2>/dev/null || cat /sys/class/net/$(ls /sys/class/net | head -1)/address'`,
-      { encoding: "utf-8" },
-    ).trim();
-    console.log(`container dockerenv: ${dockerenv}  machine-id: ${mid}…  hostname: ${actualHn}  mac: ${actualMac}`);
-    if (actualHn !== identity.hostname || actualMac.toLowerCase() !== identity.mac.toLowerCase()) {
-      console.log("warning: live hostname/MAC do not match persisted identity; recreate with wx down && wx up.");
-    }
-    if (dockerenv === "present") {
-      console.log("warning: /.dockerenv still present — recreate the container (wx down && wx up).");
-    }
-  } catch {
-    // container may still be starting
-  }
-  if (looksLikeDatacenterHint(os.hostname()) || process.env.PROXY?.match(/amazonaws|aliyun/i)) {
-    console.log("warning: host/proxy looks like a cloud datacenter. Use a residential exit.");
-  }
-  console.log("do not test Frida/identity changes on a primary account.");
-}
-
-function ensureToken(): string {
-  try {
-    const existing = fs.readFileSync(TOKEN_PATH, "utf-8").trim();
-    if (existing) return existing;
-  } catch {
-    // File doesn't exist, generate one
-  }
-  fs.mkdirSync(TOKEN_DIR, { recursive: true });
-  const token = randomBytes(32).toString("hex");
-  fs.writeFileSync(TOKEN_PATH, token + "\n", { mode: 0o600 });
-  console.log(`Auth token generated: ${TOKEN_PATH}`);
-  return token;
-}
-
-function printNoVncUrl() {
-  const token = readToken();
-  if (token) {
-    console.log(`noVNC: http://localhost:${DEFAULT_PORT}/vnc/?token=${token}&autoconnect=true`);
-  } else {
-    console.log(`noVNC: http://localhost:${DEFAULT_PORT}/vnc/`);
-  }
-}
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 function readToken(): string | undefined {
   try {
-    const t = fs.readFileSync(TOKEN_PATH, "utf-8").trim();
-    return t || undefined;
-  } catch {
-    return undefined;
+    secureRegularFile(TOKEN_PATH);
+    const value = fs.readFileSync(TOKEN_PATH, "utf8").trim();
+    if (!/^[a-f0-9]{64}$/.test(value)) throw new Error("INVALID_AUTH_TOKEN");
+    return value;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof Error && error.message.startsWith("ENOENT:")) return undefined;
+    throw error;
   }
 }
 
-interface Config {
-  serverUrl: string;
-  token?: string;
+function ensureToken(): string {
+  const current = readToken();
+  if (current) return current;
+  fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  const token = randomBytes(32).toString("hex");
+  fs.writeFileSync(TOKEN_PATH, `${token}\n`, { mode: 0o600, flag: "wx" });
+  return token;
 }
 
-function getConfig(): Config {
+function client(): WeChatClient {
+  return new WeChatClient({
+    baseUrl: process.env.AGENT_WECHAT_URL || `http://localhost:${DEFAULT_PORT}`,
+    token: process.env.AGENT_WECHAT_TOKEN || readToken(),
+  });
+}
+
+function subscriptionOptions(): SubscriptionClientOptions {
   return {
-    serverUrl: process.env.AGENT_WECHAT_URL || `http://localhost:${DEFAULT_PORT}`,
+    url: process.env.AGENT_WECHAT_URL || `http://localhost:${DEFAULT_PORT}`,
     token: process.env.AGENT_WECHAT_TOKEN || readToken(),
   };
 }
 
-function getImageTag(): string {
-  return localBuildImage();
+function isJson(): boolean { return program.opts().json === true; }
+function output<T>(data: T, human: () => void): void { if (isJson()) printJson(success(data)); else human(); }
+
+function mapHttpError(error: WeChatHttpError): CliError {
+  if (error.status === 400) return new CliError(error.errorCode || "INVALID_ARGUMENT", "request arguments are invalid", EXIT.ARGUMENT);
+  if (error.status === 401) return new CliError("AUTH_REQUIRED", "authentication is required", EXIT.AUTH);
+  if (error.status === 429) return new CliError(error.errorCode || "RATE_LIMITED", "request is rate limited", EXIT.RATE_LIMITED, { retryAfter: error.retryAfter });
+  if (error.status === 409) return new CliError(error.errorCode || "CONFIRMATION_REQUIRED", "operator confirmation is required", EXIT.CONFIRMATION);
+  return new CliError(error.errorCode || "SERVICE_REQUEST_FAILED", `service request failed (${error.status})`, EXIT.SERVICE);
 }
 
-// Create program
-const program = new Command();
-
-program
-  .name("wx")
-  .description("WeChat automation CLI")
-  .version(VERSION)
-  .option("-s, --session <name>", "Use specified session", "default");
-
-// Helper to create REST client
-function getClient(): WeChatClient {
-  const config = getConfig();
-  const opts = program.opts();
-  return new WeChatClient({
-    baseUrl: config.serverUrl,
-    token: config.token,
-    sessionId: opts.session,
-  });
-}
-
-// Helper to get subscription client options (WebSocket login)
-function getSubscriptionOptions(): SubscriptionClientOptions {
-  const config = getConfig();
-  const opts = program.opts();
-  return {
-    url: config.serverUrl,
-    token: config.token,
-    sessionId: opts.session,
-  };
-}
-
-// ============================================
-// Container Commands
-// ============================================
-
-program
-  .command("up")
-  .description("Start the WeChat container")
-  .option("--proxy <url>", "Transparent proxy (user:pass@host:port)")
-  .option("--image <reference>", `Published ${GHCR_IMAGE} version tag or sha256 digest`)
-  .action((opts) => cmdUp(opts));
-
-program
-  .command("down")
-  .description("Stop and remove the container")
-  .action(cmdDown);
-
-program
-  .command("logs")
-  .description("Show container logs")
-  .action(cmdLogs);
-
-// ============================================
-// Session Commands
-// ============================================
-
-const sessionCmd = program
-  .command("session")
-  .description("Manage sessions");
-
-sessionCmd
-  .command("list")
-  .description("List all sessions")
-  .action(async () => {
-    await cmdSessionList(getClient());
-  });
-
-sessionCmd
-  .command("create <name>")
-  .description("Create a new session")
-  .action(async (name: string) => {
-    await cmdSessionCreate(getClient(), name);
-  });
-
-sessionCmd
-  .command("start <id>")
-  .description("Start a session")
-  .action(async (id: string) => {
-    await cmdSessionStart(getClient(), id);
-  });
-
-sessionCmd
-  .command("stop <id>")
-  .description("Stop a session")
-  .action(async (id: string) => {
-    await cmdSessionStop(getClient(), id);
-  });
-
-sessionCmd
-  .command("delete <id>")
-  .description("Delete a session")
-  .action(async (id: string) => {
-    await cmdSessionDelete(getClient(), id);
-  });
-
-// ============================================
-// API Commands
-// ============================================
-
-program
-  .command("status")
-  .description("Show container and login status")
-  .action(async () => {
-    await cmdStatus(getClient());
-  });
-
-// ============================================
-// Auth Commands
-// ============================================
-
-const authCmd = program
-  .command("auth")
-  .description("Authentication commands");
-
-authCmd
-  .command("login")
-  .description("Log in to WeChat (shows QR code)")
-  .option("-t, --timeout <seconds>", "Timeout in seconds", "300")
-  .option("-n, --new", "Switch to new account instead of existing")
-  .action(async (opts) => {
-    const timeoutMs = parseInt(opts.timeout, 10) * 1000;
-    await cmdLogin(getSubscriptionOptions(), timeoutMs, opts.new ?? false);
-  });
-
-authCmd
-  .command("logout")
-  .description("Log out of WeChat")
-  .action(async () => {
-    const client = getClient();
-    const result = await client.logout();
-    if (result.success) {
-      console.log("Logged out");
-    } else {
-      console.log(`Logout failed: ${result.error ?? "unknown error"}`);
-    }
-  });
-
-authCmd
-  .command("status")
-  .description("Check login status")
-  .action(async () => {
-    const client = getClient();
-    const auth = await client.authStatus();
-    if (auth.status === "logged_in") {
-      console.log(`Logged in${auth.loggedInUser ? ` as ${auth.loggedInUser}` : ""}`);
-    } else {
-      console.log(`Status: ${auth.status.replace(/_/g, " ")}`);
-    }
-  });
-
-authCmd
-  .command("token")
-  .description("Show or regenerate the auth token")
-  .option("--regenerate", "Generate a new token")
-  .action(async (opts: { regenerate?: boolean }) => {
-    if (opts.regenerate) {
-      fs.mkdirSync(TOKEN_DIR, { recursive: true });
-      const token = randomBytes(32).toString("hex");
-      fs.writeFileSync(TOKEN_PATH, token + "\n", { mode: 0o600 });
-      console.log(`New token: ${token}`);
-      console.log(`Restart the container for it to take effect: pnpm cli down && pnpm cli up`);
-    } else {
-      const token = ensureToken();
-      console.log(token);
-    }
-  });
-
-// ============================================
-// Chats Commands
-// ============================================
-
-const chatsCmd = program
-  .command("chats")
-  .description("Chat management commands");
-
-chatsCmd
-  .command("list")
-  .description("List chats from WeChat database")
-  .option("-l, --limit <number>", "Maximum number of chats", "50")
-  .option("-o, --offset <number>", "Skip first N chats", "0")
-  .option("-j, --json", "Output as JSON")
-  .action(async (opts) => {
-    await cmdChats(getClient(), parseInt(opts.limit, 10), parseInt(opts.offset, 10), opts.json ?? false);
-  });
-
-chatsCmd
-  .command("get <chatId>")
-  .description("Get details for a specific chat")
-  .option("-j, --json", "Output as JSON")
-  .action(async (chatId: string, opts) => {
-    await cmdChatGet(getClient(), chatId, opts.json ?? false);
-  });
-
-chatsCmd
-  .command("find <name>")
-  .description("Find chat by name")
-  .action(async (name: string) => {
-    await cmdFind(getClient(), name);
-  });
-
-chatsCmd
-  .command("open <chatId>")
-  .description("Open a chat in WeChat UI (triggers media downloads + clears unread)")
-  .option("--clear-unreads", "Clear unread count after opening")
-  .action(async (chatId: string, opts: { clearUnreads?: boolean }) => {
-    await cmdChatOpen(getClient(), chatId, opts.clearUnreads);
-  });
-
-// ============================================
-// Contacts Commands
-// ============================================
-
-const contactsCmd = program
-  .command("contacts")
-  .description("Contact management commands");
-
-contactsCmd
-  .command("list")
-  .description("List all contacts from WeChat address book")
-  .option("-l, --limit <number>", "Maximum number of contacts", "200")
-  .option("-o, --offset <number>", "Skip first N contacts", "0")
-  .option("-j, --json", "Output as JSON")
-  .action(async (opts) => {
-    await cmdContacts(getClient(), parseInt(opts.limit, 10), parseInt(opts.offset, 10), opts.json ?? false);
-  });
-
-contactsCmd
-  .command("find <name>")
-  .description("Search contacts by name")
-  .option("-j, --json", "Output as JSON")
-  .action(async (name: string, opts) => {
-    await cmdContactsFind(getClient(), name, opts.json ?? false);
-  });
-
-// ============================================
-// Messages Commands
-// ============================================
-
-const messagesCmd = program
-  .command("messages")
-  .description("Message commands");
-
-messagesCmd
-  .command("list <chatId>")
-  .description("List messages for a chat")
-  .option("-l, --limit <number>", "Maximum number of messages", "50")
-  .option("-o, --offset <number>", "Skip first N messages", "0")
-  .option("-j, --json", "Output as JSON")
-  .action(async (chatId: string, opts) => {
-    await cmdMessages(getClient(), chatId, parseInt(opts.limit, 10), parseInt(opts.offset, 10), opts.json ?? false);
-  });
-
-messagesCmd
-  .command("media <chatId> <localId>")
-  .description("Save media attachment (image thumbnail, emoji, or voice)")
-  .option("-o, --output <path>", "Output file path")
-  .action(async (chatId: string, localIdStr: string, opts) => {
-    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output);
-  });
-
-messagesCmd
-  .command("send <chatId>")
-  .description("Send a message to a chat")
-  .option("--text <text>", "Text message to send")
-  .option("--image <path>", "Image file to send")
-  .option("--file <path>", "File to send")
-  .option(
-    "--confirm-similar",
-    "Confirm this operator-reviewed text despite the similar-content warning",
-  )
-  .action(async (
-    chatId: string,
-    opts: { text?: string; image?: string; file?: string; confirmSimilar?: boolean },
-  ) => {
-    if (!opts.text && !opts.image && !opts.file) {
-      console.error("Must provide --text, --image, or --file");
-      process.exit(1);
-    }
-
-    let image: { data: string; mimeType: string } | undefined;
-    if (opts.image) {
-      if (!fs.existsSync(opts.image)) {
-        console.error(`File not found: ${opts.image}`);
-        process.exit(1);
-      }
-      const data = fs.readFileSync(opts.image);
-      const ext = path.extname(opts.image).toLowerCase();
-      const mimeType = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" :
-                       ext === ".gif" ? "image/gif" : "image/png";
-      image = { data: data.toString("base64"), mimeType };
-    }
-
-    let file: { data: string; filename: string } | undefined;
-    if (opts.file) {
-      if (!fs.existsSync(opts.file)) {
-        console.error(`File not found: ${opts.file}`);
-        process.exit(1);
-      }
-      const data = fs.readFileSync(opts.file);
-      file = { data: data.toString("base64"), filename: path.basename(opts.file) };
-    }
-
-    await cmdSend(getClient(), chatId, opts.text, image, file, opts.confirmSimilar === true);
-  });
-
-// ============================================
-// Update Command
-// ============================================
-
-program
-  .command("update")
-  .description("Update the agent-server binary in the running container to match CLI version")
-  .action(cmdUpdate);
-
-// ============================================
-// Debug Commands
-// ============================================
-
-program
-  .command("screenshot")
-  .description("Save screenshot to file")
-  .argument("[file]", "Output file path", "screenshot.png")
-  .action(async (file: string) => {
-    await cmdScreenshot(getClient(), file);
-  });
-
-program
-  .command("a11y")
-  .description("Dump accessibility tree")
-  .addOption(
-    new Option("-f, --format <format>", "Output format")
-      .choices(["json", "aria"])
-      .default("json")
-  )
-  .action(async (options: { format: "json" | "aria" }) => {
-    await cmdA11y(getClient(), options.format);
-  });
-
-// ============================================
-// Command Implementations
-// ============================================
-
-async function cmdStatus(client: WeChatClient) {
-  const container = getContainerRuntimeState();
-  if (container === "up") {
-    console.log("Container: up");
-  } else if (container === "down") {
-    console.log("Container: down");
-    return;
-  } else {
-    console.log("Container: unknown (Docker unavailable)");
-    return;
+async function action<T>(fn: () => Promise<T> | T): Promise<void> {
+  try { await fn(); }
+  catch (raw) {
+    const error = raw instanceof CliError ? raw : raw instanceof WeChatHttpError ? mapHttpError(raw) : new CliError("UNEXPECTED_ERROR", raw instanceof Error ? raw.message : String(raw), EXIT.SERVICE);
+    if (isJson()) printJson(failure(error)); else console.error(`${error.code}: ${error.message}`);
+    process.exitCode = error.exitCode;
   }
+}
 
+function integer(value: string, name: string, min: number, max: number): number {
+  if (!/^(?:0|[1-9]\d*)$/.test(value)) throw new CliError("INVALID_ARGUMENT", `${name} must be an integer`, EXIT.ARGUMENT);
+  const number = Number(value);
+  if (number < min || number > max) throw new CliError("INVALID_ARGUMENT", `${name} must be between ${min} and ${max}`, EXIT.ARGUMENT);
+  return number;
+}
+
+async function confirmDestructive(summary: string, yes: boolean): Promise<void> {
+  if (yes) return;
+  if (!process.stdin.isTTY || isJson()) throw new CliError("CONFIRMATION_REQUIRED", `${summary}; rerun with --yes`, EXIT.CONFIRMATION);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const status = await client.status();
-    console.log("Server: reachable");
-    console.log("Version:", status.version);
-  } catch (err) {
-    console.log("Server: unreachable");
-    console.log(`Error: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-
-  try {
-    const auth = await client.authStatus();
-    if (auth.status === "logged_in") {
-      console.log(`Login: logged in${auth.loggedInUser ? ` as ${auth.loggedInUser}` : ""}`);
-    } else {
-      console.log(`Login: ${auth.status.replace(/_/g, " ")}`);
-    }
-  } catch {
-    console.log("Login: unknown (auth status unavailable)");
-  }
+    const answer = await rl.question(`${summary}\nType "purge" to continue: `);
+    if (answer !== "purge") throw new CliError("CONFIRMATION_DECLINED", "destructive operation cancelled", EXIT.CONFIRMATION);
+  } finally { rl.close(); }
 }
 
-function getContainerRuntimeState(): "up" | "down" | "unknown" {
-  try {
-    const existing = execSync(`docker ps -aq -f "name=^${CONTAINER_NAME}$"`, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (!existing) {
-      return "down";
-    }
-    const running = execSync(`docker ps -q -f "name=^${CONTAINER_NAME}$"`, {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return running ? "up" : "down";
-  } catch {
-    return "unknown";
-  }
-}
-
-async function cmdLogin(
-  options: SubscriptionClientOptions,
-  timeoutMs: number = 300_000,
-  newAccount: boolean = false,
-) {
-  console.log(newAccount ? "Initiating login with new account...\n" : "Initiating login...\n");
-
-  const { client, close } = createSubscriptionClient(options);
-  let subscription: { unsubscribe: () => void } | null = null;
-
-  // Handle Ctrl+C to abort subscription
-  const abortHandler = () => {
-    console.log("\n\nLogin cancelled.");
-    if (subscription) {
-      subscription.unsubscribe();
-    }
-    close();
-    process.exit(0);
-  };
-  process.on("SIGINT", abortHandler);
-
+async function login(timeoutMs: number, newAccount: boolean): Promise<void> {
+  const { client: subClient, close } = createSubscriptionClient(subscriptionOptions());
+  let subscription: { unsubscribe: () => void } | undefined;
+  let terminal: "success" | "timeout" | "error" | undefined;
+  const abort = () => { subscription?.unsubscribe(); close(); };
+  process.once("SIGINT", abort);
   try {
     await new Promise<void>((resolve, reject) => {
-      subscription = client.status.loginSubscription.subscribe(
-        {
-          timeoutMs,
-          newAccount,
+      subscription = subClient.status.loginSubscription.subscribe({ timeoutMs, newAccount }, {
+        onData: (event) => {
+          if (event.type === "qr") {
+            if (isJson()) console.error("QR code received; scan it with WeChat");
+            else qrTerminal.generate(event.qrData, { small: true });
+          } else if (event.type === "login_success") { terminal = "success"; resolve(); }
+          else if (event.type === "login_timeout") { terminal = "timeout"; resolve(); }
+          else if (event.type === "error") { terminal = "error"; reject(new CliError("LOGIN_FAILED", event.message, EXIT.AUTH)); }
+          else if (!isJson() && "message" in event && event.message) console.error(event.message);
         },
-        {
-          onData: (event) => {
-            switch (event.type) {
-              case "status":
-                console.log(`Status: ${event.message}`);
-                break;
-              case "qr":
-                console.log("Scan this QR code with WeChat:\n");
-                // Use binaryData if available (preserves exact bytes), fallback to string
-                const qrInput = event.qrBinaryData
-                  ? Buffer.from(event.qrBinaryData as number[]).toString("utf-8")
-                  : event.qrData;
-                qrTerminal.generate(qrInput as string, { small: true });
-                console.log("\nWaiting for scan... (Ctrl+C to cancel)\n");
-                break;
-              case "phone_confirm":
-                console.log(`\n📱 ${event.message || "Please confirm login on your phone"}\n`);
-                break;
-              case "login_success":
-                console.log("\n\nLogin successful!");
-                if (event.userId) {
-                  console.log(`User ID: ${event.userId}`);
-                }
-                resolve();
-                break;
-              case "login_timeout":
-                console.log("\n\nLogin timed out. Please try again.");
-                resolve();
-                break;
-              case "error":
-                console.error(`\nError: ${event.message}`);
-                reject(new Error(event.message));
-                break;
-            }
-          },
-          onError: (err) => {
-            console.error("\nConnection error:", err.message);
-            reject(err);
-          },
-          onComplete: () => {
-            // Subscription completed normally
-          },
-        }
-      );
+        onError: (error) => reject(new CliError("LOGIN_CONNECTION_FAILED", error.message, EXIT.SERVICE)),
+      });
     });
-  } finally {
-    process.removeListener("SIGINT", abortHandler);
-    close();
-  }
+  } finally { process.removeListener("SIGINT", abort); subscription?.unsubscribe(); close(); }
+  if (terminal === "timeout") throw new CliError("LOGIN_TIMEOUT", "login timed out", EXIT.AUTH);
+  if (terminal !== "success") throw new CliError("LOGIN_CANCELLED", "login did not complete", EXIT.AUTH);
+  output({ status: "logged_in" }, () => console.log("Login successful"));
 }
 
-async function cmdChats(client: WeChatClient, limit: number = 50, offset: number = 0, json: boolean = false) {
-  const chats = await client.listChats(limit, offset);
-
-  if (json) {
-    console.log(JSON.stringify(chats, null, 2));
-    return;
-  }
-
-  if (chats.length === 0) {
-    console.log("No chats found. Make sure you're logged in.");
-    return;
-  }
-
-  console.log(`Found ${chats.length} chat(s):\n`);
-
-  // Chat ID column width based on actual data
-  const maxIdLen = Math.max(10, ...chats.map(c => c.username?.length ?? c.id.length));
-  const idHeader = "Chat ID".padEnd(maxIdLen);
-  console.log(`${idHeader}  Unread  Group  Name`);
-  console.log("-".repeat(maxIdLen + 30));
-  for (const chat of chats) {
-    const id = (chat.username ?? chat.id).padEnd(maxIdLen);
-    const unread = chat.unreadCount > 0 ? String(chat.unreadCount).padStart(2) : "  ";
-    const group = chat.isGroup ? "  Y  " : "     ";
-    console.log(`${id}  ${unread}    ${group}  ${chat.name}`);
-  }
+function regularUpload(target: string): Buffer {
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(target); } catch { throw new CliError("FILE_NOT_FOUND", `file not found: ${target}`, EXIT.ARGUMENT); }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new CliError("INVALID_UPLOAD_FILE", "upload must be a regular non-symlink file", EXIT.ARGUMENT);
+  if (stat.size > MAX_UPLOAD_BYTES) throw new CliError("UPLOAD_TOO_LARGE", `upload exceeds ${MAX_UPLOAD_BYTES} bytes`, EXIT.ARGUMENT);
+  return fs.readFileSync(target);
 }
 
-async function cmdChatGet(client: WeChatClient, chatId: string, json: boolean = false) {
-  const chat = await client.getChat(chatId);
-
-  if (!chat) {
-    console.error(`Chat not found: ${chatId}`);
-    process.exit(1);
-  }
-
-  if (json) {
-    console.log(JSON.stringify(chat, null, 2));
-    return;
-  }
-
-  console.log(`Chat ID:        ${chat.username ?? chat.id}`);
-  console.log(`Name:           ${chat.name}`);
-  if (chat.remark) console.log(`Remark:         ${chat.remark}`);
-  console.log(`Group:          ${chat.isGroup ? "Yes" : "No"}`);
-  console.log(`Unread:         ${chat.unreadCount}`);
-  if (chat.lastMessagePreview) {
-    const sender = chat.lastMessageSender ? `${chat.lastMessageSender}: ` : "";
-    console.log(`Last message:   ${sender}${chat.lastMessagePreview}`);
-  }
-  if (chat.lastActivityAt) console.log(`Last activity:  ${chat.lastActivityAt}`);
+function renderMessages(page: CursorPage<Message>): void {
+  for (const item of [...page.items].reverse()) console.log(`${item.localId}\t${item.timestamp}\t${item.senderName || item.sender || ""}\t${item.content}`);
+  if (page.nextCursor) console.error(`next cursor: ${page.nextCursor}`);
 }
 
-/** WeChat base message types */
-const MSG_BASE_TYPES: Record<number, string> = {
-  1: "text",
-  3: "image",
-  34: "voice",
-  43: "video",
-  47: "emoji",
-  49: "appmsg",
-  10000: "system",
-  10002: "revoke",
-};
-
-/** Appmsg (type 49) subtypes */
-const APPMSG_SUB_TYPES: Record<number, string> = {
-  1: "text-link",
-  3: "music",
-  4: "video",
-  5: "link",
-  6: "file",
-  8: "sticker",
-  19: "location",
-  33: "mini-program",
-  36: "mini-program",
-  57: "reply",
-  63: "livestream",
-};
-
-function getMsgTypeLabel(rawType: number): string {
-  const base = rawType & 0xFFFFFFFF;
-  const sub = Math.floor(rawType / 0x100000000);
-
-  const baseLabel = MSG_BASE_TYPES[base];
-  if (!baseLabel) return `type:${rawType}`;
-
-  if (base === 49 && sub > 0) {
-    return APPMSG_SUB_TYPES[sub] ?? `appmsg:${sub}`;
+async function resetAuth(yes: boolean): Promise<void> {
+  const inventory = loadInventory();
+  if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "auth reset requires a trusted running instance", EXIT.CLEANUP);
+  await confirmDestructive("Reset WeChat login/session/cache and device identity for the default instance", yes);
+  const result = await client().resetAuth();
+  if (!result.success) throw new CliError(result.errorCode || "AUTH_RESET_FAILED", result.error || "auth reset failed", EXIT.CLEANUP);
+  stopInstance();
+  try {
+    removeOwnedVolume(inventory, 1, "wechat-home");
+  } catch (error) {
+    if (error instanceof CliError && error.code === "VOLUME_OWNERSHIP_MISMATCH") throw error;
+    throw new CliError("AUTH_RESET_CLEANUP_INCOMPLETE", `remaining resource: volume:${inventory.volumes[1]}`, EXIT.CLEANUP);
   }
-  return baseLabel;
+  const remaining: string[] = [];
+  for (const file of ["device-identity.env", "device-identity.json"]) {
+    const target = path.join(CONFIG_DIR, file);
+    try { assertSafePurgePath(target, CONFIG_DIR); fs.unlinkSync(target); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") remaining.push(file);
+    }
+  }
+  if (remaining.length) throw new CliError("AUTH_RESET_CLEANUP_INCOMPLETE", `remaining resources: ${remaining.join(", ")}`, EXIT.CLEANUP);
+  saveInventory({ ...inventory, containerId: undefined, updatedAt: new Date().toISOString() });
+  output({ reset: true, restartRequired: true }, () => console.log("WeChat authentication data reset. Run wx start to create a fresh identity."));
 }
 
-async function cmdMessages(client: WeChatClient, chatId: string, limit: number = 50, offset: number = 0, json: boolean = false) {
-  const messages = await client.listMessages(chatId, limit, offset);
-
-  if (json) {
-    console.log(JSON.stringify(messages, null, 2));
-    return;
+function programStatus(): Record<string, unknown> {
+  const inventory = loadInventory();
+  const container = dockerAvailable() ? inspectContainer() : undefined;
+  if (container) {
+    if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
+    assertOwnedContainer(container, inventory);
   }
-
-  if (messages.length === 0) {
-    console.log("No messages found.");
-    return;
-  }
-
-  // Display messages oldest-first for natural reading order
-  const sorted = [...messages].reverse();
-
-  // Compute column widths
-  const maxIdLen = Math.max(2, ...sorted.map(m => String(m.localId).length));
-  const maxTypeLen = Math.max(4, ...sorted.map(m => getMsgTypeLabel(m.type).length));
-  const formatSender = (m: (typeof sorted)[number]) => {
-    const name = m.senderName;
-    const id = m.sender;
-    if (name && id) return `${name}(${id.slice(0, 10)})`;
-    if (name) return name;
-    if (id) return id.slice(0, 10);
-    return "";
+  return {
+    cliVersion: VERSION,
+    docker: dockerAvailable() ? "available" : "unavailable",
+    container: container ? (container.State?.Running ? "running" : "stopped") : "absent",
+    imageDigest: inventory?.imageDigest,
+    inventory: inventory ? "trusted" : "absent",
   };
-  const maxSenderLen = Math.max(6, ...sorted.map(m => formatSender(m).length));
-  const hasAnyMention = sorted.some(m => m.isMentioned);
-  const atCol = hasAnyMention ? "@me  " : "";
-  const atHeader = hasAnyMention ? "@me".padEnd(5) : "";
-
-  // Header
-  console.log(`${"ID".padEnd(maxIdLen)}  ${"Time".padEnd(22)}  ${atHeader}${"Type".padEnd(maxTypeLen)}  ${"Sender".padEnd(maxSenderLen)}  Message`);
-  console.log("-".repeat(maxIdLen + 22 + maxTypeLen + maxSenderLen + (hasAnyMention ? 5 : 0) + 10));
-
-  for (const msg of sorted) {
-    const time = new Date(msg.timestamp).toLocaleString();
-    const typeLabel = getMsgTypeLabel(msg.type);
-    const id = String(msg.localId).padEnd(maxIdLen);
-    const mention = hasAnyMention ? (msg.isMentioned ? "Y" : "").padEnd(5) : "";
-    const sender = formatSender(msg).padEnd(maxSenderLen);
-    let preview = msg.content.length > 120 ? msg.content.slice(0, 120) + "..." : msg.content;
-    if (msg.reply) {
-      const rSender = msg.reply.sender ? `${msg.reply.sender}: ` : "";
-      const rSnippet = msg.reply.content.length > 40 ? msg.reply.content.slice(0, 40) + "..." : msg.reply.content;
-      preview = `[Re: ${rSender}${rSnippet}] ${preview}`;
-    }
-
-    console.log(`${id}  ${time.padEnd(22)}  ${mention}${typeLabel.padEnd(maxTypeLen)}  ${sender}  ${preview}`);
-  }
-
-  console.log(`\n${messages.length} message(s) shown.`);
 }
 
-async function cmdMedia(client: WeChatClient, chatId: string, localId: number, outputPath?: string) {
-  const result = await client.getMedia(chatId, localId);
-
-  if (result.type === "unsupported") {
-    console.error("No media found for this message (unsupported type or not found).");
-    process.exit(1);
-  }
-  if (result.type === "pending") {
-    console.error("Media not yet available. WeChat may still be downloading it — try again shortly.");
-    process.exit(1);
-  }
-
-  const outFile = outputPath ?? result.filename;
-
-  if (result.data) {
-    // Decode base64
-    const buffer = Buffer.from(result.data, "base64");
-    fs.writeFileSync(outFile, buffer);
-    console.log(`Saved ${result.type} to ${outFile} (${buffer.length} bytes)`);
-  } else if (result.type === "image") {
-    console.error("Image thumbnail not yet cached by WeChat. Try opening the chat in the app first.");
-    process.exit(1);
-  } else if (result.type === "video") {
-    console.error("Video not yet downloaded by WeChat. Try playing the video in the app first.");
-    process.exit(1);
-  } else {
-    console.error(`Media type "${result.type}" has no downloadable data.`);
-    process.exit(1);
-  }
-}
-
-async function cmdFind(client: WeChatClient, name: string) {
-  const chats = await client.findChats(name);
-  if (chats.length === 0) {
-    console.log(`No chats found matching "${name}"`);
-    return;
-  }
-
-  console.log(`Found ${chats.length} matching chats:\n`);
-  for (const chat of chats) {
-    console.log(`  ${chat.id}: ${chat.name}`);
-  }
-}
-
-async function cmdChatOpen(client: WeChatClient, chatId: string, clearUnreads?: boolean) {
-  console.log(`Opening chat ${chatId}...`);
-  const result = await client.openChat(chatId, clearUnreads);
-
-  if (result.ok) {
-    console.log(`Chat opened: ${result.username} (index ${result.index})`);
-  } else if (result.error === "NOT_LOGGED_IN") {
-    console.error("Not logged in. Run: pnpm cli auth login");
-    process.exit(1);
-  } else {
-    console.error(`Failed: ${result.error}`);
-    process.exit(1);
-  }
-}
-
-async function cmdContacts(client: WeChatClient, limit: number = 200, offset: number = 0, json: boolean = false) {
-  const contacts = await client.listContacts(limit, offset);
-
-  if (json) {
-    console.log(JSON.stringify(contacts, null, 2));
-    return;
-  }
-
-  if (contacts.length === 0) {
-    console.log("No contacts found. Make sure you're logged in.");
-    return;
-  }
-
-  console.log(`Found ${contacts.length} contact(s):\n`);
-
-  const maxIdLen = Math.max(10, ...contacts.map(c => c.username.length));
-  const idHeader = "Username".padEnd(maxIdLen);
-  console.log(`${idHeader}  Type        Name`);
-  console.log("-".repeat(maxIdLen + 30));
-  for (const c of contacts) {
-    const id = c.username.padEnd(maxIdLen);
-    const type = c.contactType.padEnd(10);
-    const name = c.remark ? `${c.nickName} (${c.remark})` : c.nickName;
-    console.log(`${id}  ${type}  ${name}`);
-  }
-}
-
-async function cmdContactsFind(client: WeChatClient, name: string, json: boolean = false) {
-  const contacts = await client.findContacts(name);
-
-  if (json) {
-    console.log(JSON.stringify(contacts, null, 2));
-    return;
-  }
-
-  if (contacts.length === 0) {
-    console.log(`No contacts found matching "${name}"`);
-    return;
-  }
-
-  console.log(`Found ${contacts.length} matching contact(s):\n`);
-  for (const c of contacts) {
-    const name = c.remark ? `${c.nickName} (${c.remark})` : c.nickName;
-    console.log(`  ${c.username}: ${name} [${c.contactType}]`);
-  }
-}
-
-async function cmdSend(
-  client: WeChatClient,
-  chatId: string,
-  text?: string,
-  image?: { data: string; mimeType: string },
-  file?: { data: string; filename: string },
-  confirmSimilar: boolean = false,
-) {
-  const what = file ? `file "${file.filename}"` : image ? "image" : "message";
-  console.log(`Sending ${what} to ${chatId}...`);
-  const result = await client.sendMessage(
-    buildCliSendParams({ chatId, text, image, file, confirmSimilar }),
-  );
-
-  if (result.success) {
-    console.log("Message sent successfully!");
-    if (result.messageId) {
-      console.log(`Message ID: ${result.messageId}`);
-    }
-  } else if (result.errorCode === "SIMILAR_CONTENT_CONFIRMATION_REQUIRED") {
-    console.error(
-      "Similar text requires operator review. Review the recipient and content, then rerun with --confirm-similar.",
-    );
-    process.exit(1);
-  } else if (result.error === "NOT_LOGGED_IN") {
-    console.error("Not logged in. Run: pnpm cli auth login");
-    process.exit(1);
-  } else {
-    console.error(`Failed to send message: ${result.error || "Unknown error"}`);
-    process.exit(1);
-  }
-}
-
-async function cmdScreenshot(client: WeChatClient, outputPath: string) {
-  console.log(`Capturing screenshot...`);
-  const result = await client.screenshot();
-  const buffer = Buffer.from(result.base64, "base64");
-  fs.writeFileSync(outputPath, buffer);
-  console.log(`Screenshot saved to ${outputPath}`);
-}
-
-async function cmdA11y(client: WeChatClient, format: "json" | "aria") {
-  const result = await client.a11y(format);
-  if (result.error) {
-    console.error(`Error: ${result.error}`);
-    return;
-  }
-  if (format === "aria" && result.aria) {
-    console.log(result.aria);
-  } else if (result.tree) {
-    console.log(JSON.stringify(result.tree, null, 2));
-  }
-}
-
-// ============================================
-// Session Commands Implementation
-// ============================================
-
-async function cmdSessionList(client: WeChatClient) {
-  const sessions = await client.listSessions();
-  if (sessions.length === 0) {
-    console.log("No sessions found.");
-    return;
-  }
-
-  console.log(`Found ${sessions.length} session(s):\n`);
-  for (const session of sessions) {
-    const status = session.status === "running" ? "✓ running" : session.status;
-    const login = session.loginState.status === "logged_in" ? "logged in" : session.loginState.status;
-    console.log(`  ${session.id}: ${session.name}`);
-    console.log(`    Status: ${status}, Login: ${login}`);
-    console.log(`    Display: ${session.display}, VNC: ${session.vncPort}`);
-    console.log(`    User: ${session.linuxUser}`);
-    if (session.errorMessage) {
-      console.log(`    Error: ${session.errorMessage}`);
-    }
-    console.log();
-  }
-}
-
-async function cmdSessionCreate(client: WeChatClient, name: string) {
-  console.log(`Creating session "${name}"...`);
-  const session = await client.createSession(name);
-  console.log(`Session created!`);
-  console.log(`  ID: ${session.id}`);
-  console.log(`  Name: ${session.name}`);
-  console.log(`  User: ${session.linuxUser}`);
-  console.log(`  Display: ${session.display}`);
-  console.log(`  VNC Port: ${session.vncPort}`);
-  console.log(`\nStart the session with: pnpm cli session start ${session.name}`);
-}
-
-async function cmdSessionStart(client: WeChatClient, idOrName: string) {
-  console.log(`Starting session "${idOrName}"...`);
-  const session = await client.startSession(idOrName);
-  console.log(`Session started!`);
-  console.log(`  Status: ${session.status}`);
-  console.log(`  Display: ${session.display}`);
-  console.log(`  VNC Port: ${session.vncPort}`);
-  if (session.dbusAddress) {
-    console.log(`  D-Bus: ${session.dbusAddress}`);
-  }
-  console.log(`\nLogin with: pnpm cli --session ${session.name} login`);
-}
-
-async function cmdSessionStop(client: WeChatClient, idOrName: string) {
-  console.log(`Stopping session "${idOrName}"...`);
-  const session = await client.stopSession(idOrName);
-  console.log(`Session stopped.`);
-  console.log(`  Status: ${session.status}`);
-}
-
-async function cmdSessionDelete(client: WeChatClient, idOrName: string) {
-  console.log(`Deleting session "${idOrName}"...`);
-  const result = await client.deleteSession(idOrName);
-  if (result.success) {
-    console.log(`Session deleted.`);
-  } else {
-    console.error(`Failed to delete session.`);
-    process.exit(1);
-  }
-}
-
-// ============================================
-// Update Command Implementation
-// ============================================
-
-async function cmdUpdate() {
-  const version = VERSION;
-  console.log(`Updating agent-server to v${version}...`);
-
-  // Find running container
-  let container: string;
+async function syncServer(binary: string, sha256: string): Promise<void> {
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new CliError("INVALID_SHA256", "--sha256 must be 64 lowercase hex", EXIT.ARGUMENT);
+  const bytes = regularUpload(binary);
+  if (createHash("sha256").update(bytes).digest("hex") !== sha256) throw new CliError("CHECKSUM_MISMATCH", "developer server checksum mismatch", EXIT.ARGUMENT);
+  const info = inspectContainer();
+  const inventory = loadInventory();
+  if (!info || !inventory || info.Id !== inventory.containerId) throw new CliError("INSTANCE_NOT_RUNNING", "trusted instance is not running", EXIT.SERVICE);
+  const remote = `/tmp/agent-server-${process.pid}`;
+  execFileSync("docker", ["cp", binary, `${info.Id}:${remote}`], { stdio: "inherit" });
   try {
-    container = execSync(
-      `docker ps --filter "name=agent-wechat" --format "{{.Names}}" | head -1`,
-      { encoding: "utf-8" }
-    ).trim();
+    execFileSync("docker", ["exec", info.Id, "sh", "-c", `cp /opt/agent-server/agent-server /tmp/agent-server.rollback && chmod 755 ${remote} && mv ${remote} /opt/agent-server/agent-server && pkill -f '^/opt/agent-server/agent-server$'`], { stdio: "inherit" });
+    await waitHealthy();
   } catch {
-    container = "";
+    execFileSync("docker", ["exec", info.Id, "sh", "-c", "test -f /tmp/agent-server.rollback && mv /tmp/agent-server.rollback /opt/agent-server/agent-server && pkill -f '^/opt/agent-server/agent-server$' || true"], { stdio: "ignore" });
+    throw new CliError("DEV_SYNC_ROLLBACK", "developer server sync failed and original binary was restored", EXIT.ROLLBACK);
   }
-  if (!container) {
-    console.error("No running agent-wechat container found.");
-    process.exit(1);
-  }
-
-  // Detect container architecture
-  const uname = execSync(
-    `docker exec "${container}" uname -m`,
-    { encoding: "utf-8" }
-  ).trim();
-  const arch = uname === "x86_64" ? "amd64" : "arm64";
-
-  const assetName = `agent-server-${version}-linux-${arch}`;
-  const tmpFile = path.join(os.tmpdir(), assetName);
-
-  // Download binary from GitHub Releases (no gh CLI dependency)
-  const releaseUrl = `https://github.com/kyan-du/agent-wechat/releases/download/v${version}/${assetName}`;
-  console.log(`Downloading ${assetName}...`);
-  try {
-    const resp = await fetch(releaseUrl, { redirect: "follow" });
-    if (!resp.ok) {
-      throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
-    }
-    const buffer = Buffer.from(await resp.arrayBuffer());
-    fs.writeFileSync(tmpFile, buffer, { mode: 0o755 });
-  } catch (err) {
-    console.error(
-      `Failed to download ${assetName} from GitHub Releases.\n` +
-      `Make sure v${version} has been released with binary assets.\n` +
-      `URL: ${releaseUrl}\n` +
-      `Error: ${err instanceof Error ? err.message : String(err)}`
-    );
-    process.exit(1);
-  }
-
-  // Deploy into container
-  console.log(`Deploying to ${container}...`);
-  execSync(`docker cp "${tmpFile}" "${container}:/opt/agent-server/agent-server"`, {
-    stdio: "inherit",
-  });
-  execSync(`docker exec "${container}" chmod +x /opt/agent-server/agent-server`, {
-    stdio: "inherit",
-  });
-
-  // Restart server process (entrypoint loop brings it back)
-  execSync(
-    `docker exec "${container}" pkill -f "/opt/agent-server/agent-server" 2>/dev/null || true`,
-    { stdio: "inherit" }
-  );
-
-  // Clean up
-  try {
-    fs.unlinkSync(tmpFile);
-  } catch {
-    // ignore
-  }
-
-  console.log("Server restarting with new binary.");
-
-  // Wait for health check
-  console.log("Waiting for server...");
-  const config = getConfig();
-  for (let i = 0; i < 15; i++) {
-    await new Promise((r) => setTimeout(r, 1000));
-    try {
-      const resp = await fetch(`${config.serverUrl}/health`);
-      if (resp.ok) {
-        console.log("Server is ready!");
-        return;
-      }
-    } catch {
-      // not ready yet
-    }
-  }
-  console.log("Server did not become ready in time. Check logs with: wx logs");
+  output({ synced: true, sha256 }, () => console.log("Developer server synchronized"));
 }
 
-// ============================================
-// Container Commands Implementation
-// ============================================
+const program = new Command();
+program.name("wx").description("Single-instance agent-wechat CLI").version(VERSION).option("-j, --json", "emit one versioned JSON value on stdout");
+program.showSuggestionAfterError();
+program.configureOutput({ outputError: (text) => process.stderr.write(text) });
+program.exitOverride();
 
-async function cmdUp(opts: { proxy?: string; image?: string } = {}) {
-  const identity = ensureDeviceIdentity();
-  let image: string;
-  try {
-    image = opts.image ? validatePublishedImageReference(opts.image) : getImageTag();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  }
+program.command("start")
+  .description("Start the compatible single-instance container")
+  .option("--image <reference>", `exact ${GHCR_IMAGE} semver tag or digest`)
+  .option("--pull", "pull and resolve the selected image")
+  .option("--offline", "offline mode; never pull")
+  .option("--proxy <url>", "transparent proxy URL")
+  .action((options) => action(async () => {
+    if (options.pull && options.offline) throw new CliError("ARGUMENT_CONFLICT", "--pull and --offline are mutually exclusive", EXIT.ARGUMENT);
+    const inventory = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), localDefault: localBuildImage(), noPull: options.offline === true, ...options });
+    output({ container: inventory.containerName, imageDigest: inventory.imageDigest, port: inventory.port }, () => console.log(`Started ${inventory.containerName} on port ${inventory.port}`));
+  }));
 
-  const existingRaw = execFileSync("docker", ["ps", "-aq", "-f", `name=^${CONTAINER_NAME}$`], {
-    encoding: "utf-8",
-  });
-  if (existingRaw.trim()) {
-    let boundId: string;
-    try {
-      boundId = parseExactlyOneDockerId(existingRaw);
-    } catch {
-      failExistingContainer(
-        `Ambiguous or invalid ${CONTAINER_NAME} container ID from docker ps. Run: wx down && wx up`,
-      );
-    }
-    const runningRaw = execFileSync("docker", ["ps", "-q", "-f", `name=^${CONTAINER_NAME}$`], {
-      encoding: "utf-8",
-    });
-    const inspected = inspectExistingContainer(boundId);
-    const decision = bindExistingContainer({
-      psAllRaw: existingRaw,
-      psRunningRaw: runningRaw,
-      inspectOk: inspected.ok,
-      inspectRaw: inspected.ok ? inspected.raw : undefined,
-      identity,
-    });
-    if (decision.action === "fail") {
-      failExistingContainer(
-        decision.reason === "inspect-failed"
-          ? `Cannot inspect existing ${CONTAINER_NAME}; not creating a second container. Run: wx down && wx up`
-          : `Existing container ${CONTAINER_NAME} does not match the canonical device identity. Run: wx down && wx up`,
-      );
-    }
-    if (decision.start) {
-      console.log(`Starting existing container ${decision.id}...`);
-      execFileSync("docker", ["start", decision.id], { stdio: "inherit" });
+program.command("stop")
+  .description("Stop and remove the container; preserve data unless --purge")
+  .option("--purge", "delete every resource in the trusted default-instance inventory")
+  .option("--yes", "skip only the interactive confirmation")
+  .action((options) => action(async () => {
+    if (options.purge) {
+      const inventory = loadInventory();
+      if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "no trusted instance inventory", EXIT.CLEANUP);
+      await confirmDestructive(`Purge default instance: ${inventory.containerName}; volumes ${inventory.volumes.join(", ")}; config ${INSTANCE_PATH}`, options.yes === true);
+      const result = purgeInstance();
+      output(result, () => console.log(`Purged ${result.removed.length} resources`));
     } else {
-      console.log(`Container ${decision.id} is already running.`);
+      const result = stopInstance();
+      output(result, () => console.log(result.stopped ? "Container stopped and removed" : "Container is absent"));
     }
-    console.log(`API: http://localhost:${DEFAULT_PORT}`);
-    printNoVncUrl();
-    printIdentityCheck();
-    return;
-  }
+  }));
 
-  // Check if image exists locally, pull if not
-  try {
-    execFileSync("docker", ["image", "inspect", image], { stdio: "ignore" });
-  } catch {
+program.command("restart").description("Restart while preserving data").action(() => action(async () => {
+  const inventory = loadInventory();
+  if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "start the instance first", EXIT.SERVICE);
+  stopInstance();
+  const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage() });
+  output({ restarted: true, imageDigest: result.imageDigest }, () => console.log("Instance restarted"));
+}));
+
+program.command("status").description("Show read-only lifecycle and authentication status").action(() => action(async () => {
+  const status: Record<string, unknown> = programStatus();
+  if (status.container === "running") {
     try {
-      if (!opts.image) {
-        console.error(
-          `Local image ${image} is missing. Build it with pnpm build:image, or choose a published fork image with wx up --image ${GHCR_IMAGE}:<version>.`,
-        );
-        process.exit(1);
-      }
-      console.log(`Image ${image} not found locally. Pulling exact reference...`);
-      execFileSync("docker", ["pull", image], { stdio: "inherit" });
-    } catch {
-      console.error(
-        `Failed to pull ${image}. Choose an explicit published version or digest with --image; the fork does not fall back to latest.`,
-      );
-      process.exit(1);
+      const server = await client().status();
+      status.serverVersion = server.version;
+      status.apiVersion = server.apiVersion;
+      status.compatible = server.apiVersion === 1;
+      status.auth = await client().authStatus();
+    } catch { status.auth = { status: "unknown" }; status.compatible = false; }
+  }
+  output(status, () => Object.entries(status).forEach(([key, value]) => console.log(`${key}: ${typeof value === "object" ? JSON.stringify(value) : value}`)));
+}));
+
+program.command("doctor").description("Run read-only environment and compatibility diagnostics").action(() => action(async () => {
+  const checks: Record<string, unknown> = programStatus();
+  checks.architecture = os.arch();
+  checks.token = readToken() ? "present" : "absent";
+  checks.configPermissions = fs.existsSync(CONFIG_DIR) ? (fs.statSync(CONFIG_DIR).mode & 0o777).toString(8) : "absent";
+  if (checks.container === "running") {
+    try { checks.health = (await fetch(`http://localhost:${DEFAULT_PORT}/health`)).ok ? "ok" : "failed"; } catch { checks.health = "unreachable"; }
+  }
+  output(checks, () => Object.entries(checks).forEach(([key, value]) => console.log(`${key}: ${value}`)));
+}));
+
+program.command("logs").description("Follow trusted instance logs").action(() => action(() => {
+  const info = inspectContainer(); const inventory = loadInventory();
+  if (!info || !inventory || info.Id !== inventory.containerId) throw new CliError("INSTANCE_NOT_RUNNING", "trusted instance is not running", EXIT.SERVICE);
+  spawn("docker", ["logs", "-f", info.Id], { stdio: "inherit" });
+}));
+
+const auth = program.command("auth").description("WeChat authentication");
+auth.command("login").option("--timeout <seconds>", "login timeout", "300").option("--new", "request a new-account login flow").action((options) => action(() => login(integer(options.timeout, "timeout", 1, 1800) * 1000, options.new === true)));
+auth.command("logout").action(() => action(async () => {
+  const result = await client().logout();
+  if (!result.success) throw new CliError("LOGOUT_FAILED", result.error || "logout failed", EXIT.AUTH);
+  output(result, () => console.log("Logged out"));
+}));
+auth.command("reset").option("--yes", "skip only the interactive confirmation").action((options) => action(() => resetAuth(options.yes === true)));
+auth.command("status").action(() => action(async () => { const result = await client().authStatus(); output(result, () => console.log(result.status)); }));
+
+const chats = program.command("chats").description("List chats without changing unread state").option("--unread", "only chats with unreadCount > 0").option("--limit <number>", "page size", "50").option("--cursor <cursor>", "opaque next-page cursor").action((options) => action(async () => {
+  const page = await client().listChatsPage(integer(options.limit, "limit", 1, 100), options.cursor, options.unread === true);
+  output(page, () => { for (const chat of page.items) console.log(`${chat.username || chat.id}\t${chat.unreadCount}\t${chat.name}`); if (page.nextCursor) console.error(`next cursor: ${page.nextCursor}`); });
+}));
+chats.command("show <chat-id>").action((chatId) => action(async () => { const result = await client().getChat(chatId); if (!result) throw new CliError("TARGET_NOT_FOUND", "chat was not found", EXIT.TARGET); output(result, () => console.log(JSON.stringify(result, null, 2))); }));
+chats.command("mark-read <chat-id>").action((chatId) => action(async () => { const result = await client().markChatRead(chatId); if (!result.ok) throw new CliError(result.errorCode || "MARK_READ_FAILED", result.error || "mark-read was not verified", EXIT.SERVICE); output(result, () => console.log(`${chatId}: ${result.beforeUnread} -> ${result.afterUnread}`)); }));
+
+const contacts = program.command("contacts").description("List contacts read-only").option("--limit <number>", "page size", "200").option("--cursor <cursor>", "opaque next-page cursor").action((options) => action(async () => {
+  const page = await client().listContactsPage(integer(options.limit, "limit", 1, 200), options.cursor);
+  output(page, () => { for (const contact of page.items) console.log(`${contact.username}\t${contact.remark || contact.nickName}`); if (page.nextCursor) console.error(`next cursor: ${page.nextCursor}`); });
+}));
+contacts.command("find <name>").action((name) => action(async () => { const result = await client().findContacts(name); output(result, () => result.forEach((item) => console.log(`${item.username}\t${item.remark || item.nickName}`))); }));
+
+program.command("messages <chat-id>").description("Read messages without opening the chat or changing unread state").option("--limit <number>", "page size", "50").option("--cursor <cursor>", "opaque next-page cursor").action((chatId, options) => action(async () => {
+  const page = await client().listMessagesPage(chatId, integer(options.limit, "limit", 1, 200), options.cursor);
+  output(page, () => renderMessages(page));
+}));
+
+program.command("send <chat-id>").description("Send exactly one payload to a stable chat ID")
+  .option("--text <message>").option("--image <path>").option("--file <path>")
+  .option("--idempotency-key <key>", "stable key for retry/reconciliation")
+  .option("--confirm-similar", "confirm operator-reviewed similar text")
+  .action((chatId, options) => action(async () => {
+    const image: SendParams["image"] | undefined = options.image ? { data: regularUpload(options.image).toString("base64"), mimeType: path.extname(options.image).toLowerCase() === ".jpg" ? "image/jpeg" : "image/png" } : undefined;
+    const file: SendParams["file"] | undefined = options.file ? { data: regularUpload(options.file).toString("base64"), filename: path.basename(options.file) } : undefined;
+    let params: SendParams;
+    try {
+      params = buildCliSendParams({ chatId, text: options.text, image, file, confirmSimilar: options.confirmSimilar, idempotencyKey: options.idempotencyKey });
+    } catch (error) {
+      throw new CliError("INVALID_ARGUMENT", error instanceof Error ? error.message : String(error), EXIT.ARGUMENT);
     }
-  }
-
-  // Ensure auth token exists
-  const token = ensureToken();
-
-  console.log(`Starting container ${CONTAINER_NAME} from ${image}...`);
-
-  const dockerArgs = buildDockerRunArgs(identity, {
-    image,
-    containerName: CONTAINER_NAME,
-    tokenPath: TOKEN_PATH,
-    port: DEFAULT_PORT,
-    proxy: opts.proxy,
-  });
-
-  try {
-    execFileSync("docker", dockerArgs, { stdio: "inherit" });
-    console.log(`\nContainer started successfully!`);
-    console.log(`API: http://localhost:${DEFAULT_PORT}`);
-    printNoVncUrl();
-    console.log(`\nWaiting for server to be ready...`);
-
-    for (let i = 0; i < 30; i++) {
-      try {
-        const response = await fetch(`http://localhost:${DEFAULT_PORT}/health`);
-        if (response.ok) {
-          console.log("Server is ready!");
-          printIdentityCheck();
-          return;
-        }
-      } catch {
-        // Not ready yet
-      }
-      await new Promise(r => setTimeout(r, 1000));
-      process.stdout.write(".");
+    const result = await client().sendMessage(params);
+    if (!result.success) {
+      const uncertain = result.commitAttempted === true;
+      throw new CliError(result.errorCode || (uncertain ? "SEND_UNCERTAIN" : "SEND_FAILED"), result.error || "send failed", uncertain ? EXIT.UNCERTAIN : result.errorCode === "SIMILAR_CONTENT_CONFIRMATION_REQUIRED" ? EXIT.CONFIRMATION : EXIT.SERVICE, { commitAttempted: result.commitAttempted });
     }
-    console.log("\nServer did not become ready in time. Check logs with: wx logs");
-  } catch (error) {
-    console.error("Failed to start container:", error);
-    process.exit(1);
-  }
+    output(result, () => console.log("Message sent"));
+  }));
+
+program.command("upgrade").description("Check CLI/image upgrades without claiming atomic self-upgrade")
+  .addOption(new Option("--check", "read-only upgrade check"))
+  .addOption(new Option("--cli", "print an exact npm CLI upgrade command"))
+  .addOption(new Option("--image <reference>", "transactionally rebuild with an exact compatible image"))
+  .action((options) => action(async () => {
+    const selected = [options.check === true, options.cli === true, typeof options.image === "string"].filter(Boolean).length;
+    if (selected > 1) throw new CliError("ARGUMENT_CONFLICT", "--check, --cli, and --image are mutually exclusive", EXIT.ARGUMENT);
+    if (options.cli) return output({ command: `npm install -g @kyan-du/agent-wechat-cli@${VERSION}` }, () => console.log(`npm install -g @kyan-du/agent-wechat-cli@${VERSION}`));
+    if (options.image) {
+      const result = await replaceImage({ image: options.image, identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken() });
+      return output({ upgraded: true, imageDigest: result.imageDigest }, () => console.log(`Image upgraded to ${result.imageDigest}`));
+    }
+    const result = { cliVersion: VERSION, currentImageDigest: loadInventory()?.imageDigest, mutation: false };
+    return output(result, () => console.log(JSON.stringify(result, null, 2)));
+  }));
+
+const dev = program.command("dev", { hidden: true });
+dev.command("sync-server").requiredOption("--binary <path>").requiredOption("--sha256 <hex>").action((options) => action(() => syncServer(options.binary, options.sha256)));
+
+for (const [oldName, replacement] of [["up", "start"], ["down", "stop"], ["update", "dev sync-server"], ["session", "single-instance prerelease"]] as const) {
+  program.command(oldName, { hidden: true }).allowUnknownOption().allowExcessArguments().action(() => action(() => { throw new CliError("LEGACY_COMMAND_REMOVED", `${oldName} was removed; use wx ${replacement}`, EXIT.ARGUMENT); }));
 }
 
-async function cmdDown() {
-  console.log(`Stopping container ${CONTAINER_NAME}...`);
-  try {
-    execSync(`docker stop ${CONTAINER_NAME}`, { stdio: "inherit" });
-    execSync(`docker rm ${CONTAINER_NAME}`, { stdio: "inherit" });
-    console.log("Container stopped and removed.");
-  } catch {
-    console.log("Container not found or already stopped.");
-  }
+function sameEntrypoint(left: string, right: string): boolean {
+  try { return fs.realpathSync(left) === fs.realpathSync(right); } catch { return path.resolve(left) === path.resolve(right); }
 }
 
-async function cmdLogs() {
-  try {
-    const logs = spawn("docker", ["logs", "-f", CONTAINER_NAME], {
-      stdio: "inherit",
-    });
-    logs.on("error", () => {
-      console.error(`Container ${CONTAINER_NAME} not found.`);
-      process.exit(1);
-    });
-  } catch {
-    console.error(`Container ${CONTAINER_NAME} not found.`);
-    process.exit(1);
-  }
-}
-
-// Parse and run when invoked as the CLI, but allow tests to import helpers.
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  program.parseAsync(process.argv).catch((err) => {
-    console.error("Fatal error:", err);
-    process.exit(1);
+if (process.argv[1] && sameEntrypoint(process.argv[1], fileURLToPath(import.meta.url))) {
+  program.parseAsync(process.argv).catch((error) => {
+    if (error instanceof CommanderError) {
+      if (error.code === "commander.helpDisplayed" || error.code === "commander.version") return;
+      process.exitCode = EXIT.ARGUMENT;
+      return;
+    }
+    console.error(error);
+    process.exitCode = EXIT.SERVICE;
   });
 }

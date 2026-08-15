@@ -13,49 +13,6 @@ export type { FileData } from "./generated/FileData.js";
 export type { OpenChatResult } from "./generated/OpenChatResult.js";
 
 // ============================================
-// SESSIONS
-// Note: Session kept handwritten because Rust uses plain `string`
-// for status/loginState, while TS has richer union types.
-// ============================================
-
-export type SessionStatus =
-  | "stopped"
-  | "starting"
-  | "running"
-  | "stopping"
-  | "error";
-
-export interface Session {
-  id: string;
-  name: string;
-  linuxUser: string;
-  display: string;
-  dbusAddress?: string;
-  vncPort: number;
-  status: SessionStatus;
-  loginState: LoginState;
-  loggedInUser?: string;  // WeChat account dir (e.g. "wxid_xxx_abc123")
-  wechatPid?: number;
-  xvfbPid?: number;
-  dbusPid?: number;
-  errorMessage?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface CreateSessionParams {
-  name: string;
-}
-
-export interface SessionIdParams {
-  id: string;
-}
-
-export interface SessionNameParams {
-  name: string;
-}
-
-// ============================================
 // CONTAINER LIFECYCLE
 // ============================================
 

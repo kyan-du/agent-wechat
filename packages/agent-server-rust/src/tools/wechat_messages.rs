@@ -264,7 +264,7 @@ pub fn list_messages(
     keys: &HashMap<String, String>,
     chat_id: &str,
     limit: i64,
-    offset: i64,
+    cursor: Option<&str>,
 ) -> Vec<Message> {
     let table_name = get_msg_table_name(chat_id);
     let is_group = chat_id.contains("@chatroom");
@@ -275,7 +275,21 @@ pub fn list_messages(
     };
     let db_path = get_db_path(account_dir, &db_name);
 
-    // Query messages using hex() for safe binary/compressed content extraction
+    let cursor_clause = match cursor {
+        Some(raw) => {
+            let kind = format!("messages:{chat_id}");
+            let Ok((timestamp, local_id)) = crate::tools::page_cursor::decode::<(String, i64)>(&kind, raw) else {
+                return Vec::new();
+            };
+            let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&timestamp) else {
+                return Vec::new();
+            };
+            format!(" WHERE (m.create_time < {} OR (m.create_time = {} AND m.local_id < {}))", parsed.timestamp(), parsed.timestamp(), local_id)
+        }
+        None => String::new(),
+    };
+    let safe_limit = limit.clamp(1, 200);
+    // Stable keyset pagination prevents inserts from shifting subsequent pages.
     let rows = query_wechat_db(
         &db_path,
         key,
@@ -287,9 +301,9 @@ pub fn list_messages(
                     m.WCDB_CT_source as source_compressed,
                     n.user_name as sender_name
              FROM \"{table_name}\" m
-             LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
-             ORDER BY m.create_time DESC
-             LIMIT {limit} OFFSET {offset};"
+             LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid{cursor_clause}
+             ORDER BY m.create_time DESC, m.local_id DESC
+             LIMIT {safe_limit};"
         ),
     );
 

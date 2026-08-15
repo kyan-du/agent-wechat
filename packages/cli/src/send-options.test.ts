@@ -8,6 +8,15 @@ test("similarity confirmation is absent by default", () => {
   assert.equal(params.source, "cli");
 });
 
+test("payloads are exclusive and idempotency is exposed", () => {
+  assert.throws(() => buildCliSendParams({ chatId: "chat" }), /exactly one/);
+  assert.throws(() => buildCliSendParams({ chatId: "chat", text: "hi", file: { data: "x", filename: "x" } }), /exactly one/);
+  assert.equal(
+    buildCliSendParams({ chatId: "chat", text: "hi", idempotencyKey: "cli-1" }).idempotencyKey,
+    "cli-1",
+  );
+});
+
 test("similarity confirmation is set only by the explicit CLI flag", () => {
   const params = buildCliSendParams({
     chatId: "chat",

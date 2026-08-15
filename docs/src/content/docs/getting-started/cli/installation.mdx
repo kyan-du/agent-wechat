@@ -1,71 +1,29 @@
 ---
-title: CLI Installation
-description: Install the wx command-line tool.
+title: Install the CLI
+description: Run the source CLI now and install wx only after publication.
 ---
 
-> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
-
-The `wx` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
-
-## Install
+**Release boundary: P1-B remains unavailable until an owner/legal-approved prerelease publishes and independently verifies npm and GHCR artifacts.** Use a repository checkout and keep the source invocation explicit:
 
 ```bash
-# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm build:image
+pnpm cli start
+pnpm cli auth login
 ```
 
-This installs the `wx` command globally.
+Do not describe this as a global installation. After publication is independently verified, the release runbook will provide the exact package-manager installation and uninstall commands. To remove runtime data before uninstalling, use `pnpm cli stop --purge` and confirm the displayed default-instance resource list.
 
-## Migrate an older global installation
+## Clean migration
 
-Repository package history identifies the former CLI as `@thisnick/agent-wechat-cli`; it and the fork package both install the `wx` binary. Remove the former package first:
-
-```bash
-npm uninstall -g @thisnick/agent-wechat-cli
-```
-
-The fork package is not published yet, so use a repository checkout: clone it, run `corepack enable && pnpm install --frozen-lockfile`, then `pnpm build && pnpm build:image`. Invoke commands from that checkout as `pnpm cli <arguments>`.
-
-If the historical root CLI left an unsafe persisted session, do not repair or migrate it. Stop old agent-wechat containers, then delete **only** its `sessions` directory at the data location defined by the root CLI source:
+The first fork prerelease does not migrate historical root-CLI sessions, old image namespaces, or unsafe configuration. Stop old containers and delete only the former root CLI's `sessions` directory at its source-defined data location, then start and authenticate fresh:
 
 - macOS: `rm -rf "$HOME/Library/Application Support/agent-wechat/sessions"`
 - Linux: `rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/agent-wechat/sessions"`
 - Windows PowerShell: `Remove-Item -Recurse -Force "$([Environment]::GetFolderPath('ApplicationData'))\agent-wechat\sessions" -ErrorAction SilentlyContinue`
 
-Start from the built checkout and authenticate fresh:
-
-```bash
-pnpm cli up
-pnpm cli auth login
-```
-
-Only after a future P1-B actually publishes and verifies `@kyan-du/agent-wechat-cli` should you install it with `npm install -g @kyan-du/agent-wechat-cli`; then use `wx up` and `wx auth login`.
-
-## Prerequisites
-
-- **Node.js >= 22**
-- **Docker** installed and running
-
-## Verify installation
-
-```bash
-pnpm cli --version
-```
-
-## Configuration
-
-The CLI reads configuration from:
-
-| Source | Description |
-|--------|-------------|
-| `AGENT_WECHAT_URL` | Server URL (default: `http://localhost:6174`) |
-| `AGENT_WECHAT_TOKEN` | Auth token (overrides token file) |
-| `~/.config/agent-wechat/token` | Auto-generated auth token (created on first `wx up`) |
-
-The auth token is generated automatically on first run and shared with the container via a read-only volume mount.
-
-## Global options
-
-| Option | Description |
-|--------|-------------|
-| `-V, --version` | Show version |
-| `-h, --help` | Show help |
+The prerelease is single-instance. Removed `up`, `down`, `update`, and `session` commands only print nonzero migration guidance; they never execute legacy behavior.

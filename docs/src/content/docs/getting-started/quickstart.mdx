@@ -25,10 +25,10 @@ This installs the `wx` command globally.
 ## 2. Start the container
 
 ```bash
-pnpm cli up
+pnpm cli start
 ```
 
-After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>` selects the verified fork image. Before then, build locally and plain `wx up` uses the architecture-specific local image; there is no registry fallback.
+After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>` selects the verified fork image. Before then, build locally and plain `wx start` uses the architecture-specific local image; there is no registry fallback.
 
 ## 3. Log in to WeChat
 
@@ -46,18 +46,18 @@ Scan the QR code in WeChat if prompted.
 
 ```bash
 # List your chats
-pnpm cli chats list
+pnpm cli chats
 
 # Find a chat by name
 pnpm cli chats find "John"
 
 # Send a message (--text, --image, or --file)
-pnpm cli messages send <chatId> --text "Hello from agent-wechat!"
-pnpm cli messages send <chatId> --image photo.jpg
-pnpm cli messages send <chatId> --file document.pdf
+pnpm cli send <chatId> --text "Hello from agent-wechat!"
+pnpm cli send <chatId> --image photo.jpg
+pnpm cli send <chatId> --file document.pdf
 
 # Read messages
-pnpm cli messages list <chatId>
+pnpm cli messages <chatId>
 
 # Download media (images, voice, video) from a message
 pnpm cli messages media <chatId> <messageId>
@@ -74,7 +74,7 @@ cat ~/.config/agent-wechat/token
 ## 6. Stop the container
 
 ```bash
-pnpm cli down
+pnpm cli stop
 ```
 
 ## Next steps

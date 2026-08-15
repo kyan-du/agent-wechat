@@ -4,7 +4,6 @@ mod contacts;
 mod debug;
 mod events;
 mod messages;
-mod sessions;
 mod status;
 mod vnc;
 
@@ -46,11 +45,13 @@ pub fn build_router() -> Router {
         .route("/api/status/outbound/resume", post(status::resume_outbound))
         .route("/api/status/login", post(status::login))
         .route("/api/status/logout", post(status::logout))
+        .route("/api/status/auth/reset", post(status::reset_auth))
         // Chats
         .route("/api/chats", get(chats::list_chats))
         .route("/api/chats/{id}", get(chats::get_chat))
         .route("/api/chats/find", get(chats::find_chats))
         .route("/api/chats/{id}/open", post(chats::open_chat))
+        .route("/api/chats/{id}/mark-read", post(chats::mark_read))
         // Contacts
         .route("/api/contacts", get(contacts::list_contacts))
         .route("/api/contacts/find", get(contacts::find_contacts))
@@ -64,17 +65,6 @@ pub fn build_router() -> Router {
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))
-        // Sessions
-        .route(
-            "/api/sessions",
-            get(sessions::list_sessions).post(sessions::create_session),
-        )
-        .route(
-            "/api/sessions/{id}",
-            get(sessions::get_session).delete(sessions::delete_session),
-        )
-        .route("/api/sessions/{id}/start", post(sessions::start_session))
-        .route("/api/sessions/{id}/stop", post(sessions::stop_session))
         // WebSocket for login subscription
         .route("/api/ws/login", get(status::login_ws))
         // Events WebSocket
@@ -627,6 +617,35 @@ mod tests {
         assert_eq!(body["success"], false);
         assert_eq!(body["errorCode"], "MANUAL_RECONCILIATION_REQUIRED");
         assert_eq!(crate::outbound::outbound_sender().status().queue_depth, 0);
+    }
+
+    #[tokio::test]
+    async fn list_routes_reject_invalid_limits_and_cursors() {
+        let _idempotency_lock = init_test_server_state().await;
+        let app = build_router();
+        for uri in [
+            "/api/chats?limit=0",
+            "/api/chats?cursor=not-a-cursor",
+            "/api/contacts?limit=201",
+            "/api/contacts?cursor=not-a-cursor",
+            "/api/messages/chat?limit=-1",
+            "/api/messages/chat?cursor=not-a-cursor",
+        ] {
+            let response = app.clone().oneshot(authed("GET", uri, Body::empty())).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = json_response(response).await;
+            assert!(matches!(body["errorCode"].as_str(), Some("INVALID_LIMIT" | "INVALID_CURSOR")), "{uri}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn message_cursor_is_bound_to_its_chat() {
+        let _idempotency_lock = init_test_server_state().await;
+        let cursor = crate::tools::page_cursor::encode("messages:first", ("2026-01-01T00:00:00+00:00", 7_i64)).unwrap();
+        let uri = format!("/api/messages/second?cursor={cursor}");
+        let response = build_router().oneshot(authed("GET", &uri, Body::empty())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_response(response).await["errorCode"], "INVALID_CURSOR");
     }
 
     #[tokio::test]

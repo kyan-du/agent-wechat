@@ -1,61 +1,70 @@
 ---
-title: CLI Commands
-description: Full reference for the wx command-line tool.
+title: CLI commands
+description: The single-instance wx command contract.
 ---
 
-## Container
+**Release boundary: P1-B remains unavailable until an owner/legal-approved prerelease publishes and independently verifies npm and GHCR artifacts.** The fork CLI is currently run only from a built repository checkout as `pnpm cli`; do not substitute a global command before that gate is cleared.
 
-| Command | Description |
-|---------|-------------|
-| `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container (auto-pulls image) |
-| `wx down` | Stop and remove the container |
-| `wx logs` | Tail container logs |
-| `wx status` | Show container up/down status and login status |
+## Lifecycle
 
-## Auth
+| Command | Behavior |
+|---|---|
+| `pnpm cli start [--image <ref>] [--pull \| --offline] [--proxy <url>]` | Start the trusted single instance from a local build or an immutable resolved fork image |
+| `pnpm cli stop` | Remove the trusted container and preserve volumes, token, identity, and login data |
+| `pnpm cli stop --purge [--yes]` | Confirm and delete every resource in the validated default-instance inventory |
+| `pnpm cli restart` | Recreate from the locked image while preserving data |
+| `pnpm cli status` | Read-only CLI/image/container/server/auth status |
+| `pnpm cli doctor` | Read-only Docker, architecture, compatibility, permission, token, and health checks |
+| `pnpm cli logs` | Follow logs for the exact trusted container |
 
-| Command | Description |
-|---------|-------------|
-| `wx auth login` | Log in to WeChat (shows QR code in terminal) |
-| `wx auth logout` | Log out of WeChat |
-| `wx auth status` | Check login status |
-| `wx auth token` | Show current auth token |
-| `wx auth token --regenerate` | Generate a new auth token |
+`latest` and foreign image repositories are rejected. Tags are resolved to and run by immutable fork digest. `--offline` never accesses the registry. `status` and `doctor` never pull, start, migrate, or repair.
 
-Login options:
-- `--timeout <seconds>` — login timeout (default: 300)
-- `--new` — switch to a new account instead of reusing the existing session
+## Authentication
 
-## Chats
+| Command | Behavior |
+|---|---|
+| `pnpm cli auth login [--timeout <seconds>] [--new]` | Run the QR login flow |
+| `pnpm cli auth logout` | Verify WeChat logout while retaining the instance and identity |
+| `pnpm cli auth reset [--yes]` | Stop WeChat, clear server auth state, delete WeChat home/session/cache and device identity |
+| `pnpm cli auth status` | Read-only authentication status |
 
-| Command | Description |
-|---------|-------------|
-| `wx chats list` | List chats from WeChat |
-| `wx chats get <chatId>` | Get details for a specific chat |
-| `wx chats find <name>` | Search chats by display name |
-| `wx chats open <chatId>` | Open a chat in the WeChat UI |
+`auth reset` preserves the agent database, API token, and instance inventory. Full deletion requires `stop --purge`.
 
-Options: `--limit <n>`, `--offset <n>`, `--json`
+## Chats, contacts, and messages
 
-## Messages
+```bash
+pnpm cli chats --unread --limit 50
+pnpm cli chats show <chat-id>
+pnpm cli chats mark-read <chat-id>
+pnpm cli contacts --limit 200
+pnpm cli contacts find <name>
+pnpm cli messages <chat-id> --limit 50 --cursor <opaque-cursor>
+```
 
-| Command | Description |
-|---------|-------------|
-| `wx messages list <chatId>` | List messages in a chat |
-| `wx messages send <chatId>` | Send a message |
-| `wx messages media <chatId> <localId>` | Download a media attachment |
+List/read commands do not open the WeChat UI or change unread state. `--unread` means conversation-level `unreadCount > 0`; it does not claim an exact per-message unread boundary. Opaque cursors use stable keyset pagination. `mark-read` is an explicit UI operation and succeeds only after verified before/after state.
 
-Send options:
-- `--text "message"` — send text
-- `--image photo.jpg` — send an image
-- `--file document.pdf` — send a file
+## Sending
 
-Media options:
-- `--output <path>` — save to a specific file path
+```bash
+pnpm cli send <chat-id> --text "hello" --idempotency-key cli-20260816-001
+pnpm cli send <chat-id> --image photo.jpg
+pnpm cli send <chat-id> --file document.pdf
+```
 
-## Debug
+The recipient must be a stable chat ID. Exactly one payload is accepted. The CLI does not resolve names in the first prerelease. Regular-file/size checks happen before enqueue. Existing queue, similarity confirmation, rate-limit metadata, idempotency replay, and uncertain-send boundaries remain active; an uncertain send is never automatically retried.
 
-| Command | Description |
-|---------|-------------|
-| `wx screenshot [file]` | Save a screenshot (default: `screenshot.png`) |
-| `wx a11y` | Dump the accessibility tree (`--format json\|aria`) |
+## Upgrade
+
+| Command | Behavior |
+|---|---|
+| `pnpm cli upgrade --check` | Read-only current CLI/image report |
+| `pnpm cli upgrade --cli` | Print an exact npm install command; never execute it |
+| `pnpm cli upgrade --image <ref>` | Resolve a digest, recreate, health-check, and roll back the container/image on failure |
+
+CLI installation and image rollback are separate boundaries. The hidden development command `pnpm cli dev sync-server --binary <path> --sha256 <hex>` checksum-verifies local output and restores the old binary on health failure.
+
+## JSON and exit codes
+
+Global `--json` writes one versioned JSON envelope to stdout; diagnostics go to stderr. Stable nonzero categories cover arguments (2), environment (3), service (4), authentication (5), target (6), confirmation (7), rate limiting (8), uncertain send (9), cleanup (10), and rollback (11).
+
+Removed `up`, `down`, `update`, and `session` commands exit nonzero with guidance. They do not execute old semantics or migrate historical state.

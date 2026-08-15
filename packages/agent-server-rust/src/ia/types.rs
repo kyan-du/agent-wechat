@@ -381,6 +381,9 @@ pub struct Chat {
     pub last_activity_at: Option<String>,
     pub unread_count: i32,
     pub is_group: bool,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub sort_timestamp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub last_msg_local_id: Option<i64>,
