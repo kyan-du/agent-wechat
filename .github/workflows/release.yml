@@ -1,21 +1,58 @@
-name: Release
+name: Prerelease Validation Only
 
-# Downstream safety: release publishing remains disabled until package names,
-# trusted publishing, and a protected release environment are configured.
+# P1-B1 is evidence generation only. This workflow has no publication
+# credentials, write permission, tag trigger, publish step, registry push, or
+# GitHub Release operation. A later owner/legal-approved PR must add those.
 on:
+  pull_request:
+    paths:
+      - '.changeset/**'
+      - 'packages/**'
+      - 'release/**'
+      - 'scripts/audit-release.sh'
+      - 'scripts/release-audit.mjs'
+      - 'scripts/validate-docker-context.mjs'
+      - 'scripts/validate-prerelease-contract.mjs'
+      - 'scripts/validate-prerelease.sh'
+      - 'scripts/test-prerelease-contract.sh'
+      - '.github/workflows/release.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.changeset/**'
+      - 'packages/**'
+      - 'release/**'
+      - 'scripts/audit-release.sh'
+      - 'scripts/release-audit.mjs'
+      - 'scripts/validate-docker-context.mjs'
+      - 'scripts/validate-prerelease-contract.mjs'
+      - 'scripts/validate-prerelease.sh'
+      - 'scripts/test-prerelease-contract.sh'
+      - '.github/workflows/release.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
   workflow_dispatch:
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+concurrency:
+  group: prerelease-validation-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Validate Release Build
+    name: Validate without publishing
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v4
 
@@ -24,13 +61,10 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - run: pnpm install --frozen-lockfile
+      - name: Prove validation-only contract
+        run: ./scripts/test-prerelease-contract.sh
 
-      - run: pnpm build
-
-      - name: Audit release artifacts
-        run: |
-          ./scripts/audit-release.sh
-          git diff --exit-code -- docs/release-audit/npm-materials.json
-          unexpected=$(git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' || true)
-          test -z "$unexpected" || { printf '%s\n' "$unexpected"; exit 1; }
+      - name: Validate clean release inputs and real pack reports
+        env:
+          CI: true
+        run: ./scripts/validate-prerelease.sh

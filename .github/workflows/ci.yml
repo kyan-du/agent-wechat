@@ -41,6 +41,13 @@ jobs:
               - 'scripts/release-audit.mjs'
               - 'scripts/validate-docker-context.mjs'
               - 'scripts/test-release-audit.sh'
+              - 'scripts/validate-prerelease-contract.mjs'
+              - 'scripts/generate-prerelease-manifest.mjs'
+              - 'scripts/validate-prerelease.sh'
+              - 'scripts/test-prerelease-contract.sh'
+              - 'release/**'
+              - 'docs/release/**'
+              - '.github/workflows/release.yml'
               - 'docs/release-audit/**'
               - 'docker/**'
             rust:
@@ -112,6 +119,9 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+      - name: Validate prerelease contract without publication
+        run: pnpm test:prerelease-contract
 
       - name: Guard unreleased channels and root CLI image behavior
         run: |
