@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 const root = resolve(import.meta.dirname, "..");
@@ -55,14 +55,8 @@ for (const file of changesetFiles) {
   }
 }
 if (!changesetFiles.length) fail("no pending changesets found");
-const statusPath = join(root, ".prerelease-status.json");
-run("pnpm", ["changeset", "status", "--output", basename(statusPath)]);
-const status = JSON.parse(readFileSync(statusPath, "utf8"));
-await import("node:fs").then(({ rmSync }) => rmSync(statusPath, { force: true }));
-for (const release of status.releases ?? []) {
-  if (!workspaces.has(release.name)) fail(`Changesets status includes unknown workspace ${release.name}`);
-}
-for (const name of contract.publicPackages) if (!(status.releases ?? []).some((release) => release.name === name)) fail(`pending prerelease omits public package ${name}`);
+if (!changesetConfig.fixed[0].some((name) => referenced.has(name))) fail("pending changesets do not exercise the fixed release group");
+for (const name of contract.publicPackages) if (!changesetConfig.fixed[0].includes(name)) fail(`fixed prerelease topology omits public package ${name}`);
 
 const forbidden = [];
 const workflowDir = join(root, ".github", "workflows");
