@@ -4,7 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-if [ "${CI:-}" = true ] && [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+if [ "${CI:-}" = true ] && [ -n "$(git status --porcelain --untracked-files=all | grep -Ev '^\?\? \.pnpm-store/' || true)" ]; then
   echo "clean checkout required" >&2
   exit 1
 fi
