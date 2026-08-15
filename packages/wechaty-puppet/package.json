@@ -12,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/**/*.d.ts.map"
   ],
   "scripts": {
     "build": "esbuild src/mod.ts --bundle --format=esm --platform=node --outfile=dist/mod.js --external:wechaty-puppet --external:file-box && tsc --emitDeclarationOnly",
