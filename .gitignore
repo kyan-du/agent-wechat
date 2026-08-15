@@ -19,6 +19,7 @@ packages/agent-server-rust/target/
 packages/agent-server-rust/bindings/
 
 # Build caches
+.artifacts
 .turbo
 docs/.astro
 docs/public/og-image.png

@@ -23,7 +23,8 @@ pnpm cli -- up
 
 ```bash
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
-openclaw plugins install -l ./packages/openclaw-extension
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 openclaw channels add --channel wechat
 ```
 

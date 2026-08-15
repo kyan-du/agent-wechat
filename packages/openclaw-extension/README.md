@@ -80,7 +80,8 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 ```bash
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 pnpm --filter @kyan-du/agent-wechat-openclaw build
-openclaw plugins install -l ./packages/openclaw-extension
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
 ### 3. Configure the channel
@@ -185,10 +186,11 @@ pnpm install && pnpm build
 ### Link for local development
 
 ```bash
-openclaw plugins install -l ./packages/openclaw-extension
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
-This symlinks the extension so changes are picked up without reinstalling. Rebuild with `pnpm build` after making changes, then restart the gateway.
+This stages only the built plugin files and a production manifest, avoiding pnpm workspace symlinks that OpenClaw correctly rejects as escaping the install root. Rebuild and restage after making changes, then restart the gateway.
 
 ## Architecture
 

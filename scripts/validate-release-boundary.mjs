@@ -37,35 +37,71 @@ function walk(dir) {
   });
 }
 
-function executableReleaseCommands(text, rendered = false) {
-  if (rendered) {
-    const blocks = [...text.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<pre(?:\s[^>]*)?>([\s\S]*?)<\/pre>/gi)];
-    const renderedCode = blocks.map((match) => match[1]
-      .replace(/<[^>]+>/g, "")
-      .replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&")
-      .split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n")).join("\n");
-    return /(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)\b[^\n]*@kyan-du\/agent-wechat|(?:docker\s+pull|image\s*:)[^\n]*ghcr\.io\/kyan-du\/agent-wechat|^\s*wx(?:\s|$)|&&\s*wx(?:\s|$)/im.test(renderedCode) ? [1] : [];
-  }
-  const hits = [];
-  let fenced = false;
-  for (const [index, line] of text.split("\n").entries()) {
-    if (line.trimStart().startsWith("```")) {
-      fenced = !fenced;
-      continue;
+function decodeHtml(text) {
+  return text.replace(/<[^>]+>/g, " ")
+    .replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&")
+    .replaceAll("&#39;", "'").replaceAll("&quot;", '"').replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16))).replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+}
+
+function visibleText(text, rendered) {
+  const withoutComments = text.replace(/<!--[\s\S]*?-->/g, "");
+  return rendered ? decodeHtml(withoutComments) : withoutComments;
+}
+
+function commandBlocks(text, rendered = false) {
+  const visible = text.replace(/<!--[\s\S]*?-->/g, "");
+  if (rendered) return [...visible.matchAll(/<pre(?:\s[^>]*)?>([\s\S]*?)<\/pre>/gi)].map((match) => decodeHtml(match[1]));
+  const blocks = [];
+  const lines = visible.split("\n");
+  for (let index = 0; index < lines.length;) {
+    const fence = lines[index].match(/^\s*(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1][0];
+      const length = fence[1].length;
+      const body = [];
+      for (index += 1; index < lines.length && !new RegExp(`^\\s*${marker}{${length},}\\s*$`).test(lines[index]); index += 1) body.push(lines[index]);
+      blocks.push(body.join("\n")); index += 1; continue;
     }
-    if (!fenced || line.trimStart().startsWith("#")) continue;
-    if (/\b(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)\b[^\n]*@kyan-du\/agent-wechat/i.test(line)
-      || /(?:docker\s+pull|image\s*:)[^\n]*ghcr\.io\/kyan-du\/agent-wechat/i.test(line)
-      || /^\s*wx(?:\s|$)/.test(line) || /&&\s*wx(?:\s|$)/.test(line)) {
-      hits.push(index + 1);
+    if (/^(?: {4}|\t)/.test(lines[index])) {
+      const body = [];
+      while (index < lines.length && (/^(?: {4}|\t)/.test(lines[index]) || !lines[index].trim())) body.push(lines[index++].replace(/^(?: {4}|\t)/, ""));
+      blocks.push(body.join("\n")); continue;
+    }
+    index += 1;
+  }
+  return blocks;
+}
+
+function logicalCommands(block) {
+  const commands = [];
+  let pending = "";
+  for (const raw of block.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    pending += (pending ? " " : "") + line.replace(/\\\s*$/, "");
+    if (/\\\s*$/.test(line)) continue;
+    commands.push(pending); pending = "";
+  }
+  if (pending) commands.push(pending);
+  return commands;
+}
+
+function executableReleaseCommands(text, rendered = false) {
+  const hits = [];
+  for (const [index, block] of commandBlocks(text, rendered).entries()) {
+    for (const command of logicalCommands(block)) {
+      if (/\b(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)\b[\s\S]*@kyan-du\/agent-wechat/i.test(command)
+        || /(?:docker\s+pull|image\s*:)[\s\S]*ghcr\.io\/kyan-du\/agent-wechat/i.test(command)
+        || /(?:^|&&\s*)wx(?:\s|$)/i.test(command)) {
+        hits.push(index + 1);
+      }
     }
   }
   return hits;
 }
-
 function documentationViolations(path, text, rendered = false) {
   const found = [];
-  if (!P1B_GATE.test(text)) found.push(`${path} does not state the P1-B release gate`);
+  if (!P1B_GATE.test(visibleText(text, rendered))) found.push(`${path} does not state the P1-B release gate`);
   const hits = executableReleaseCommands(text, rendered);
   if (hits.length) found.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
   return found;
@@ -114,17 +150,20 @@ for (const root of ["docs/src/content", "docs/dist"]) {
 }
 
 const documentationNegativeCases = [
-  ["missing P1-B gate", "```bash\npnpm cli -- up\n```"],
-  ["npm install", "> P1-B is not available until published and verified.\n```bash\nnpm install @kyan-du/agent-wechat-wechaty-puppet\n```"],
-  ["npx", "> P1-B is not available until published and verified.\n```bash\nnpx @kyan-du/agent-wechat-cli up\n```"],
-  ["plugin install", "> P1-B is not available until published and verified.\n```bash\nopenclaw plugins install @kyan-du/agent-wechat-openclaw\n```"],
-  ["GHCR pull", "> P1-B is not available until published and verified.\n```bash\ndocker pull ghcr.io/kyan-du/agent-wechat:1.2.3\n```"],
-  ["bare wx", "> P1-B is not available until published and verified.\n```bash\nwx up\n```"],
+  ["missing P1-B gate", "```bash\npnpm cli -- up\n```", false],
+  ["npm install", "> P1-B is not available until published and verified.\n```bash\nnpm install @kyan-du/agent-wechat-wechaty-puppet\n```", false],
+  ["tilde fence", "> P1-B is not available until published and verified.\n~~~bash\nnpx @kyan-du/agent-wechat-cli up\n~~~", false],
+  ["indented code", "> P1-B is not available until published and verified.\n\n    openclaw plugins install @kyan-du/agent-wechat-openclaw", false],
+  ["shell continuation", "> P1-B is not available until published and verified.\n```sh\nnpm install \\\n  @kyan-du/agent-wechat-wechaty-puppet\n```", false],
+  ["GHCR pull", "> P1-B is not available until published and verified.\n```bash\ndocker pull ghcr.io/kyan-du/agent-wechat:1.2.3\n```", false],
+  ["bare wx", "> P1-B is not available until published and verified.\n```bash\nwx up\n```", false],
+  ["HTML-comment-only gate", "<!-- P1-B is not available until published and verified. -->\n```bash\npnpm cli -- up\n```", false],
+  ["rendered multiline", "<p>P1-B is not available until published and verified.</p><pre><code>npm install \\\n@kyan-du/agent-wechat-wechaty-puppet</code></pre>", true],
+  ["rendered comment-only gate", "<!-- P1-B is not available until published and verified. --><pre><code>pnpm cli -- up</code></pre>", true],
 ];
-for (const [name, sample] of documentationNegativeCases) {
-  if (documentationViolations(`<negative:${name}>`, sample).length === 0) failures.push(`documentation guard negative test failed: ${name}`);
+for (const [name, sample, rendered] of documentationNegativeCases) {
+  if (documentationViolations(`<negative:${name}>`, sample, rendered).length === 0) failures.push(`documentation guard negative test failed: ${name}`);
 }
-
 const negativeCases = [
   ["old namespace", "const image = 'ghcr.io/thisnick/agent-wechat:1.2.3'"],
   ["latest", "image: ghcr.io/kyan-du/agent-wechat:latest"],
