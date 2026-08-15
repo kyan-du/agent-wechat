@@ -23,13 +23,22 @@ Repository package history identifies the former CLI as `@thisnick/agent-wechat-
 npm uninstall -g @thisnick/agent-wechat-cli
 ```
 
-Only after P1-B verifies npm publication, install the fork with `npm install -g @kyan-du/agent-wechat-cli`. Until then, follow the repository source installation and invoke `pnpm cli --`. To recover a persisted session rejected for an unsafe image, build the local image and explicitly replace the session selection:
+The fork package is not published yet, so use a repository checkout: clone it, run `corepack enable && pnpm install --frozen-lockfile`, then `pnpm build && pnpm build:image`. Invoke commands from that checkout as `pnpm cli <arguments>`.
+
+If the historical root CLI left an unsafe persisted session, do not repair or migrate it. Stop old agent-wechat containers, then delete **only** its `sessions` directory at the data location defined by the root CLI source:
+
+- macOS: `rm -rf "$HOME/Library/Application Support/agent-wechat/sessions"`
+- Linux: `rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/agent-wechat/sessions"`
+- Windows PowerShell: `Remove-Item -Recurse -Force "$([Environment]::GetFolderPath('ApplicationData'))\agent-wechat\sessions" -ErrorAction SilentlyContinue`
+
+Start from the built checkout and authenticate fresh:
 
 ```bash
-pnpm build:image
-pnpm cli -- up --image agent-wechat:arm64 # Apple Silicon / Linux ARM64
-# Use agent-wechat:amd64 on x86-64 hosts.
+pnpm cli up
+pnpm cli auth login
 ```
+
+Only after a future P1-B actually publishes and verifies `@kyan-du/agent-wechat-cli` should you install it with `npm install -g @kyan-du/agent-wechat-cli`; then use `wx up` and `wx auth login`.
 
 ## Prerequisites
 
@@ -39,7 +48,7 @@ pnpm cli -- up --image agent-wechat:arm64 # Apple Silicon / Linux ARM64
 ## Verify installation
 
 ```bash
-pnpm cli -- --version
+pnpm cli --version
 ```
 
 ## Configuration

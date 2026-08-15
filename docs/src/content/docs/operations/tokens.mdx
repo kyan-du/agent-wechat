@@ -42,7 +42,7 @@ chmod 600 ~/.config/agent-wechat/token
 Using the CLI:
 
 ```bash
-pnpm cli -- auth token --regenerate
+pnpm cli auth token --regenerate
 ```
 
 Or manually:
@@ -54,7 +54,7 @@ openssl rand -hex 32 > ~/.config/agent-wechat/token
 Then restart the container so it picks up the new token:
 
 ```bash
-pnpm cli -- down && pnpm cli -- up
+pnpm cli down && pnpm cli up
 # or
 docker compose restart agent-wechat
 ```

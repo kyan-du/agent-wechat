@@ -49,7 +49,7 @@ export function getSessionPath(dataDir: string, sessionName: string): string {
   return path.join(getSessionDir(dataDir, sessionName), "session.json");
 }
 
-export function loadSession(dataDir: string, sessionName: string, recoveryImage?: string): SessionConfig | null {
+export function loadSession(dataDir: string, sessionName: string): SessionConfig | null {
   const sessionPath = getSessionPath(dataDir, sessionName);
   if (!fs.existsSync(sessionPath)) {
     return null;
@@ -61,13 +61,8 @@ export function loadSession(dataDir: string, sessionName: string, recoveryImage?
     session.image = normalized.image;
     if (normalized.migrated) saveSession(dataDir, sessionName, session);
   } catch {
-    if (recoveryImage !== undefined) {
-      session.image = validateImageReference(recoveryImage);
-      saveSession(dataDir, sessionName, session);
-      return session;
-    }
     throw new Error(
-      `Session ${sessionName} has unsafe image reference ${JSON.stringify(session.image)}. Recover by rerunning the command with --image agent-wechat:${process.arch === "arm64" ? "arm64" : "amd64"}, or an exact published fork semver/digest.`,
+      `Session ${sessionName} has unsafe image reference ${JSON.stringify(session.image)}. Delete the persisted root-CLI session data and authenticate again.`,
     );
   }
   return session;
@@ -90,8 +85,7 @@ export function ensureSession(dataDir: string, sessionName: string, overrides: P
   ensureDir(wechatConfigDir);
   ensureDir(wechatDataDir);
 
-  const recoveryImage = overrides.image === undefined ? undefined : validateImageReference(overrides.image);
-  const existing = loadSession(dataDir, sessionName, recoveryImage);
+  const existing = loadSession(dataDir, sessionName);
   if (existing) {
     return { ...existing, ...overrides };
   }
