@@ -276,8 +276,8 @@ start_supervisor "$SLEEP_DIR/bin"
 wait_file "$SLEEP_DIR/count"
 # First child already exited 0; supervisor is in restart sleep.
 sleep 0.2
-kill -TERM "$SUP_PID"
 set +e
+kill -TERM "$SUP_PID" 2>/dev/null
 wait_deadline=$((SECONDS + 6))
 while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
   sleep 0.05
@@ -362,4 +362,59 @@ wait "$FOREIGN" 2>/dev/null || true
 _supervise_clear_child
 echo "ok: PID-reuse identity rejects foreign process"
 
-echo "entrypoint supervise: 137 recovery, fail-fast, TERM/INT, grace-KILL, launch/sleep races, exact-once"
+# --- delayed setsid: record only after pgid/sid == pid ---
+DELAY_DIR="$SANDBOX/delay-setsid"
+mkdir -p "$DELAY_DIR/binfirst"
+cat >"$DELAY_DIR/binfirst/setsid" <<'EOF'
+#!/usr/bin/env python3
+import os, sys, time
+time.sleep(0.4)
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+EOF
+chmod +x "$DELAY_DIR/binfirst/setsid"
+cat >"$DELAY_DIR/bin" <<EOF
+#!/bin/sh
+echo launch >> "$DELAY_DIR/launches"
+exec python3 -c "import os, signal, time, pathlib
+pathlib.Path('$DELAY_DIR/pid').write_text(str(os.getpid()))
+def handle(signum, _frame):
+    pathlib.Path('$DELAY_DIR/got').write_text('term')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, handle)
+time.sleep(60)
+"
+EOF
+chmod +x "$DELAY_DIR/bin"
+PATH="$DELAY_DIR/binfirst:$PATH" start_supervisor "$DELAY_DIR/bin"
+wait_file "$DELAY_DIR/pid"
+delay_child=$(cat "$DELAY_DIR/pid")
+# Supervisor must still own the child after the delayed setsid transition.
+sleep 0.15
+if ! alive "$delay_child"; then
+  fail "delayed-setsid child died before TERM"
+fi
+[ "$(_supervise_child_pgid "$delay_child")" = "$delay_child" ] || fail "delayed-setsid child is not group leader"
+kill -TERM "$SUP_PID"
+set +e
+wait_deadline=$((SECONDS + 8))
+while alive "$SUP_PID" && [ "$SECONDS" -lt "$wait_deadline" ]; do
+  sleep 0.05
+done
+if alive "$SUP_PID"; then
+  fail "delayed-setsid supervisor still running"
+fi
+wait "$SUP_PID" 2>/dev/null
+set -e
+SUP_PID=""
+wait_exit "$delay_child"
+if alive "$delay_child"; then
+  fail "delayed-setsid child survived supervisor"
+fi
+wait_file "$DELAY_DIR/got"
+[ "$(cat "$DELAY_DIR/got")" = "term" ] || fail "delayed-setsid child missed TERM"
+launches=$(wc -l < "$DELAY_DIR/launches" | tr -d ' ')
+[ "$launches" -eq 1 ] || fail "delayed-setsid launched $launches times"
+echo "ok: delayed setsid child stays owned and is reaped"
+
+echo "entrypoint supervise: 137 recovery, fail-fast, TERM/INT, grace-KILL, launch/sleep races, exact-once, delayed-setsid"

@@ -10,6 +10,7 @@
 : "${AGENT_SERVER_SHUTDOWN_GRACE_SEC:=5}"
 : "${AGENT_SERVER_RESTART_SLEEP_SEC:=1}"
 : "${AGENT_SERVER_START_DELAY_SEC:=0}"
+: "${AGENT_SERVER_IDENTITY_WAIT_SEC:=2}"
 
 SERVER_PID=""
 SERVER_START=""
@@ -83,25 +84,42 @@ _supervise_starttime() {
   ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
-_supervise_record_child() {
-  local tries=0 start="" pgid="" sid=""
-  SERVER_START=""
-  SERVER_PGID=""
-  SERVER_SID=""
-  while [ "$tries" -lt 20 ]; do
-    start=$(_supervise_starttime "$SERVER_PID")
+# setsid changes pgid/sid after fork. Wait until the child is group leader
+# (pgid == pid). On Linux also require session == pid; BSD ps reports sess=0
+# for every process, so sid cannot mark the transition there.
+_supervise_wait_setsid_identity() {
+  local pgid="" sid=""
+  local deadline=$((SECONDS + ${AGENT_SERVER_IDENTITY_WAIT_SEC:-2}))
+  while [ "$SECONDS" -le "$deadline" ]; do
+    kill -0 "$SERVER_PID" 2>/dev/null || return 1
     pgid=$(_supervise_child_pgid "$SERVER_PID")
     sid=$(_supervise_child_sid "$SERVER_PID")
-    if [ -n "$start" ] && [ -n "$pgid" ]; then
-      SERVER_START="$start"
-      SERVER_PGID="$pgid"
-      SERVER_SID="$sid"
+    if [ "$pgid" = "$SERVER_PID" ]; then
+      if [ -r "/proc/$SERVER_PID/stat" ]; then
+        [ "$sid" = "$SERVER_PID" ] || { sleep 0.02; continue; }
+      fi
       return 0
     fi
-    tries=$((tries + 1))
     sleep 0.02
   done
   return 1
+}
+
+_supervise_record_child() {
+  local start="" pgid="" sid=""
+  SERVER_START=""
+  SERVER_PGID=""
+  SERVER_SID=""
+  start=$(_supervise_starttime "$SERVER_PID")
+  pgid=$(_supervise_child_pgid "$SERVER_PID")
+  sid=$(_supervise_child_sid "$SERVER_PID")
+  if [ -z "$start" ] || [ -z "$pgid" ]; then
+    return 1
+  fi
+  SERVER_START="$start"
+  SERVER_PGID="$pgid"
+  SERVER_SID="$sid"
+  return 0
 }
 
 _supervise_clear_child() {
@@ -129,18 +147,45 @@ _supervise_owned_child() {
   return 0
 }
 
+_supervise_kill_unrecorded() {
+  if [ -n "${SERVER_PID:-}" ]; then
+    kill -KILL "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  _supervise_clear_child
+}
+
 _supervise_start() {
-  local bin="$1"
+  local bin="$1" used_setsid=0
   if [ "${AGENT_SERVER_START_DELAY_SEC:-0}" != 0 ]; then
     sleep "$AGENT_SERVER_START_DELAY_SEC"
   fi
   if command -v setsid >/dev/null 2>&1; then
     setsid "$bin" &
+    used_setsid=1
   else
     "$bin" &
   fi
   SERVER_PID=$!
-  _supervise_record_child || true
+  if [ "$used_setsid" -eq 1 ] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    if ! _supervise_wait_setsid_identity; then
+      if kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "agent-server setsid identity did not stabilize"
+        _supervise_kill_unrecorded
+        return 1
+      fi
+      # Child exited during the session transition; wait() will see it.
+      return 0
+    fi
+  fi
+  if kill -0 "$SERVER_PID" 2>/dev/null; then
+    if ! _supervise_record_child; then
+      echo "agent-server launch identity incomplete"
+      _supervise_kill_unrecorded
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # Exactly one delivery: group signal iff the owned child is the leader.
@@ -201,7 +246,10 @@ supervise_agent_server() {
       _supervise_finish_shutdown
     fi
 
-    _supervise_start "$bin"
+    if ! _supervise_start "$bin"; then
+      echo "agent-server launch identity failed, not restarting."
+      exit 1
+    fi
     # TERM/INT may have arrived after the pre-launch check and before
     # SERVER_PID was assigned. Signal that child before waiting.
     if [ "$SHUTDOWN_REQUESTED" -ne 0 ]; then
