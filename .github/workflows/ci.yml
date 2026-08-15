@@ -12,6 +12,7 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       rust: ${{ steps.filter.outputs.rust }}
       docs: ${{ steps.filter.outputs.docs }}
+      entrypoint: ${{ steps.filter.outputs.entrypoint }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v4
@@ -46,6 +47,29 @@ jobs:
               - 'docs/**'
               - 'pnpm-lock.yaml'
               - '.github/workflows/ci.yml'
+            entrypoint:
+              - 'docker/entrypoint.sh'
+              - 'docker/identity.sh'
+              - 'docker/supervise-agent-server.sh'
+              - 'scripts/test-entrypoint-identity.sh'
+              - 'scripts/test-entrypoint-supervise.sh'
+              - 'scripts/test-entrypoint-owned-pid1.sh'
+              - '.github/workflows/ci.yml'
+
+  entrypoint:
+    needs: changes
+    if: needs.changes.outputs.entrypoint == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Entrypoint identity fail-closed
+        run: bash scripts/test-entrypoint-identity.sh
+      - name: Entrypoint supervise lifecycle
+        run: bash scripts/test-entrypoint-supervise.sh
+      - name: Ownership guard as PID 1
+        run: bash scripts/test-entrypoint-owned-pid1.sh
 
   ts:
     needs: changes
