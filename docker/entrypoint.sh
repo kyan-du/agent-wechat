@@ -201,21 +201,8 @@ fi
 # ============================================
 echo "Starting agent-server on port ${AGENT_PORT:-6174}..."
 
-# Run in a restart loop so `pkill agent-server` restarts it
-# (used by dev-deploy/dev-watch to hot-swap the binary)
-while true; do
-  /opt/agent-server/agent-server &
-  SERVER_PID=$!
-  # `set -e` would abort the entrypoint when wait returns 137 (SIGKILL).
-  # That tears down WeChat with the server instead of restarting it.
-  set +e
-  wait $SERVER_PID
-  EXIT_CODE=$?
-  set -e
-  # Exit cleanly on SIGTERM (container shutdown)
-  if [ $EXIT_CODE -eq 143 ]; then
-    exit 0
-  fi
-  echo "agent-server exited ($EXIT_CODE), restarting in 1s..."
-  sleep 1
-done
+# Restart recoverable agent-server exits (hot-swap / SIGKILL). Permanent
+# startup failures fail fast. Container TERM/INT is forwarded to the child.
+# shellcheck disable=SC1091
+. "${AGENT_WECHAT_SUPERVISE_LIB:-/opt/supervise-agent-server.sh}"
+supervise_agent_server /opt/agent-server/agent-server
