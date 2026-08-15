@@ -4,7 +4,15 @@ import {existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, relative, resolve, sep} from 'node:path';
 const root=resolve(import.meta.dirname,'..');
 const expected=['@agent-wechat/cli','@agent-wechat/wechat','@agent-wechat/wechaty-puppet'];
-const forbidden=/(^|\/)(\.env($|\.)|credentials?|secrets?|tokens?|cache|coverage|fixtures?|tmp|temp|\.data|node_modules)(\/|$)|(^|\/)(qr|qrcode|screenshot)([-_.\/]|$)|\.(deb|rpm|apk|exe|dll|dylib|so([.][0-9]+)*|node|a|o|db|sqlite|sqlite3|wal|shm|pem|key|p12|log|tgz|tar|zip|gz|map)$/i;
+const forbiddenComponent=/^(cache|coverage|fixtures?|tmp|temp|\.data|node_modules)$/i;
+const sensitiveSubstring=/(credential|secret|token)/i;
+const sensitiveSegment=/(^|[-_.])env([-_.]|$)|environment|private[-_.]?key|api[-_.]?key|cert(?:ificate)?/i;
+const captureSegment=/(^|[-_.])(qr|qrcode|screenshot)([-_.]|$)/i;
+const forbiddenExtension=/\.(deb|rpm|apk|exe|dll|dylib|so(?:[.][0-9]+)*|node|a|o|db|sqlite|sqlite3|wal|shm|pem|key|p12|pfx|cer|crt|cert|log|tgz|tar|zip|gz|map)$/i;
+function forbiddenPackedPath(path){
+ const parts=path.split('/');
+ return parts.some(part=>forbiddenComponent.test(part)||sensitiveSubstring.test(part)||sensitiveSegment.test(part)||captureSegment.test(part))||forbiddenExtension.test(parts.at(-1));
+}
 const run=(cmd,args,cwd=root)=>execFileSync(cmd,args,{cwd,encoding:'utf8',stdio:['ignore','pipe','inherit']});
 const workspaces=JSON.parse(run('pnpm',['-r','list','--depth','-1','--json']));
 const found=[];
@@ -30,7 +38,7 @@ for(const x of found.sort((a,b)=>a.name.localeCompare(b.name))){
  const packed=JSON.parse(run('npm',['pack','--dry-run','--json'],x.dir));
  const paths=packed[0]?.files?.map(f=>f.path).sort()||[];
  if(!paths.length) throw Error(`${x.name}: empty pack report`);
- const bad=paths.filter(p=>forbidden.test(p)); if(bad.length) throw Error(`${x.name}: forbidden packed paths: ${bad.join(', ')}`);
+ const bad=paths.filter(forbiddenPackedPath); if(bad.length) throw Error(`${x.name}: forbidden packed paths: ${bad.join(', ')}`);
  for(const t of targets(x.p)) if(!paths.includes(t)) throw Error(`${x.name}: declared target missing from pack: ${t}`);
  for(const allow of x.p.files.filter(v=>!v.startsWith('!'))){ const prefix=allow.replace(/^\.\//,'').replace(/\/$/,''); if(!paths.some(p=>p===prefix||p.startsWith(prefix+'/'))) throw Error(`${x.name}: required files entry has no packed output: ${allow}`); }
  const metaFile=join(x.dir,'dist/.release-metafile.json'); if(!existsSync(metaFile)) throw Error(`${x.name}: missing build metafile ${relative(root,metaFile)}`);

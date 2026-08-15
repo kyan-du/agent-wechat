@@ -13,6 +13,28 @@ if ./scripts/audit-release.sh >/dev/null 2>&1; then echo 'audit accepted missing
 mv packages/cli/dist.audit-test packages/cli/dist; trap - EXIT
 ./scripts/audit-release.sh
 
+# Every publishable tarball must reject sensitive-looking filenames. Exercise
+# all public packages separately so --write can never legalize leaked material.
+probe_npm_forbidden() {
+  local package_dir=$1 path=$2
+  mkdir -p "$package_dir/$(dirname "$path")"
+  printf 'negative probe\n' > "$package_dir/$path"
+  if node scripts/release-audit.mjs --write >/dev/null 2>&1; then
+    echo "npm audit accepted forbidden packed path: $package_dir/$path" >&2; exit 1
+  fi
+  rm -f "$package_dir/$path"
+}
+for package_dir in packages/cli packages/openclaw-extension packages/wechaty-puppet; do
+  for path in \
+    dist/mysecret.txt dist/mycredential.txt dist/mytoken.txt \
+    dist/.env.local dist/myenvironment.txt dist/my-private-key.txt \
+    dist/my-api-key.txt dist/mycert.txt dist/client.crt; do
+    probe_npm_forbidden "$package_dir" "$path"
+  done
+done
+node scripts/release-audit.mjs --write
+git diff --exit-code -- docs/release-audit/npm-materials.json
+
 # Docker context positive and negative regressions.
 node scripts/validate-docker-context.mjs
 probe_forbidden() {
