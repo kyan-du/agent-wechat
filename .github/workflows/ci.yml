@@ -101,7 +101,7 @@ jobs:
 
       - name: Guard unreleased channels and root CLI image behavior
         run: |
-          pnpm test:release-boundary
+          pnpm test:release-boundary -- --require-rendered
           pnpm test:root-cli-image
 
       - name: Lint availability

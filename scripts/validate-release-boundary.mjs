@@ -4,6 +4,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const failures = [];
+const requireRendered = process.argv.includes("--require-rendered");
+const P1B_GATE = /P1-B[^\n]{0,120}(?:unavailable|not available|publishes?|verif)/i;
 const OLD_NAMESPACE = /ghcr\.io\/thisnick\/agent-wechat/i;
 const GHCR_LATEST = /ghcr\.io\/[\w./${}-]+(?::|\}:?)latest\b/i;
 const INTERPOLATED_LATEST = /(?:FORK_IMAGE|IMAGE_REPO|REGISTRY_IMAGE)\}:latest\b/i;
@@ -37,8 +39,12 @@ function walk(dir) {
 
 function executableReleaseCommands(text, rendered = false) {
   if (rendered) {
-    const stripped = text.replace(/<!--[\s\S]*?-->/g, "");
-    return /(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)[^<\n]*@kyan-du\/agent-wechat|(?:docker\s+pull|image\s*:)[^<\n]*ghcr\.io\/kyan-du\/agent-wechat|<code[^>]*>\s*wx(?:\s|<)/i.test(stripped) ? [1] : [];
+    const blocks = [...text.replace(/<!--[\s\S]*?-->/g, "").matchAll(/<pre(?:\s[^>]*)?>([\s\S]*?)<\/pre>/gi)];
+    const renderedCode = blocks.map((match) => match[1]
+      .replace(/<[^>]+>/g, "")
+      .replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&")
+      .split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n")).join("\n");
+    return /(?:npm\s+(?:i|install)(?:\s+-g)?|npx|openclaw\s+plugins\s+install)\b[^\n]*@kyan-du\/agent-wechat|(?:docker\s+pull|image\s*:)[^\n]*ghcr\.io\/kyan-du\/agent-wechat|^\s*wx(?:\s|$)|&&\s*wx(?:\s|$)/im.test(renderedCode) ? [1] : [];
   }
   const hits = [];
   let fenced = false;
@@ -55,6 +61,14 @@ function executableReleaseCommands(text, rendered = false) {
     }
   }
   return hits;
+}
+
+function documentationViolations(path, text, rendered = false) {
+  const found = [];
+  if (!P1B_GATE.test(text)) found.push(`${path} does not state the P1-B release gate`);
+  const hits = executableReleaseCommands(text, rendered);
+  if (hits.length) found.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
+  return found;
 }
 
 const workflows = readdirSync(".github/workflows").filter((name) => /\.ya?ml$/.test(name));
@@ -80,17 +94,35 @@ for (const manifest of walk("packages").filter((path) => path.endsWith("package.
   for (const entry of packed.files ?? []) {
     if (!/\.(?:md|mdx)$/i.test(entry.path)) continue;
     const path = join(cwd, entry.path);
-    const hits = executableReleaseCommands(readFileSync(path, "utf8"));
-    if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands in the publishable tarball`);
+    failures.push(...documentationViolations(path, readFileSync(path, "utf8")).map((failure) => `${failure} (publishable tarball)`));
   }
 }
 
 // Scan source docs and rendered output (when present); CI builds docs before this guard.
+if (requireRendered && !existsSync("docs/dist")) failures.push("docs/dist is missing; build docs before the required rendered-output scan");
 for (const root of ["docs/src/content", "docs/dist"]) {
   for (const path of walk(root).filter((p) => /\.(?:md|mdx|html)$/i.test(p))) {
-    const hits = executableReleaseCommands(readFileSync(path, "utf8"), path.endsWith(".html"));
-    if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
+    const text = readFileSync(path, "utf8");
+    const rendered = path.endsWith(".html");
+    const hasReleaseChannel = /@kyan-du\/agent-wechat|ghcr\.io\/kyan-du\/agent-wechat/i.test(text);
+    if (hasReleaseChannel) failures.push(...documentationViolations(path, text, rendered));
+    else {
+      const hits = executableReleaseCommands(text, rendered);
+      if (hits.length) failures.push(`${path}:${hits.join(",")} contains executable unreleased-channel/bare-wx commands`);
+    }
   }
+}
+
+const documentationNegativeCases = [
+  ["missing P1-B gate", "```bash\npnpm cli -- up\n```"],
+  ["npm install", "> P1-B is not available until published and verified.\n```bash\nnpm install @kyan-du/agent-wechat-wechaty-puppet\n```"],
+  ["npx", "> P1-B is not available until published and verified.\n```bash\nnpx @kyan-du/agent-wechat-cli up\n```"],
+  ["plugin install", "> P1-B is not available until published and verified.\n```bash\nopenclaw plugins install @kyan-du/agent-wechat-openclaw\n```"],
+  ["GHCR pull", "> P1-B is not available until published and verified.\n```bash\ndocker pull ghcr.io/kyan-du/agent-wechat:1.2.3\n```"],
+  ["bare wx", "> P1-B is not available until published and verified.\n```bash\nwx up\n```"],
+];
+for (const [name, sample] of documentationNegativeCases) {
+  if (documentationViolations(`<negative:${name}>`, sample).length === 0) failures.push(`documentation guard negative test failed: ${name}`);
 }
 
 const negativeCases = [

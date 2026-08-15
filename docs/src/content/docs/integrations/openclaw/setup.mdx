@@ -33,6 +33,7 @@ pnpm cli -- up
 
 ```bash
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+openclaw plugins install -l ./packages/openclaw-extension
 ```
 
 ### 3. Add the WeChat channel
@@ -56,6 +57,8 @@ If you don't want to run Docker or manage infrastructure, use [Managed Hosting](
 
 ```bash
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+# From the same built repository checkout used for the server:
+openclaw plugins install -l ./packages/openclaw-extension
 ```
 
 ### 2. Add the WeChat channel

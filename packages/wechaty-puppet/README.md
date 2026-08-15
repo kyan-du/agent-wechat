@@ -19,8 +19,18 @@ Wechaty Puppet for [agent-wechat](https://github.com/kyan-du/agent-wechat). Brid
 
 ```bash
 # Pending P1-B (not available yet): npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
-# Today, import/build packages/wechaty-puppet from this repository workspace.
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build
+PUPPET_TARBALL=$(cd packages/wechaty-puppet && npm pack --silent)
+mkdir -p /tmp/agent-wechat-wechaty-consumer
+cd /tmp/agent-wechat-wechaty-consumer
+npm init -y
+npm install "$OLDPWD/packages/wechaty-puppet/$PUPPET_TARBALL" wechaty wechaty-puppet
 ```
+
+Create the example below as `bot.mjs` in that clean consumer directory and run `node bot.mjs`. This verifies the package import through its real tarball rather than workspace resolution.
 
 ## Usage
 

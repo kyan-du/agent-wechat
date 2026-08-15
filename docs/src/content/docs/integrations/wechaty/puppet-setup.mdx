@@ -18,14 +18,27 @@ Both require a running agent-wechat server. You can [self-host with Docker](/get
 
 ```bash
 # Pending P1-B (not available yet): npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build
+PUPPET_TARBALL=$(cd packages/wechaty-puppet && npm pack --silent)
+mkdir -p /tmp/agent-wechat-wechaty-consumer
+cd /tmp/agent-wechat-wechaty-consumer
+npm init -y
+npm install "$OLDPWD/packages/wechaty-puppet/$PUPPET_TARBALL" wechaty wechaty-puppet
 ```
+
+Create the example below as `bot.mjs` in that consumer directory and run it with `node bot.mjs`. The tarball install makes the package import resolve exactly as it will for a published consumer, without relying on workspace resolution.
 
 ### Prerequisites
 
 - **Docker** — on macOS, install [Colima](https://github.com/abiosoft/colima) (`brew install colima && colima start`) or [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - **An agent-wechat server** — self-hosted or via [Managed Hosting](/hosting/managed-hosting):
   ```bash
-  pnpm cli -- up # from the repository checkout after pnpm build && pnpm build:image
+  cd /path/to/agent-wechat
+  pnpm build:image
+  pnpm cli -- up
   ```
 - **Node.js >= 22**
 

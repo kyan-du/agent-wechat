@@ -79,8 +79,8 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 
 ```bash
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
-# From the repository, build packages/openclaw-extension and install that local package.
 pnpm --filter @kyan-du/agent-wechat-openclaw build
+openclaw plugins install -l ./packages/openclaw-extension
 ```
 
 ### 3. Configure the channel
