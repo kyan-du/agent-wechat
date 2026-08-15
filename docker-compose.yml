@@ -1,4 +1,5 @@
-# Sample docker-compose for standalone agent-wechat deployment.
+# Source-build Compose setup. Before starting, run pnpm build:image (or
+# pnpm build:image:amd64 / :arm64) and set AGENT_WECHAT_ARCH if needed.
 # Generate a token and a persistent device identity before starting:
 #   mkdir -p ~/.config/agent-wechat
 #   openssl rand -hex 32 > ~/.config/agent-wechat/token
@@ -11,7 +12,7 @@
 
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     container_name: agent-wechat
     hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}

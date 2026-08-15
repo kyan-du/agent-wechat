@@ -1,7 +1,7 @@
 ---
-"@agent-wechat/cli": minor
-"@agent-wechat/wechat": minor
-"@agent-wechat/shared": patch
+"@kyan-du/agent-wechat-cli": minor
+"@kyan-du/agent-wechat-openclaw": minor
+"@kyan-du/agent-wechat-shared": patch
 ---
 
 Experimental fingerprint and send-pacing changes. Not a guarantee of account safety.

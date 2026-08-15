@@ -3,7 +3,9 @@ title: OpenClaw Setup
 description: Add WeChat as a channel in your OpenClaw AI agent.
 ---
 
-The `@agent-wechat/wechat` plugin connects [OpenClaw](https://openclaw.ai) to WeChat via agent-wechat.
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
+The `@kyan-du/agent-wechat-openclaw` plugin connects [OpenClaw](https://openclaw.ai) to WeChat via agent-wechat.
 
 ## Prerequisites
 
@@ -20,21 +22,27 @@ If you're running agent-wechat locally or on your own server, you'll need Docker
 See [Container Setup](/getting-started/container-setup/cli) for options. The quickest:
 
 ```bash
-npm install -g @agent-wechat/cli
-wx up
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
+pnpm cli -- up
 ```
 
 ### 2. Install the plugin
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
 ### 3. Add the WeChat channel
 
 ```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+openclaw plugins inspect wechat --runtime
 ```
 
 ### 4. Restart the gateway
@@ -50,13 +58,19 @@ If you don't want to run Docker or manage infrastructure, use [Managed Hosting](
 ### 1. Install the plugin
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+# From the same built repository checkout used for the server:
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
 ### 2. Add the WeChat channel
 
 ```bash
-openclaw channels add --channel wechat --url <your-server-url> --token <your-token>
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl <your-server-url>
+openclaw config set channels.wechat.token <your-token>
+openclaw plugins inspect wechat --runtime
 ```
 
 ### 3. Restart the gateway

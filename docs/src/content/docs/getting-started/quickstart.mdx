@@ -3,6 +3,8 @@ title: Quick Start
 description: Get agent-wechat running in under 5 minutes.
 ---
 
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 The fastest way to get started is with the CLI. If you'd rather not manage infrastructure yourself, see [Managed Hosting](/hosting/managed-hosting).
 
 :::note[Prerequisites]
@@ -12,7 +14,10 @@ You need **Docker** running on your machine. On macOS, install [Colima](https://
 ## 1. Install the CLI
 
 ```bash
-npm install -g @agent-wechat/cli
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
 ```
 
 This installs the `wx` command globally.
@@ -20,15 +25,15 @@ This installs the `wx` command globally.
 ## 2. Start the container
 
 ```bash
-wx up
+pnpm cli -- up
 ```
 
-This automatically pulls the Docker image from `ghcr.io/thisnick/agent-wechat` and starts the container with the correct flags, volume mounts, and auth token.
+After P1-B, an explicit `--image ghcr.io/kyan-du/agent-wechat:<published-semver>` selects the verified fork image. Before then, build locally and plain `wx up` uses the architecture-specific local image; there is no registry fallback.
 
 ## 3. Log in to WeChat
 
 ```bash
-wx auth login
+pnpm cli -- auth login
 ```
 
 A QR code is displayed in your terminal. Scan it with WeChat on your phone (tap **+** > **Scan**), then confirm the login.
@@ -41,21 +46,21 @@ Scan the QR code in WeChat if prompted.
 
 ```bash
 # List your chats
-wx chats list
+pnpm cli -- chats list
 
 # Find a chat by name
-wx chats find "John"
+pnpm cli -- chats find "John"
 
 # Send a message (--text, --image, or --file)
-wx messages send <chatId> --text "Hello from agent-wechat!"
-wx messages send <chatId> --image photo.jpg
-wx messages send <chatId> --file document.pdf
+pnpm cli -- messages send <chatId> --text "Hello from agent-wechat!"
+pnpm cli -- messages send <chatId> --image photo.jpg
+pnpm cli -- messages send <chatId> --file document.pdf
 
 # Read messages
-wx messages list <chatId>
+pnpm cli -- messages list <chatId>
 
 # Download media (images, voice, video) from a message
-wx messages media <chatId> <messageId>
+pnpm cli -- messages media <chatId> <messageId>
 ```
 
 ## 5. View the container via VNC
@@ -69,7 +74,7 @@ cat ~/.config/agent-wechat/token
 ## 6. Stop the container
 
 ```bash
-wx down
+pnpm cli -- down
 ```
 
 ## Next steps

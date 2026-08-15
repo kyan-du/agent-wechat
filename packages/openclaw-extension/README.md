@@ -1,8 +1,8 @@
-# @agent-wechat/wechat
+# @kyan-du/agent-wechat-openclaw
 
-OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/thisnick/agent-wechat).
+OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [agent-wechat](https://github.com/kyan-du/agent-wechat).
 
-**[Documentation](https://thisnick.github.io/agent-wechat/integrations/openclaw/setup/)**
+**[Documentation](https://kyan-du.github.io/agent-wechat/integrations/openclaw/setup/)**
 
 ## Prerequisites
 
@@ -16,6 +16,8 @@ OpenClaw channel plugin for WeChat. Connects your OpenClaw bot to WeChat using [
 
 ## Setup
 
+> **Release boundary:** Fork npm, GHCR, and hosted documentation are unavailable until P1-B publishes and verifies them. The commands below use the repository source/local-build path.
+
 ### 1. Start the agent-wechat Server
 
 If you need to run the server yourself:
@@ -23,8 +25,11 @@ If you need to run the server yourself:
 **Option A: CLI** (quickest for local use)
 
 ```bash
-npm install -g @agent-wechat/cli
-wx up
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
+pnpm cli -- up
 ```
 
 **Option B: Docker Compose** (production / networked)
@@ -32,7 +37,7 @@ wx up
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     container_name: agent-wechat
     hostname: ${AGENT_WECHAT_HOSTNAME:?run scripts/device-identity.sh}
     mac_address: ${AGENT_WECHAT_MAC:?run scripts/device-identity.sh}
@@ -73,17 +78,22 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 ### 2. Install the extension
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+pnpm --filter @kyan-du/agent-wechat-openclaw build
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
 ### 3. Configure the channel
 
-```bash
-# Uses defaults (localhost:6174, token from ~/.config/agent-wechat/token)
-openclaw channels add --channel wechat
+OpenClaw's channel catalog may map `openclaw channels add --channel wechat` to its official Weixin plugin rather than this source plugin. Configure the staged plugin through its schema keys and verify the runtime load explicitly:
 
-# Override server URL and token
-openclaw channels add --channel wechat --url <url> --token <token>
+```bash
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+# Optional when the server requires an explicit token:
+openclaw config set channels.wechat.token <token>
+openclaw plugins inspect wechat --runtime
 ```
 
 Or edit `~/.openclaw/openclaw.json` directly:
@@ -170,7 +180,7 @@ All config lives under `channels.wechat` in OpenClaw's config file:
 ### Build from source
 
 ```bash
-git clone https://github.com/thisnick/agent-wechat.git
+git clone https://github.com/kyan-du/agent-wechat.git
 cd agent-wechat
 pnpm install && pnpm build
 ```
@@ -178,10 +188,11 @@ pnpm install && pnpm build
 ### Link for local development
 
 ```bash
-openclaw plugins install -l ./packages/openclaw-extension
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
 ```
 
-This symlinks the extension so changes are picked up without reinstalling. Rebuild with `pnpm build` after making changes, then restart the gateway.
+This stages only the built plugin files and a production manifest, avoiding pnpm workspace symlinks that OpenClaw correctly rejects as escaping the install root. Rebuild and restage after making changes, then restart the gateway.
 
 ## Architecture
 

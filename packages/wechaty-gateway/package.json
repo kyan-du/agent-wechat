@@ -1,8 +1,8 @@
 {
-  "name": "@agent-wechat/wechaty-gateway",
+  "name": "@kyan-du/agent-wechat-wechaty-gateway",
   "version": "0.11.15",
   "private": true,
-  "description": "Wechaty gRPC gateway wrapping @agent-wechat/wechaty-puppet",
+  "description": "Wechaty gRPC gateway wrapping @kyan-du/agent-wechat-wechaty-puppet",
   "type": "module",
   "main": "./dist/main.js",
   "scripts": {
@@ -11,8 +11,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agent-wechat/shared": "workspace:*",
-    "@agent-wechat/wechaty-puppet": "workspace:*",
+    "@kyan-du/agent-wechat-shared": "workspace:*",
+    "@kyan-du/agent-wechat-wechaty-puppet": "workspace:*",
     "file-box": "^1.4.15",
     "wechaty-puppet": "^1.20.2",
     "wechaty-puppet-service": "^1.18.2",

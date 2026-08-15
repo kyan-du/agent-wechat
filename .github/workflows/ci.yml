@@ -33,6 +33,9 @@ jobs:
               - 'MAINTENANCE.md'
               - 'SECURITY.md'
               - '.github/dependabot.yml'
+              - 'src/**'
+              - 'scripts/validate-release-boundary.mjs'
+              - '.github/workflows/docker-rebuild.yml'
               - '.github/workflows/ci.yml'
               - 'scripts/audit-release.sh'
               - 'scripts/release-audit.mjs'
@@ -110,6 +113,11 @@ jobs:
       - name: Test (all packages)
         run: pnpm -r --if-present test
 
+      - name: Guard unreleased channels and root CLI image behavior
+        run: |
+          pnpm test:release-boundary -- --require-rendered
+          pnpm test:root-cli-image
+
       - name: Lint availability
         run: |
           if pnpm run | grep -Eq '^  lint'; then
@@ -157,7 +165,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --filter @agent-wechat/docs
+        run: pnpm install --frozen-lockfile --filter @kyan-du/agent-wechat-docs
 
       - name: Build docs
-        run: pnpm --filter @agent-wechat/docs build
+        run: pnpm --filter @kyan-du/agent-wechat-docs build

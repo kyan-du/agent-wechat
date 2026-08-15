@@ -35,13 +35,13 @@ The recommended way to access data:
 
 ```bash
 # List chats
-wx chats list --json
+pnpm cli -- chats list --json
 
 # Get messages
-wx messages list <chatId> --json
+pnpm cli -- messages list <chatId> --json
 
 # Download media
-wx messages media <chatId> <localId> --output photo.jpg
+pnpm cli -- messages media <chatId> <localId> --output photo.jpg
 ```
 
 ### Via Docker volume inspection

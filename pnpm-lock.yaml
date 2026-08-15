@@ -44,7 +44,7 @@ importers:
         specifier: ^0.12.0
         version: 0.12.0
     devDependencies:
-      '@agent-wechat/shared':
+      '@kyan-du/agent-wechat-shared':
         specifier: workspace:*
         version: link:../shared
       '@types/node':
@@ -65,7 +65,7 @@ importers:
 
   packages/openclaw-extension:
     devDependencies:
-      '@agent-wechat/shared':
+      '@kyan-du/agent-wechat-shared':
         specifier: workspace:*
         version: link:../shared
       '@types/node':
@@ -93,10 +93,10 @@ importers:
 
   packages/wechaty-gateway:
     dependencies:
-      '@agent-wechat/shared':
+      '@kyan-du/agent-wechat-shared':
         specifier: workspace:*
         version: link:../shared
-      '@agent-wechat/wechaty-puppet':
+      '@kyan-du/agent-wechat-wechaty-puppet':
         specifier: workspace:*
         version: link:../wechaty-puppet
       file-box:
@@ -134,7 +134,7 @@ importers:
         specifier: ^1.4.15
         version: 1.4.15
     devDependencies:
-      '@agent-wechat/shared':
+      '@kyan-du/agent-wechat-shared':
         specifier: workspace:*
         version: link:../shared
       '@types/node':
@@ -228,6 +228,7 @@ packages:
   '@aws-sdk/core@3.974.11':
     resolution: {integrity: sha512-QpnINq5FZH6EOaDEkmHdT7eUunbvD27pDNQypaWjFyYz7Zl1q3UCMQErBZxpmfGfI7MvI2TlK8KTkgNpv8b1ug==}
     engines: {node: '>=20.0.0'}
+    deprecated: Deprecated due to an error deserialization bug in JSON 1.0 protocol services, see https://github.com/aws/aws-sdk-js-v3/pull/8031. Newer version available.
 
   '@aws-sdk/credential-provider-env@3.972.37':
     resolution: {integrity: sha512-/jpPvEh6f7ntmIzf7dNxoNX6Q8vt8UpesCjbW6mFfk4V1NW6bIy9qxcQ6WbA8As5yQhsZOe+xeNd4xHX8kdY2Q==}
@@ -1886,6 +1887,7 @@ packages:
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
+    deprecated: Potential CWE-502 - Update to 1.3.1 or higher
 
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
@@ -4874,6 +4876,7 @@ packages:
   tsconfck@3.1.6:
     resolution: {integrity: sha512-ks6Vjr/jEw0P1gmOVwutM3B7fWxoWBL2KRDb1JfqGVawBmO5UsvmWOQFGHBPl5yxYz4eERr19E6L7NMv+Fej4w==}
     engines: {node: ^18 || >=20}
+    deprecated: unmaintained
     hasBin: true
     peerDependencies:
       typescript: ^5.0.0
@@ -5132,6 +5135,7 @@ packages:
 
   uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vary@1.1.2:

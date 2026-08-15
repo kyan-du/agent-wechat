@@ -1,5 +1,5 @@
-import { WeChatClient } from "@agent-wechat/shared";
-import type { LoginSubscriptionEvent } from "@agent-wechat/shared";
+import { WeChatClient } from "@kyan-du/agent-wechat-shared";
+import type { LoginSubscriptionEvent } from "@kyan-du/agent-wechat-shared";
 
 export interface SubscriptionClientOptions {
   url: string;

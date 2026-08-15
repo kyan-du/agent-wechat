@@ -3,12 +3,14 @@ title: CLI Installation
 description: Install the wx command-line tool.
 ---
 
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 The `wx` CLI lets you manage the agent-wechat container and interact with WeChat from your terminal.
 
 ## Install
 
 ```bash
-npm install -g @agent-wechat/cli
+# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
 ```
 
 This installs the `wx` command globally.
@@ -21,7 +23,7 @@ This installs the `wx` command globally.
 ## Verify installation
 
 ```bash
-wx --version
+pnpm cli -- --version
 ```
 
 ## Configuration

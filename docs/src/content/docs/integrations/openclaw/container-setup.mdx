@@ -10,7 +10,7 @@ When both OpenClaw and agent-wechat run in Docker containers, they communicate o
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined

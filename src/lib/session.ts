@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { localBuildImage, migrateSessionImage, validateImageReference } from "./image";
 import { ensureDir } from "./paths";
 
 export interface SessionConfig {
@@ -54,7 +55,17 @@ export function loadSession(dataDir: string, sessionName: string): SessionConfig
     return null;
   }
   const raw = fs.readFileSync(sessionPath, "utf8");
-  return JSON.parse(raw) as SessionConfig;
+  const session = JSON.parse(raw) as SessionConfig;
+  try {
+    const normalized = migrateSessionImage(session.image);
+    session.image = normalized.image;
+    if (normalized.migrated) saveSession(dataDir, sessionName, session);
+  } catch {
+    throw new Error(
+      `Session ${sessionName} has unsafe image reference ${JSON.stringify(session.image)}. Recover with --image agent-wechat:${process.arch === "arm64" ? "arm64" : "amd64"}, or an exact published fork semver/digest.`,
+    );
+  }
+  return session;
 }
 
 export function saveSession(dataDir: string, sessionName: string, session: SessionConfig): void {
@@ -79,7 +90,8 @@ export function ensureSession(dataDir: string, sessionName: string, overrides: P
     return { ...existing, ...overrides };
   }
 
-  const defaultImage = process.env.WECHAT_DOCKER_IMAGE || "ghcr.io/agent-wechat/agent-wechat:latest";
+  const configuredImage = process.env.WECHAT_DOCKER_IMAGE;
+  const defaultImage = configuredImage ? validateImageReference(configuredImage) : localBuildImage();
   const session: SessionConfig = {
     name: sessionName,
     containerName: `agent-wechat-${sessionName}`,

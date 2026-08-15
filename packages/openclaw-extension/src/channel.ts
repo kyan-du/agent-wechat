@@ -7,7 +7,7 @@ import { getWeChatRuntime } from "./runtime.js";
 import { startWeChatMonitor } from "./monitor.js";
 
 import { collectWeChatStatusIssues } from "./status.js";
-import { WeChatClient } from "@agent-wechat/shared";
+import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
 import { createWeChatConfirmedSendTool, createWeChatLoginTool } from "./agent-tools.js";

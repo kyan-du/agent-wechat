@@ -4,7 +4,7 @@ import { remarkBasePath } from './remark-base-path.mjs';
 import { ogImage } from './og-image-integration.mjs';
 
 const base = '/agent-wechat';
-const site = 'https://thisnick.github.io';
+const site = 'https://kyan-du.github.io';
 
 export default defineConfig({
   site,
@@ -22,7 +22,7 @@ export default defineConfig({
         Head: './src/components/Head.astro',
       },
       social: {
-        github: 'https://github.com/thisnick/agent-wechat',
+        github: 'https://github.com/kyan-du/agent-wechat',
       },
       sidebar: [
         {

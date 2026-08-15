@@ -3,6 +3,8 @@ title: OpenClaw Local Setup
 description: Run OpenClaw with agent-wechat locally without Docker networking.
 ---
 
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
 When running OpenClaw and agent-wechat on the same machine (not in containers), the setup is straightforward — everything communicates over `localhost`.
 
 ## Setup
@@ -10,15 +12,22 @@ When running OpenClaw and agent-wechat on the same machine (not in containers), 
 ### 1. Start agent-wechat
 
 ```bash
-npm install -g @agent-wechat/cli
-wx up
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
+pnpm cli -- up
 ```
 
 ### 2. Install and configure the plugin
 
 ```bash
-openclaw plugins install @agent-wechat/wechat
-openclaw channels add --channel wechat
+# Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
+node scripts/prepare-openclaw-plugin.mjs
+openclaw plugins install -l ./.artifacts/openclaw-extension
+openclaw config set channels.wechat.enabled true
+openclaw config set channels.wechat.serverUrl http://localhost:6174
+openclaw plugins inspect wechat --runtime
 ```
 
 No additional configuration is needed — the defaults (`http://localhost:6174` and the shared token file) work automatically.

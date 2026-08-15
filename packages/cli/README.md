@@ -1,22 +1,28 @@
-# @agent-wechat/cli
+> **Release boundary:** Fork npm, GHCR, and hosted-docs channels remain unavailable until P1-B publishes and verifies them. Use the repository source/local-build path in the meantime.
+
+# @kyan-du/agent-wechat-cli
 
 Command-line tool for managing agent-wechat containers and interacting with WeChat.
 
-**[Documentation](https://thisnick.github.io/agent-wechat/getting-started/cli/commands/)**
+**[Documentation](https://kyan-du.github.io/agent-wechat/getting-started/cli/commands/)**
 
-## Install
+## Install from source (current P1-A path)
 
 ```bash
-npm install -g @agent-wechat/cli
+# Pending P1-B (not available yet): npm install -g @kyan-du/agent-wechat-cli
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build && pnpm build:image
 ```
 
-This installs the `wx` command globally.
+Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli -- <arguments>` from this checkout.
 
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) installed and running
 
-`wx up` automatically pulls the Docker image from ghcr.io if it isn't found locally.
+`wx up` uses the locally built `agent-wechat:arm64` or `agent-wechat:amd64` image by default. After P1-B publishes fork images, select one exactly with `wx up --image ghcr.io/kyan-du/agent-wechat:1.2.3` or `wx up --image ghcr.io/kyan-du/agent-wechat@sha256:<64-lowercase-hex>`. No `latest` or default-registry fallback is used.
 
 > **Note:** agent-wechat requires `SYS_PTRACE` and `seccomp=unconfined` to interact with the WeChat desktop process. It cannot run in serverless or restricted container environments (AWS Fargate, Cloud Run, etc.). Use a VM or bare-metal Docker host.
 
@@ -24,21 +30,21 @@ This installs the `wx` command globally.
 
 ```bash
 # Start the container
-wx up
+pnpm cli -- up
 
 # Check status
-wx status
+pnpm cli -- status
 
 # Log in (displays QR code in terminal)
-wx auth login
+pnpm cli -- auth login
 
 # List chats
-wx chats list
+pnpm cli -- chats list
 
 # Send a message
-wx messages send <chatId> --text "Hello"
+pnpm cli -- messages send <chatId> --text "Hello"
 # Only after reviewing a SIMILAR_CONTENT_CONFIRMATION_REQUIRED response:
-wx messages send <chatId> --text "Reviewed text" --confirm-similar
+pnpm cli -- messages send <chatId> --text "Reviewed text" --confirm-similar
 ```
 
 ## Commands
@@ -47,7 +53,7 @@ wx messages send <chatId> --text "Reviewed text" --confirm-similar
 
 | Command | Description |
 |---------|-------------|
-| `wx up [--proxy user:pass@host:port]` | Start the agent-wechat container |
+| `wx up [--proxy user:pass@host:port] [--image <reference>]` | Start the local image or an explicit published fork semver/digest |
 | `wx down` | Stop and remove the container |
 | `wx logs` | Tail container logs |
 | `wx status` | Show container up/down status and login status (when available) |
@@ -138,10 +144,10 @@ There are two ways to run the agent-wechat container.
 
 ### Option 1: `wx up` (local development)
 
-The simplest way. `wx up` pulls/starts the container with the right flags, volume mounts, and auth token:
+The simplest way. `wx up` starts the architecture-specific local image (or pulls only an explicitly selected fork semver/digest) with the right flags, volume mounts, and auth token:
 
 ```bash
-wx up
+pnpm cli -- up
 ```
 
 This starts a container named `agent-wechat` with:
@@ -152,7 +158,7 @@ This starts a container named `agent-wechat` with:
 To route all container traffic through a proxy:
 
 ```bash
-wx up --proxy user:pass@host:port
+pnpm cli -- up --proxy user:pass@host:port
 ```
 
 This sets up a transparent proxy (redsocks + iptables) inside the container — invisible to WeChat. Prefix with `socks5://` for SOCKS5 proxies.
@@ -164,7 +170,7 @@ For production or when running alongside other services (e.g., OpenClaw), use th
 ```yaml
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
     container_name: agent-wechat
     security_opt:
       - seccomp=unconfined

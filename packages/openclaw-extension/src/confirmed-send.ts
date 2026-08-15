@@ -1,4 +1,4 @@
-import type { SendParams } from "@agent-wechat/shared";
+import type { SendParams } from "@kyan-du/agent-wechat-shared";
 
 export function buildOpenClawConfirmedSend(params: {
   chatId: string;

@@ -1,14 +1,16 @@
-# @agent-wechat/wechaty-puppet
+# @kyan-du/agent-wechat-wechaty-puppet
 
-Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
+Wechaty Puppet for [agent-wechat](https://github.com/kyan-du/agent-wechat). Bridges any Wechaty bot to WeChat via the agent-wechat REST/WebSocket server.
 
-**[Documentation](https://thisnick.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
+> **Release boundary:** Fork npm, GHCR, and hosted documentation are unavailable until P1-B publishes and verifies them. Clone this repository, run `corepack enable && pnpm install --frozen-lockfile && pnpm build && pnpm build:image`, and start the local image with `pnpm cli -- up`.
+
+**[Documentation](https://kyan-du.github.io/agent-wechat/integrations/wechaty/puppet-setup/)**
 
 ## Prerequisites
 
-- **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/thisnick/agent-wechat):
+- **An agent-wechat server** running — set up via the CLI or from the [agent-wechat repo](https://github.com/kyan-du/agent-wechat):
   ```bash
-  npx @agent-wechat/cli up     # starts the Docker container
+  pnpm cli -- up     # from a built repository checkout
   ```
   Login is not required as a separate CLI step; you can log in through the puppet QR flow.
 - **Node.js >= 22**
@@ -16,14 +18,25 @@ Wechaty Puppet for [agent-wechat](https://github.com/thisnick/agent-wechat). Bri
 ## Install
 
 ```bash
-npm install @agent-wechat/wechaty-puppet wechaty wechaty-puppet
+# Pending P1-B (not available yet): npm install @kyan-du/agent-wechat-wechaty-puppet wechaty wechaty-puppet
+git clone https://github.com/kyan-du/agent-wechat.git
+cd agent-wechat
+corepack enable && pnpm install --frozen-lockfile
+pnpm build
+PUPPET_TARBALL=$(cd packages/wechaty-puppet && npm pack --silent)
+mkdir -p /tmp/agent-wechat-wechaty-consumer
+cd /tmp/agent-wechat-wechaty-consumer
+npm init -y
+npm install "$OLDPWD/packages/wechaty-puppet/$PUPPET_TARBALL" wechaty wechaty-puppet
 ```
+
+Create the example below as `bot.mjs` in that clean consumer directory and run `node bot.mjs`. This verifies the package import through its real tarball rather than workspace resolution.
 
 ## Usage
 
 ```ts
 import { WechatyBuilder } from 'wechaty'
-import PuppetAgentWeChat from '@agent-wechat/wechaty-puppet'
+import PuppetAgentWeChat from '@kyan-du/agent-wechat-wechaty-puppet'
 
 const bot = WechatyBuilder.build({
   puppet: new PuppetAgentWeChat({

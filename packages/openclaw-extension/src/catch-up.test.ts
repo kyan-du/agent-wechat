@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Message } from "@agent-wechat/shared";
+import type { Message } from "@kyan-du/agent-wechat-shared";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.ts";
 
 function message(localId: number, ageMs: number, nowMs: number): Message {

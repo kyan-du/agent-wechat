@@ -129,7 +129,7 @@ test("ensureDeviceIdentity rejects non-ascii persisted env bytes", () => {
 test("buildDockerRunArgs keeps identity and proxy on argv boundaries", () => {
   const identity = generateDeviceIdentity("ffffffffffffffffffffffffffffffff");
   const args = buildDockerRunArgs(identity, {
-    image: "ghcr.io/thisnick/agent-wechat:latest",
+    image: "ghcr.io/kyan-du/agent-wechat:0.11.15",
     containerName: "agent-wechat",
     tokenPath: "/tmp/token",
     port: 6174,
