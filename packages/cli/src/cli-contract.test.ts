@@ -6,6 +6,12 @@ import path from "node:path";
 import test from "node:test";
 
 const cli = path.resolve(import.meta.dirname, "../dist/cli.js");
+if (!fs.existsSync(cli)) {
+  execFileSync(process.execPath, [path.resolve(import.meta.dirname, "../build.js")], {
+    cwd: path.resolve(import.meta.dirname, ".."),
+    stdio: "inherit",
+  });
+}
 
 function run(args: string[], home = fs.mkdtempSync(path.join(os.tmpdir(), "wx-cli-"))) {
   return spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", env: { ...process.env, HOME: home } });
