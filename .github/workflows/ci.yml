@@ -33,6 +33,11 @@ jobs:
               - 'SECURITY.md'
               - '.github/dependabot.yml'
               - '.github/workflows/ci.yml'
+              - 'scripts/audit-release.sh'
+              - 'scripts/release-audit.mjs'
+              - 'scripts/test-release-audit.sh'
+              - 'docs/release-audit/**'
+              - 'docker/.dockerignore'
             rust:
               - 'packages/agent-server-rust/**'
               - '.github/workflows/ci.yml'
@@ -65,6 +70,13 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Release artifact audit
+        run: |
+          node scripts/release-audit.mjs --write
+          git diff --exit-code -- docs/release-audit/npm-materials.json
+          ./scripts/test-release-audit.sh
+          git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' | (! grep .)
 
       - name: Typecheck
         run: pnpm typecheck

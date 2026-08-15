@@ -13,10 +13,11 @@
   },
   "files": [
     "dist",
-    "!dist/**/*.d.ts.map"
+    "!dist/**/*.d.ts.map",
+    "!dist/.release-metafile.json"
   ],
   "scripts": {
-    "build": "esbuild src/mod.ts --bundle --format=esm --platform=node --outfile=dist/mod.js --external:wechaty-puppet --external:file-box && tsc --emitDeclarationOnly",
+    "build": "esbuild src/mod.ts --bundle --format=esm --platform=node --outfile=dist/mod.js --metafile=dist/.release-metafile.json --external:wechaty-puppet --external:file-box && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/*.test.ts",
     "test:puppet": "node --import tsx scripts/test-puppet.ts",

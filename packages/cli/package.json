@@ -6,7 +6,8 @@
     "wx": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "!dist/.release-metafile.json"
   ],
   "scripts": {
     "build": "node build.js",

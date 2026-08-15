@@ -27,3 +27,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm build
+
+      - name: Audit release artifacts
+        run: |
+          ./scripts/audit-release.sh
+          git diff --exit-code -- docs/release-audit/npm-materials.json
+          git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' | (! grep .)
