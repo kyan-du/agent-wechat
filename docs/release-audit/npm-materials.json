@@ -8,6 +8,7 @@
         "README.md",
         "dist/cli.js",
         "dist/device_identity.py",
+        "dist/image-compatibility.json",
         "package.json"
       ],
       "bundled": [

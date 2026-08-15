@@ -1,9 +1,9 @@
 ---
-title: Using the CLI (wx up)
+title: Using the CLI (wx start)
 description: Start agent-wechat with a single command.
 ---
 
-The simplest way to run agent-wechat. During P1-A, build the repository image locally and use `pnpm cli up`; it creates the container with the correct flags and starts it. After P1-B, `--image` may select an exact verified fork semver/digest, with no `latest` or registry fallback.
+The simplest way to run agent-wechat. During P1-A, build the repository image locally and use `pnpm cli start`; it creates the container with the correct flags and starts it. After P1-B, `--image` may select an exact verified fork semver/digest, with no `latest` or registry fallback.
 
 :::tip
 Don't want to manage Docker yourself? See [Managed Hosting](/hosting/managed-hosting) for a fully hosted option.
@@ -12,7 +12,7 @@ Don't want to manage Docker yourself? See [Managed Hosting](/hosting/managed-hos
 ## Start the container
 
 ```bash
-pnpm cli up
+pnpm cli start
 ```
 
 This starts a container named `agent-wechat` with:
@@ -26,10 +26,10 @@ To route all container traffic through a proxy:
 
 ```bash
 # HTTP proxy
-pnpm cli up --proxy user:pass@host:port
+pnpm cli start --proxy user:pass@host:port
 
 # SOCKS5 proxy
-pnpm cli up --proxy socks5://user:pass@host:port
+pnpm cli start --proxy socks5://user:pass@host:port
 ```
 
 This sets up a transparent proxy (redsocks + iptables) inside the container — invisible to WeChat.
@@ -37,14 +37,14 @@ This sets up a transparent proxy (redsocks + iptables) inside the container — 
 ## Stop the container
 
 ```bash
-pnpm cli down
+pnpm cli stop
 ```
 
 This stops and removes the container. Your data persists in Docker volumes.
 
 ## When to use this vs Docker Compose
 
-Use `wx up` when:
+Use `wx start` when:
 - Running locally for development or personal use
 - You don't need custom networking
 - You want the simplest possible setup

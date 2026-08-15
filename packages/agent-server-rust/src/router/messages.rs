@@ -1,19 +1,20 @@
 use axum::{
     extract::{Path, Query},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 
 use crate::db::get_db;
-use crate::ia::types::{MediaResult, Message, SendParams, SendResult};
+use crate::ia::types::{MediaResult, SendParams, SendResult};
 use crate::outbound::{
     cleanup_temp_files, outbound_sender, IdempotencyAdmission, IdempotencyClaimLease,
     OutboundError, OutboundSendResponse,
 };
 use crate::plans::send_message::SendMessageParams;
 use crate::sessions::manager::get_session;
-use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
-use crate::tools::wechat_keys::{extract_keys_async, get_image_keys, get_stored_keys, store_keys};
+use crate::tools::wechat_keys::{get_image_keys, get_stored_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
 
@@ -21,51 +22,47 @@ use crate::tools::wechat_messages;
 pub struct ListParams {
     #[serde(default = "default_limit")]
     limit: i64,
-    #[serde(default)]
-    offset: i64,
+    cursor: Option<String>,
 }
 
 fn default_limit() -> i64 {
     50
 }
 
+fn empty_page() -> Response {
+    Json(serde_json::json!({ "schemaVersion": 1, "items": [], "nextCursor": null })).into_response()
+}
+
+fn error_page(code: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "schemaVersion": 1, "items": [], "nextCursor": null, "errorCode": code }))).into_response()
+}
+
 pub async fn list_messages(
     Path(chat_id): Path<String>,
     Query(params): Query<ListParams>,
-) -> Json<Vec<Message>> {
+) -> Response {
+    if !(1..=200).contains(&params.limit) {
+        return error_page("INVALID_LIMIT");
+    }
+    if let Some(cursor) = params.cursor.as_deref() {
+        let kind = format!("messages:{chat_id}");
+        if crate::tools::page_cursor::decode::<(String, i64)>(&kind, cursor).is_err() {
+            return error_page("INVALID_CURSOR");
+        }
+    }
     let session = match get_session("default") {
         Some(s) => s,
-        None => return Json(Vec::new()),
+        None => return empty_page(),
     };
     let logged_in_user = match &session.logged_in_user {
         Some(u) => u.clone(),
-        None => return Json(Vec::new()),
+        None => return empty_page(),
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if message_*.db files exist on disk without stored keys, re-extract
-    let on_disk = list_account_dbs(&logged_in_user);
-    let has_missing_message_db = on_disk.iter().any(|name| {
-        name.starts_with("message_")
-            && name.ends_with(".db")
-            && !name.contains("fts")
-            && !name.contains("resource")
-            && !keys.contains_key(name.as_str())
-    });
-    if has_missing_message_db {
-        if let Some(pid) = find_wechat_pid() {
-            let extracted = extract_keys_async(pid).await;
-            if !extracted.is_empty() {
-                let db = get_db();
-                store_keys(&db, &session.id, &logged_in_user, &extracted);
-                keys = get_stored_keys(&db, &session.id, &logged_in_user);
-            }
-        }
-    }
 
     if !keys.keys().any(|k| {
         k.starts_with("message_")
@@ -73,16 +70,24 @@ pub async fn list_messages(
             && !k.contains("fts")
             && !k.contains("resource")
     }) {
-        return Json(Vec::new());
+        return empty_page();
     }
 
-    Json(wechat_messages::list_messages(
+    let mut messages = wechat_messages::list_messages(
         &logged_in_user,
         &keys,
         &chat_id,
-        params.limit,
-        params.offset,
-    ))
+        params.limit + 1,
+        params.cursor.as_deref(),
+    );
+    let has_more = crate::tools::page_cursor::truncate_lookahead(&mut messages, params.limit);
+    let next_cursor = has_more.then(|| messages.last()).flatten().and_then(|message| {
+        crate::tools::page_cursor::encode(
+            &format!("messages:{chat_id}"),
+            (message.timestamp.clone(), message.local_id),
+        ).ok()
+    });
+    Json(serde_json::json!({ "schemaVersion": 1, "items": messages, "nextCursor": next_cursor })).into_response()
 }
 
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
@@ -111,26 +116,10 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         }
     };
 
-    let mut keys = {
+    let keys = {
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
-
-    // Lazy key extraction: if media_*.db files exist on disk without stored keys, extract them
-    let on_disk = list_account_dbs(&logged_in_user);
-    let has_missing_media = on_disk.iter().any(|name| {
-        name.starts_with("media_") && name.ends_with(".db") && !keys.contains_key(name.as_str())
-    });
-    if has_missing_media {
-        if let Some(pid) = find_wechat_pid() {
-            let extracted = extract_keys_async(pid).await;
-            if !extracted.is_empty() {
-                let db = get_db();
-                store_keys(&db, &session.id, &logged_in_user, &extracted);
-                keys = get_stored_keys(&db, &session.id, &logged_in_user);
-            }
-        }
-    }
 
     let image_keys = {
         let db = get_db();

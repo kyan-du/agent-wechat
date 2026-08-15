@@ -1235,6 +1235,34 @@ mod tests {
     }
 
     #[test]
+    fn reset_auth_data_is_transactional_and_session_scoped() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut conn = Connection::open(dir.path().join("auth-reset.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, logged_in_user TEXT, login_state TEXT, updated_at TEXT);
+             CREATE TABLE wechat_keys (session_id TEXT);
+             CREATE TABLE sync_state (session_id TEXT);
+             CREATE TABLE context (session_id TEXT);",
+        ).unwrap();
+        for id in ["target", "other"] {
+            conn.execute("INSERT INTO sessions VALUES (?1, 'wxid', 'logged_in', 't')", [id]).unwrap();
+            conn.execute("INSERT INTO wechat_keys VALUES (?1)", [id]).unwrap();
+            conn.execute("INSERT INTO sync_state VALUES (?1)", [id]).unwrap();
+            conn.execute("INSERT INTO context VALUES (?1)", [id]).unwrap();
+        }
+        reset_session_auth_data(&mut conn, "target").unwrap();
+        let target: (Option<String>, String) = conn.query_row("SELECT logged_in_user, login_state FROM sessions WHERE id = 'target'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(target, (None, "logged_out".to_string()));
+        for table in ["wechat_keys", "sync_state", "context"] {
+            let target_count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table} WHERE session_id = 'target'"), [], |row| row.get(0)).unwrap();
+            let other_count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table} WHERE session_id = 'other'"), [], |row| row.get(0)).unwrap();
+            assert_eq!(target_count, 0, "{table}");
+            assert_eq!(other_count, 1, "{table}");
+        }
+        assert_eq!(reset_session_auth_data(&mut conn, "missing"), Err("AUTH_RESET_SESSION_MISMATCH"));
+    }
+
+    #[test]
     fn clearing_missing_session_user_fails_closed() {
         let dir = tempfile::TempDir::new().unwrap();
         let conn = Connection::open(dir.path().join("session-user.db")).unwrap();
@@ -1273,4 +1301,20 @@ pub fn clear_session_data(conn: &Connection, session_id: &str) {
         params![session_id],
     )
     .ok();
+}
+
+pub fn reset_session_auth_data(conn: &mut Connection, session_id: &str) -> Result<(), &'static str> {
+    let tx = conn.transaction().map_err(|_| "AUTH_RESET_TX_FAILED")?;
+    tx.execute("DELETE FROM wechat_keys WHERE session_id = ?1", params![session_id])
+        .map_err(|_| "AUTH_RESET_KEYS_FAILED")?;
+    tx.execute("DELETE FROM sync_state WHERE session_id = ?1", params![session_id])
+        .map_err(|_| "AUTH_RESET_SYNC_FAILED")?;
+    tx.execute("DELETE FROM context WHERE session_id = ?1", params![session_id])
+        .map_err(|_| "AUTH_RESET_CONTEXT_FAILED")?;
+    let updated = tx.execute(
+        "UPDATE sessions SET logged_in_user = NULL, login_state = 'logged_out', updated_at = ?2 WHERE id = ?1",
+        params![session_id, sqlite_now()],
+    ).map_err(|_| "AUTH_RESET_SESSION_FAILED")?;
+    if updated != 1 { return Err("AUTH_RESET_SESSION_MISMATCH"); }
+    tx.commit().map_err(|_| "AUTH_RESET_COMMIT_FAILED")
 }

@@ -1,65 +1,6 @@
 import { z } from "zod";
 
 // ============================================
-// SESSIONS
-// ============================================
-
-export const sessionStatusSchema = z.enum([
-  "stopped",
-  "starting",
-  "running",
-  "stopping",
-  "error",
-]);
-
-export const sessionSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  linuxUser: z.string(),
-  display: z.string(),
-  dbusAddress: z.string().optional(),
-  vncPort: z.number().int(),
-  status: sessionStatusSchema,
-  loginState: z.lazy(() => loginStateSchema),
-  loggedInUser: z.string().optional(),
-  wechatPid: z.number().int().optional(),
-  xvfbPid: z.number().int().optional(),
-  dbusPid: z.number().int().optional(),
-  errorMessage: z.string().optional(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-
-export const createSessionParamsSchema = z.object({
-  name: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/, "Name must be alphanumeric with _ or -"),
-});
-
-export const sessionIdParamsSchema = z.object({
-  id: z.string().min(1),
-});
-
-export const sessionNameParamsSchema = z.object({
-  name: z.string().min(1),
-});
-
-export const dbSessionRowSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  linux_user: z.string(),
-  display: z.string(),
-  dbus_address: z.string().nullable(),
-  vnc_port: z.number().int(),
-  status: z.string(),
-  login_state: z.string(),
-  wechat_pid: z.number().int().nullable(),
-  xvfb_pid: z.number().int().nullable(),
-  dbus_pid: z.number().int().nullable(),
-  error_message: z.string().nullable(),
-  created_at: z.string(),
-  updated_at: z.string(),
-});
-
-// ============================================
 // CONTAINER LIFECYCLE
 // ============================================
 
@@ -261,10 +202,4 @@ export type SendResult = z.infer<typeof sendResultSchema>;
 export type GetMediaParams = z.infer<typeof getMediaParamsSchema>;
 export type MediaResult = z.infer<typeof mediaResultSchema>;
 export type AgentConfig = z.infer<typeof agentConfigSchema>;
-export type SessionStatus = z.infer<typeof sessionStatusSchema>;
-export type Session = z.infer<typeof sessionSchema>;
-export type CreateSessionParams = z.infer<typeof createSessionParamsSchema>;
-export type SessionIdParams = z.infer<typeof sessionIdParamsSchema>;
-export type SessionNameParams = z.infer<typeof sessionNameParamsSchema>;
-export type DbSessionRow = z.infer<typeof dbSessionRowSchema>;
 export type LoginSubscriptionEvent = z.infer<typeof loginSubscriptionEventSchema>;

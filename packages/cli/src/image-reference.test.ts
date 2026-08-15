@@ -8,6 +8,7 @@ import { localBuildImage, validatePublishedImageReference } from "./image-refere
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const cli = fs.readFileSync(path.join(repo, "packages/cli/src/cli.ts"), "utf8");
+const lifecycle = fs.readFileSync(path.join(repo, "packages/cli/src/lifecycle.ts"), "utf8");
 
 test("accepts exact fork semver tags and sha256 digests", () => {
   const tag = "ghcr.io/kyan-du/agent-wechat:1.2.3-rc.1";
@@ -30,16 +31,17 @@ test("default CLI path selects a usable local build and never falls back to a re
   assert.equal(localBuildImage("darwin", "arm64"), "agent-wechat:arm64");
   assert.equal(localBuildImage("linux", "x64"), "agent-wechat:amd64");
   assert.doesNotMatch(cli, /return `\$\{GHCR_IMAGE\}:\$\{VERSION\}`/);
-  assert.match(cli, /opts\.image \? validatePublishedImageReference\(opts\.image\) : getImageTag\(\)/);
+  assert.match(cli, /localDefault: localBuildImage\(\)/);
+  assert.match(lifecycle, /inventory\?\.imageDigest \|\| options\.localDefault/);
 });
 
 test("Docker operations preserve the selected image as one argv value", () => {
-  assert.match(cli, /execFileSync\("docker", \["image", "inspect", image\]/);
-  assert.match(cli, /execFileSync\("docker", \["pull", image\]/);
-  assert.doesNotMatch(cli, /execSync\(`docker (?:pull|image inspect) \$\{image\}`/);
+  assert.match(lifecycle, /execFileSync\("docker", \["image", "inspect", reference\]/);
+  assert.match(lifecycle, /docker\(\["pull", requested\]/);
+  assert.doesNotMatch(lifecycle, /execSync\(`docker (?:pull|image inspect)/);
 });
 
-test("checked-in Compose release boundary uses the local build image", () => {
+test("checked-in Compose release boundary uses the local build image", { skip: (() => { try { execFileSync("docker", ["version"], { stdio: "ignore" }); return false; } catch { return "docker is not available"; } })() }, () => {
   const compose = fs.readFileSync(path.join(repo, "docker-compose.yml"), "utf8");
   assert.match(compose, /^\s*image: agent-wechat:\$\{AGENT_WECHAT_ARCH:-amd64\}$/m);
   assert.doesNotMatch(compose, /<version>|ghcr\.io\/kyan-du/);

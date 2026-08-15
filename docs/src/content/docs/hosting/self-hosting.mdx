@@ -58,9 +58,9 @@ docker compose up -d
 Or with the CLI:
 
 ```bash
-pnpm cli down
+pnpm cli stop
 docker pull agent-wechat:${AGENT_WECHAT_ARCH:-amd64}
-pnpm cli up
+pnpm cli start
 ```
 
 After updating, the WeChat session usually persists. Scan the QR code in WeChat if prompted.

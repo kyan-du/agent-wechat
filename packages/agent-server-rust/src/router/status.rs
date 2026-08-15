@@ -36,7 +36,8 @@ pub async fn get_status() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "container": "running",
         "loginState": { "status": login_status },
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
+        "apiVersion": 1,
         "outbound": crate::outbound::outbound_sender().status(),
     }))
 }
@@ -295,6 +296,25 @@ pub async fn logout() -> Json<serde_json::Value> {
         "success": result.success,
         "error": result.error
     }))
+}
+
+pub async fn reset_auth() -> Json<serde_json::Value> {
+    let session = match get_session("default") {
+        Some(session) => session,
+        None => return Json(serde_json::json!({ "success": false, "errorCode": "SESSION_NOT_FOUND", "error": "default session not found" })),
+    };
+    let stopped = crate::sessions::manager::stop_session(&session.id).await;
+    if stopped.is_err() {
+        return Json(serde_json::json!({ "success": false, "errorCode": "AUTH_RESET_STOP_FAILED", "error": "could not stop WeChat session" }));
+    }
+    let reset = {
+        let mut db = get_db();
+        crate::db::queries::reset_session_auth_data(&mut db, &session.id)
+    };
+    match reset {
+        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Err(code) => Json(serde_json::json!({ "success": false, "errorCode": code, "error": "authentication state reset failed" })),
+    }
 }
 
 pub async fn login() -> Json<serde_json::Value> {

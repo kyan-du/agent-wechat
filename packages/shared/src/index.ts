@@ -8,17 +8,11 @@ export {
   type WeChatClientOptions,
   type StatusResponse,
   type AuthStatus,
+  type CursorPage,
 } from "./client.js";
 
 // Export schemas (but not the inferred types which duplicate types/)
 export {
-  // Session schemas
-  sessionStatusSchema,
-  sessionSchema,
-  createSessionParamsSchema,
-  sessionIdParamsSchema,
-  sessionNameParamsSchema,
-  dbSessionRowSchema,
   // Container lifecycle schemas
   upParamsSchema,
   upResultSchema,
