@@ -20,6 +20,7 @@ import {
   AppConfig
 } from "./lib/session";
 import { downloadWeChatDeb, resolveWeChatArch } from "./lib/download";
+import { localBuildImage, validateImageReference } from "./lib/image";
 
 interface ParsedArgs {
   args: string[];
@@ -74,7 +75,7 @@ Commands:
 
 Options:
   --data-dir <path>  Override data directory
-  --image <name>     Docker image (default: ghcr.io/kyan-du/agent-wechat:0.11.15)
+  --image <ref>      Local architecture image, or explicit fork semver/digest
   --arch <arch>      Download arch override (x64 or arm64)
   --token <token>    API token override for serve
 `);
@@ -203,12 +204,6 @@ async function dockerBuild(image: string, flags: Record<string, string | boolean
   }
 }
 
-function resolveLocalArchTag(): string {
-  const arch = resolveWeChatArch();
-  const suffix = arch === "x64" ? "amd64" : "arm64";
-  return `agent-wechat:${suffix}`;
-}
-
 function dockerImageExists(image: string): boolean {
   const result = execDocker(["image", "inspect", image]);
   return result.exitCode === 0;
@@ -216,24 +211,7 @@ function dockerImageExists(image: string): boolean {
 
 function resolveStartImage(session: SessionConfig, flags: Record<string, string | boolean>): string {
   const override = flags.image;
-  if (typeof override === "string") {
-    return override;
-  }
-
-  const localArchTag = resolveLocalArchTag();
-  const localExists = dockerImageExists(localArchTag);
-  if (localExists) {
-    return localArchTag;
-  }
-
-  return session.image;
-}
-
-function tryPullImage(image: string): void {
-  const result = execDocker(["pull", image], { stdio: "inherit" });
-  if (result.exitCode !== 0) {
-    throw new Error(`failed to pull image ${image}`);
-  }
+  return validateImageReference(typeof override === "string" ? override : session.image);
 }
 
 function containerExists(containerName: string): boolean {
@@ -267,13 +245,9 @@ async function startContainer(session: SessionConfig, image: string, build: bool
   }
 
   if (!containerExists(session.containerName) && !dockerImageExists(image)) {
-    try {
-      tryPullImage(image);
-    } catch (error) {
-      console.error(String(error));
-      console.error("image not found locally. build it with `pnpm run build:image:local` or pass --image.");
-      process.exit(1);
-    }
+    console.error(`image ${image} was not found locally; no registry fallback was attempted.`);
+    console.error("Build it with `pnpm build:image` (or `pnpm build:image:arm64` / `pnpm build:image:amd64`), then retry. After P1-B publishes a verified image, pass its exact semver or digest with --image.");
+    process.exit(1);
   }
 
   if (containerExists(session.containerName)) {
@@ -455,8 +429,9 @@ function fileHash(filePath: string): string {
 }
 
 function ensureSessionPersisted(dataDir: string, sessionName: string, flags: Record<string, string | boolean>): SessionConfig {
+  const requestedImage = typeof flags.image === "string" ? validateImageReference(flags.image) : undefined;
   const session = ensureSession(dataDir, sessionName, {
-    image: typeof flags.image === "string" ? flags.image : undefined
+    image: requestedImage
   });
   session.dataRoot = dataDir;
   saveSession(dataDir, sessionName, session);

@@ -32,6 +32,9 @@ jobs:
               - 'MAINTENANCE.md'
               - 'SECURITY.md'
               - '.github/dependabot.yml'
+              - 'src/**'
+              - 'scripts/validate-release-boundary.mjs'
+              - '.github/workflows/docker-rebuild.yml'
               - '.github/workflows/ci.yml'
             rust:
               - 'packages/agent-server-rust/**'
@@ -71,6 +74,11 @@ jobs:
 
       - name: Test (all packages)
         run: pnpm -r --if-present test
+
+      - name: Guard unreleased channels and root CLI image behavior
+        run: |
+          pnpm test:release-boundary
+          pnpm test:root-cli-image
 
       - name: Lint availability
         run: |

@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { localBuildImage, validateImageReference } from "./image";
 import { ensureDir } from "./paths";
 
 export interface SessionConfig {
@@ -79,7 +80,8 @@ export function ensureSession(dataDir: string, sessionName: string, overrides: P
     return { ...existing, ...overrides };
   }
 
-  const defaultImage = process.env.WECHAT_DOCKER_IMAGE || "ghcr.io/kyan-du/agent-wechat:0.11.15";
+  const configuredImage = process.env.WECHAT_DOCKER_IMAGE;
+  const defaultImage = configuredImage ? validateImageReference(configuredImage) : localBuildImage();
   const session: SessionConfig = {
     name: sessionName,
     containerName: `agent-wechat-${sessionName}`,
