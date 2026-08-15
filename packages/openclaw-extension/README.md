@@ -29,7 +29,7 @@ git clone https://github.com/kyan-du/agent-wechat.git
 cd agent-wechat
 corepack enable && pnpm install --frozen-lockfile
 pnpm build && pnpm build:image
-pnpm cli -- up
+pnpm cli up
 ```
 
 **Option B: Docker Compose** (production / networked)

@@ -20,10 +20,10 @@ description: Common issues and how to fix them.
    - **Increase disk space** on the host
    - **Wipe WeChat data** and start fresh (you'll need to re-scan the QR code):
      ```bash
-     pnpm cli -- down
+     pnpm cli down
      docker volume rm agent-wechat-home
-     pnpm cli -- up
-     pnpm cli -- auth login
+     pnpm cli up
+     pnpm cli auth login
      ```
 
 **Prevention**: Monitor disk usage and provision enough storage. 10 GB is a minimum; active accounts may need 20 GB+.
@@ -40,7 +40,7 @@ description: Common issues and how to fix them.
 2. If there's an unexpected dialog, you may need to dismiss it manually via VNC
 3. Restart the container:
    ```bash
-   pnpm cli -- down && pnpm cli -- up
+   pnpm cli down && pnpm cli up
    ```
 
 ## Not receiving new messages
@@ -56,22 +56,22 @@ description: Common issues and how to fix them.
 
 1. Check login status:
    ```bash
-   pnpm cli -- auth status
+   pnpm cli auth status
    ```
 
 2. Check the VNC viewer to see the UI state
 
 3. Restart the container:
    ```bash
-   pnpm cli -- down && pnpm cli -- up
+   pnpm cli down && pnpm cli up
    ```
 
 4. If restarting doesn't help, wipe WeChat data and re-login:
    ```bash
-   pnpm cli -- down
+   pnpm cli down
    docker volume rm agent-wechat-home
-   pnpm cli -- up
-   pnpm cli -- auth login
+   pnpm cli up
+   pnpm cli auth login
    ```
 
 ## Container won't start

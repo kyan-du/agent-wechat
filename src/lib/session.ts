@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { localBuildImage, migrateSessionImage, validateImageReference } from "./image";
-import { ensureDir } from "./paths";
+import { localBuildImage, migrateSessionImage, validateImageReference } from "./image.ts";
+import { ensureDir } from "./paths.ts";
 
 export interface SessionConfig {
   name: string;
@@ -62,7 +62,7 @@ export function loadSession(dataDir: string, sessionName: string): SessionConfig
     if (normalized.migrated) saveSession(dataDir, sessionName, session);
   } catch {
     throw new Error(
-      `Session ${sessionName} has unsafe image reference ${JSON.stringify(session.image)}. Recover with --image agent-wechat:${process.arch === "arm64" ? "arm64" : "amd64"}, or an exact published fork semver/digest.`,
+      `Session ${sessionName} has unsafe image reference ${JSON.stringify(session.image)}. Delete the persisted root-CLI session data and authenticate again.`,
     );
   }
   return session;

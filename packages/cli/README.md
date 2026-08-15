@@ -16,7 +16,32 @@ corepack enable && pnpm install --frozen-lockfile
 pnpm build && pnpm build:image
 ```
 
-Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli -- <arguments>` from this checkout.
+Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli <arguments>` from this checkout.
+
+### Migrating an older global CLI installation
+
+Repository history identifies the former CLI package as `@thisnick/agent-wechat-cli` and both packages expose the same `wx` binary. Remove the former global package before installing the fork package, so the active `wx` executable is unambiguous:
+
+```bash
+npm uninstall -g @thisnick/agent-wechat-cli
+```
+
+The fork package is not published yet, so do not try to install it globally. Use the source checkout above. If the historical root CLI left an unsafe persisted session, do not repair or migrate it: remove its session directory and authenticate fresh.
+
+First stop any old agent-wechat containers. Then delete **only** the root CLI's `sessions` directory at the source-defined data location (this removes its saved WeChat session data):
+
+- macOS: `rm -rf "$HOME/Library/Application Support/agent-wechat/sessions"`
+- Linux: `rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/agent-wechat/sessions"`
+- Windows PowerShell: `Remove-Item -Recurse -Force "$([Environment]::GetFolderPath('ApplicationData'))\agent-wechat\sessions" -ErrorAction SilentlyContinue`
+
+From the built checkout, start clean and scan a new login QR code:
+
+```bash
+pnpm cli up
+pnpm cli auth login
+```
+
+After a future P1-B has actually published and verified `@kyan-du/agent-wechat-cli`, the global equivalent will be `npm install -g @kyan-du/agent-wechat-cli`, followed by `wx up` and `wx auth login`.
 
 ## Prerequisites
 
@@ -30,21 +55,21 @@ Until P1-B publishes and verifies npm/GHCR, run every CLI command as `pnpm cli -
 
 ```bash
 # Start the container
-pnpm cli -- up
+pnpm cli up
 
 # Check status
-pnpm cli -- status
+pnpm cli status
 
 # Log in (displays QR code in terminal)
-pnpm cli -- auth login
+pnpm cli auth login
 
 # List chats
-pnpm cli -- chats list
+pnpm cli chats list
 
 # Send a message
-pnpm cli -- messages send <chatId> --text "Hello"
+pnpm cli messages send <chatId> --text "Hello"
 # Only after reviewing a SIMILAR_CONTENT_CONFIRMATION_REQUIRED response:
-pnpm cli -- messages send <chatId> --text "Reviewed text" --confirm-similar
+pnpm cli messages send <chatId> --text "Reviewed text" --confirm-similar
 ```
 
 ## Commands
@@ -147,7 +172,7 @@ There are two ways to run the agent-wechat container.
 The simplest way. `wx up` starts the architecture-specific local image (or pulls only an explicitly selected fork semver/digest) with the right flags, volume mounts, and auth token:
 
 ```bash
-pnpm cli -- up
+pnpm cli up
 ```
 
 This starts a container named `agent-wechat` with:
@@ -158,7 +183,7 @@ This starts a container named `agent-wechat` with:
 To route all container traffic through a proxy:
 
 ```bash
-pnpm cli -- up --proxy user:pass@host:port
+pnpm cli up --proxy user:pass@host:port
 ```
 
 This sets up a transparent proxy (redsocks + iptables) inside the container — invisible to WeChat. Prefix with `socks5://` for SOCKS5 proxies.

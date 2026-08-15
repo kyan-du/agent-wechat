@@ -5,6 +5,12 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const failures = [];
+const retiredRegistryNamespace = ["ghcr.io", "agent-wechat", "agent-wechat"].join("/");
+for (const path of execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean)) {
+  if (!existsSync(path)) continue;
+  const bytes = readFileSync(path);
+  if (bytes.includes(Buffer.from(retiredRegistryNamespace))) failures.push(`${path} contains a retired registry namespace`);
+}
 const requireRendered = process.argv.includes("--require-rendered");
 const P1B_GATE = /Release boundary:[^\n]{0,240}P1-B[^\n]{0,160}(?:unavailable|not available|publishes?|verif)/i;
 const OLD_NAMESPACE = /ghcr\.io\/thisnick\/agent-wechat/i;
