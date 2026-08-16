@@ -22,7 +22,6 @@ import json
 import os
 import re
 import select
-import shutil
 
 # ── Per-build constants ──────────────────────────────────────────────────────
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
@@ -65,6 +64,18 @@ BUILD_PROFILES = {
         "CUR_SESS_UNAME_OFF": 0x120,
         "VEC_KEY_OFF": 0x158,
     },
+    # WeChat Linux v4.1.1.8 aarch64 (BuildID: 9a3558be...)
+    "9a3558be": {
+        "ARCH": "aarch64",
+        "SELECT_SESSION": 0x3939ff8,
+        "USERNAME_OFF": 0x120,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x7db5570,
+        "CTRL_OFF": 0xd8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x120,
+        "VEC_KEY_OFF": 0x158,
+    },
     # WeChat Linux 4.x x86_64 (BuildID: eba86b80...)
     "eba86b80": {
         "ARCH": "x86_64",
@@ -80,7 +91,12 @@ BUILD_PROFILES = {
     },
 }
 
-FRIDA_BIN = shutil.which("frida") or "/usr/local/bin/frida"
+FRIDA_PYTHON_BOOTSTRAP = (
+    "import typing, typing_extensions; "
+    "typing.NotRequired = getattr(typing, 'NotRequired', typing_extensions.NotRequired); "
+    "typing.Required = getattr(typing, 'Required', typing_extensions.Required); "
+    "from frida_tools.repl import main; main()"
+)
 FRIDA_ENUM_TIMEOUT = 10
 FRIDA_READY_TIMEOUT = 5
 FRIDA_HOOK_TIMEOUT = 4
@@ -166,12 +182,41 @@ def get_profile(pid):
     if not build_id:
         return None, "Could not read WeChat BuildID"
     prefix = build_id[:8]
-    log(f"[chat-select] Build profile matched={prefix in BUILD_PROFILES}")
-    profile = BUILD_PROFILES.get(prefix)
+    profile = profile_for_build_id(build_id)
+    log(f"[chat-select] Build profile matched={profile is not None}")
     if not profile:
         return None, "Unsupported WeChat build"
     log(f"[chat-select] Profile arch={profile['ARCH']}")
     return profile, None
+
+
+def profile_for_build_id(build_id):
+    """Look up a build profile by a full BuildID string."""
+    if not build_id:
+        return None
+    return BUILD_PROFILES.get(build_id[:8])
+
+
+def frida_command(pid, script_path, quiet=False):
+    """Build a Frida CLI command with a Python 3.10 typing shim.
+
+    frida 17.x imports Required/NotRequired from typing, which is only native
+    in Python 3.11+. Ubuntu 22.04 runs Python 3.10, so invoke the CLI through a
+    tiny bootstrap that exposes the typing_extensions backports first.
+    """
+    args = [
+        sys.executable,
+        "-c",
+        FRIDA_PYTHON_BOOTSTRAP,
+        "-p",
+        pid,
+        "-l",
+        script_path,
+        "--runtime=v8",
+    ]
+    if quiet:
+        args.append("-q")
+    return args
 
 
 def find_chat_item_from_a11y():
@@ -321,7 +366,7 @@ def run_frida_script(pid, script_path, timeout=FRIDA_ENUM_TIMEOUT, stop_on="SCRI
     record_frida_attach()
     try:
         proc = subprocess.Popen(
-            [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8", "-q"],
+            frida_command(pid, script_path, quiet=True),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE, text=True, bufsize=1,
         )
@@ -352,7 +397,7 @@ def run_frida_bg(pid, script_path):
     record_frida_attach()
     try:
         proc = subprocess.Popen(
-            [FRIDA_BIN, "-p", pid, "-l", script_path, "--runtime=v8"],
+            frida_command(pid, script_path),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE, text=True, bufsize=1,
         )
