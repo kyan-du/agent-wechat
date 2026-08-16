@@ -57,7 +57,10 @@ recorded by source, package architecture, and SHA-256, and the build verifies
 hash plus Debian package metadata before installation. Local payloads remain
 excluded from the Docker context and are not committed.
 
-`scripts/validate-release-inputs.mjs` enforces an independent closed positive policy: a code-anchored canonical digest covers the complete normalized Dockerfile instruction graph, in order across every stage, and a separate canonical digest binds the strict manifest (base roles, snapshot, source URL/hash/version, locked wheels, and notice paths). The adjacent instruction listing is derived diagnostic data only and cannot authorize changes. `scripts/test-release-inputs.mjs` proves all prior mutations plus coordinated Dockerfile/listing bypasses (urllib shell/JSON, token splitting, lowercase instructions, SHELL/ONBUILD indirection, package managers, Git-context ADD, local executable invocation, and artifact overwrite) fail closed. Docker CI remains build-only for amd64 and arm64;
+`scripts/validate-release-inputs.mjs` checks the complete allowlisted
+Dockerfile input graph, manifest, local wheel hash, and workflow consistency.
+`scripts/test-release-inputs.mjs` proves digest, repository, apt/pip injection,
+verification, package-metadata, wheel, cache, and notice drift fail closed. Docker CI remains build-only for amd64 and arm64;
 it has no registry permissions or publication step.
 
 **Publication remains blocked.** Immutable provenance and retained third-party
