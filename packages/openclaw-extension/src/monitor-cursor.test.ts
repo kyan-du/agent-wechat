@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
-import { equalCursorUnreadKey, selectCursorMessages } from "./monitor-cursor.ts";
+import { markCursorMessagesHandled, selectCursorMessages } from "./monitor-cursor.ts";
 
 function chat(overrides: Partial<Chat>): Chat {
   return {
@@ -25,9 +25,21 @@ function message(localId: number): Message {
   };
 }
 
-test("restored cursor equal to first unread localId is selected once", () => {
+function advanceToHandledMessages(
+  chatId: string,
+  lastSeen: Map<string, number>,
+  equalCursorUnreadHandled: Set<string>,
+  messages: Message[],
+): void {
+  const cursor = markCursorMessagesHandled(chatId, messages, equalCursorUnreadHandled);
+  if (cursor !== undefined) {
+    lastSeen.set(chatId, cursor);
+  }
+}
+
+test("restored cursor equal to first unread localId recovers exactly once", () => {
   const lastSeen = new Map([["wxid_first", 1]]);
-  const equalCursorUnreadDispatched = new Set<string>();
+  const equalCursorUnreadHandled = new Set<string>();
   const unreadChat = chat({ unreadCount: 1, lastMsgLocalId: 1 });
   const messages = [message(1)];
 
@@ -36,20 +48,100 @@ test("restored cursor equal to first unread localId is selected once", () => {
     unreadChat,
     messages,
     lastSeen,
-    equalCursorUnreadDispatched,
+    equalCursorUnreadHandled,
   );
   assert.equal(first.firstPoll, false);
   assert.deepEqual(first.messages.map((m) => m.localId), [1]);
 
-  equalCursorUnreadDispatched.add(equalCursorUnreadKey("wxid_first", 1));
+  advanceToHandledMessages("wxid_first", lastSeen, equalCursorUnreadHandled, first.messages);
   const second = selectCursorMessages(
     "wxid_first",
     unreadChat,
     messages,
     lastSeen,
-    equalCursorUnreadDispatched,
+    equalCursorUnreadHandled,
   );
   assert.deepEqual(second.messages, []);
+});
+
+test("normal first dispatch followed by stale unread snapshot does not redispatch", () => {
+  const lastSeen = new Map<string, number>();
+  const equalCursorUnreadHandled = new Set<string>();
+
+  const first = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 10 }),
+    [message(10)],
+    lastSeen,
+    equalCursorUnreadHandled,
+  );
+  assert.equal(first.firstPoll, true);
+  assert.deepEqual(first.messages.map((m) => m.localId), [10]);
+
+  advanceToHandledMessages("wxid_first", lastSeen, equalCursorUnreadHandled, first.messages);
+  const stale = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 10 }),
+    [message(10)],
+    lastSeen,
+    equalCursorUnreadHandled,
+  );
+  assert.deepEqual(stale.messages, []);
+});
+
+test("catch-up cursor advancement blocks later stale equal-cursor unread", () => {
+  const lastSeen = new Map([["wxid_first", 3]]);
+  const equalCursorUnreadHandled = new Set<string>();
+
+  const catchup = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 5 }),
+    [message(4), message(5)],
+    lastSeen,
+    equalCursorUnreadHandled,
+  );
+  assert.deepEqual(catchup.messages.map((m) => m.localId), [4, 5]);
+
+  advanceToHandledMessages("wxid_first", lastSeen, equalCursorUnreadHandled, catchup.messages);
+  const stale = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 5 }),
+    [message(5)],
+    lastSeen,
+    equalCursorUnreadHandled,
+  );
+  assert.deepEqual(stale.messages, []);
+});
+
+test("restart keeps restored equal-cursor recovery available once", () => {
+  const restoredLastSeen = new Map([["wxid_first", 7]]);
+  const restartedEqualCursorUnreadHandled = new Set<string>();
+  const unreadChat = chat({ unreadCount: 1, lastMsgLocalId: 7 });
+  const messages = [message(7)];
+
+  const recovered = selectCursorMessages(
+    "wxid_first",
+    unreadChat,
+    messages,
+    restoredLastSeen,
+    restartedEqualCursorUnreadHandled,
+  );
+  assert.deepEqual(recovered.messages.map((m) => m.localId), [7]);
+
+  advanceToHandledMessages(
+    "wxid_first",
+    restoredLastSeen,
+    restartedEqualCursorUnreadHandled,
+    recovered.messages,
+  );
+  const repeated = selectCursorMessages(
+    "wxid_first",
+    unreadChat,
+    messages,
+    restoredLastSeen,
+    restartedEqualCursorUnreadHandled,
+  );
+  assert.deepEqual(repeated.messages, []);
 });
 
 test("normal non-first polls only select ids above the cursor", () => {
