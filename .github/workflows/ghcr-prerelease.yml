@@ -133,4 +133,4 @@ jobs:
           for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
           docker buildx imagetools create --tag "$IMAGE:$VERSION" "${refs[@]}"
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .}}' > manifest.json
-          node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ps=(j.manifest?.manifests??j.manifests??[]).map(x=>`${x.platform?.os}/${x.platform?.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`platforms: ${ps}`)'
+          node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ms=j.manifest?.manifests??j.manifests??[];const images=ms.filter(x=>x.platform?.os!=="unknown");const ps=images.map(x=>`${x.platform?.os}/${x.platform?.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`image platforms: ${ps}`);if(ms.some(x=>x.platform?.os==="unknown"&&x.annotations?.["vnd.docker.reference.type"]!=="attestation-manifest"))throw Error("unexpected unknown platform descriptor")'
