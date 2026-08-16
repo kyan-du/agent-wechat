@@ -10,6 +10,13 @@ export QT_LINUX_ACCESSIBILITY_ALWAYS_ON=${QT_LINUX_ACCESSIBILITY_ALWAYS_ON:-1}
 export GTK_MODULES=${GTK_MODULES:-gail:atk-bridge}
 export WECHAT_HOME=${WECHAT_HOME:-/home/wechat}
 
+# Named volumes are initialized before the image's user metadata is applied and
+# may therefore arrive root-owned. WeChat must be able to create ~/.xwechat.
+if [ "$(id -u)" -eq 0 ]; then
+  mkdir -p "$WECHAT_HOME"
+  chown wechat:wechat "$WECHAT_HOME"
+fi
+
 # ============================================
 # Persistent device identity (before WeChat starts)
 # ============================================
