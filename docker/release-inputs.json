@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "baseImages": {
+    "builder": {
+      "reference": "rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31",
+      "providedPackages": {
+        "pkg-config": "1.8.1-1"
+      },
+      "providedFiles": [
+        "/etc/ssl/certs/ca-certificates.crt"
+      ]
+    },
+    "runtime": {
+      "reference": "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
+    }
+  },
+  "sources": {
+    "novnc": {
+      "version": "1.5.0",
+      "url": "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz",
+      "sha256": "6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a"
+    },
+    "sqlcipher": {
+      "version": "4.6.1",
+      "url": "https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz",
+      "sha256": "d8f9afcbc2f4b55e316ca4ada4425daf3d0b4aab25f45e11a802ae422b9f53a3"
+    },
+    "wechat": {
+      "version": "4.1.1.8",
+      "artifacts": {
+        "amd64": {
+          "packageArchitecture": "amd64",
+          "url": "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb",
+          "sha256": "c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b"
+        },
+        "arm64": {
+          "packageArchitecture": "arm64",
+          "url": "https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb",
+          "sha256": "c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f"
+        }
+      }
+    }
+  },
+  "apt": {
+    "snapshot": "20260801T000000Z",
+    "url": "https://snapshot.ubuntu.com/ubuntu"
+  },
+  "python": {
+    "lockFile": "release-materials/requirements.lock",
+    "installerFlags": [
+      "--require-hashes",
+      "--only-binary=:all:",
+      "--find-links=/opt/release-inputs"
+    ],
+    "localArtifacts": {
+      "frida-tools": {
+        "file": "release-materials/frida_tools-14.10.4-py3-none-any.whl",
+        "sha256": "8e4e7375053f16803cdd6585d4b56a322ee426290385c4a675f669a479547f50"
+      }
+    }
+  }
+}

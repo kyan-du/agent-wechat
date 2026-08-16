@@ -9,6 +9,13 @@ on:
       - 'docker/**'
       - 'packages/agent-server-rust/**'
       - 'scripts/validate-release-boundary.mjs'
+      - 'docker/release-inputs.json'
+      - 'docker/release-instruction-allowlist.json'
+      - 'docker/release-materials/requirements.lock'
+      - 'docker/release-materials/frida_tools-14.10.4-py3-none-any.whl'
+      - 'scripts/validate-release-inputs.mjs'
+      - 'scripts/test-release-inputs.mjs'
+      - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
   push:
     branches: [main]
@@ -16,6 +23,13 @@ on:
       - 'docker/**'
       - 'packages/agent-server-rust/**'
       - 'scripts/validate-release-boundary.mjs'
+      - 'docker/release-inputs.json'
+      - 'docker/release-instruction-allowlist.json'
+      - 'docker/release-materials/requirements.lock'
+      - 'docker/release-materials/frida_tools-14.10.4-py3-none-any.whl'
+      - 'scripts/validate-release-inputs.mjs'
+      - 'scripts/test-release-inputs.mjs'
+      - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
 
 permissions:
@@ -28,6 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: node scripts/validate-release-boundary.mjs
+      - run: node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs
 
   build:
     name: Build only (${{ matrix.arch }})
