@@ -35,5 +35,16 @@
       }
     }
   },
-  "noticeDirectory": "/usr/share/doc/agent-wechat/licenses"
+  "noticeDirectory": "/usr/share/doc/agent-wechat/licenses",
+  "apt": {
+    "snapshot": "20260201T000000Z",
+    "url": "https://snapshot.ubuntu.com/ubuntu"
+  },
+  "python": {
+    "lockFile": "release-materials/requirements.lock",
+    "installerFlags": [
+      "--require-hashes",
+      "--only-binary=:all:"
+    ]
+  }
 }

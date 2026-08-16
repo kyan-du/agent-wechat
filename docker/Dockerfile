@@ -35,6 +35,10 @@ FROM ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Immutable Ubuntu archive snapshot; Valid-Until is intentionally disabled because the snapshot is frozen.
+ARG UBUNTU_SNAPSHOT=20260201T000000Z
+RUN printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-updates main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-security main restricted universe multiverse\n' "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" > /etc/apt/sources.list
+
 # ============================================
 # System packages
 # ============================================
@@ -74,7 +78,8 @@ RUN apt-get update && apt-get install -y \
 # ============================================
 # Python packages
 # ============================================
-RUN pip3 install frida-tools silk-python
+COPY release-materials/requirements.lock /opt/release-inputs/requirements.lock
+RUN pip3 install --require-hashes --only-binary=:all: -r /opt/release-inputs/requirements.lock
 
 # ============================================
 # noVNC (browser-based VNC viewer) + websockify
@@ -82,8 +87,7 @@ RUN pip3 install frida-tools silk-python
 ARG NOVNC_VERSION=1.5.0
 ARG NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
 ARG NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a
-RUN pip3 install websockify \
-    && curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
+RUN curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
     && echo "$NOVNC_SHA256  /tmp/novnc.tar.gz" | sha256sum --check --strict \
     && tar xzf /tmp/novnc.tar.gz -C /opt \
     && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc \
