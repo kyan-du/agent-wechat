@@ -3,20 +3,51 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 const read=p=>readFileSync(new URL(`../${p}`,import.meta.url),'utf8');
-const manifest=JSON.parse(read('docker/release-inputs.json'));
-const instructionAllowlist=JSON.parse(read('docker/release-instruction-allowlist.json'));
+// JSON.parse silently accepts duplicate keys (last value wins). Release policy files
+// are authority inputs, so reject duplicates before parsing them.
+const parseStrictJson=(text,label)=>{
+  let i=0; const fail=message=>{throw new Error(`${label}: ${message} at byte ${i}`);};
+  const ws=()=>{while(/\s/.test(text[i]??''))i++;};
+  const string=()=>{const start=i;if(text[i++]!=='"')fail('expected string');for(;i<text.length;i++){if(text[i]==='\\'){i++;continue;}if(text[i]==='"'){i++;try{return JSON.parse(text.slice(start,i));}catch{fail('invalid string');}}}fail('unterminated string');};
+  const value=()=>{ws();if(text[i]==='{')return object();if(text[i]==='[')return array();if(text[i]==='"')return string();const m=text.slice(i).match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/);if(!m)fail('invalid value');i+=m[0].length;return JSON.parse(m[0]);};
+  const object=()=>{const out={},seen=new Set();i++;ws();if(text[i]==='}'){i++;return out;}for(;;){ws();const key=string();if(seen.has(key))fail(`duplicate key ${JSON.stringify(key)}`);seen.add(key);ws();if(text[i++]!==':')fail('expected colon');out[key]=value();ws();const c=text[i++];if(c==='}')return out;if(c!==',')fail('expected comma or closing brace');}};
+  const array=()=>{const out=[];i++;ws();if(text[i]===']'){i++;return out;}for(;;){out.push(value());ws();const c=text[i++];if(c===']')return out;if(c!==',')fail('expected comma or closing bracket');}};
+  const result=value();ws();if(i!==text.length)fail('trailing content');return result;
+};
+const manifest=parseStrictJson(read('docker/release-inputs.json'),'release-inputs.json');
+const instructionAllowlist=parseStrictJson(read('docker/release-instruction-allowlist.json'),'release-instruction-allowlist.json');
 const raw=read('docker/Dockerfile');
 const workflow=read('.github/workflows/docker-rebuild.yml');
 const lock=read(`docker/${manifest.python.lockFile}`);
 const instructions=[]; let current='';
+for(const line of raw.split(/\r?\n/))assert.doesNotMatch(line,/^\s*#\s*(?:syntax|escape|check)\s*=/i,'Docker parser directives are forbidden');
 for(const source of raw.split(/\r?\n/)){const line=source.replace(/\s+#.*$/,'').trim();if(!line||(!current&&line.startsWith('#')))continue;current+=(current?' ':'')+line.replace(/\\$/,'').trim();if(!line.endsWith('\\')){instructions.push(current.replace(/\s+/g,' '));current='';}}
 assert.equal(current,'','unterminated Docker instruction');
 assert.equal(instructionAllowlist.schemaVersion,1);
+const keys=(value,expected,label)=>assert.deepEqual(Object.keys(value).sort(),[...expected].sort(),`${label}: authoritative fields drifted`);
+keys(instructionAllowlist,['schemaVersion','instructions'],'instruction allowlist');
+assert.ok(Array.isArray(instructionAllowlist.instructions)&&instructionAllowlist.instructions.every(x=>typeof x==='string'),'instruction allowlist must contain strings');
 assert.deepEqual(instructions,instructionAllowlist.instructions,'effective Docker instruction graph is not exactly allowlisted');
+// This policy is deliberately independent of the mutable allowlist. Any instruction
+// that can fetch or install content must remain one of these reviewed semantics.
+const approvedSensitiveInstructionHashes=new Set([
+  'ba45fa654185163d06d04e7f70994f03728b5f34ffb0cc04be9719f5927c5919', // runtime packages
+  '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
+  '37e36f1c351c0e2ac331cde6312c4a29e295195b5925f55015f33a2d923f48be', // noVNC
+  'b8503078e0209a9b88097c0033abc09a9fc9a9aeda6ac1c3b460f31133328869', // SQLCipher
+  '62f5855ebd13501fb39e0ec32750d14ec11fec98641f8f66ede8d4a25bfc109a', // WeChat
+  '5d9641c7a8ed47f58706396e3b1f4202cd45a6ac7e5c2339ca014bc6b87e760d', // debug-only gdbserver
+]);
+const digest=x=>createHash('sha256').update(x).digest('hex');
+for(const instruction of instructions){
+  assert.ok(!/^ADD\s+https?:\/\//i.test(instruction),'remote ADD is forbidden');
+  if(/^RUN\s/.test(instruction)&&/\b(?:curl|wget)\b|\bapt(?:-get)?\s+(?:update|install)\b|\bpip3?\s+install\b/.test(instruction))assert.ok(approvedSensitiveInstructionHashes.has(digest(instruction)),'unreviewed network or package-install instruction is forbidden');
+}
+const sqlcipherIndex=instructions.findIndex(x=>x.startsWith('RUN SQLCIPHER_VERSION='));
+for(const instruction of instructions.slice(sqlcipherIndex+1))assert.doesNotMatch(instruction,/^(?:ADD|COPY)\b.*(?:sqlcipher|\/opt\/novnc|wechat\.deb)/i,'verified artifact may not be overwritten by a later ADD/COPY');
 const one=(prefix,label)=>{const xs=instructions.filter(x=>x.startsWith(prefix));assert.equal(xs.length,1,`${label}: expected exactly one semantic instruction`);return xs[0];};
 const exact=(value,label)=>assert.equal(instructions.filter(x=>x===value).length,1,`${label}: exact instruction required`);
 assert.equal(manifest.schemaVersion,1);
-const keys=(value,expected,label)=>assert.deepEqual(Object.keys(value).sort(),[...expected].sort(),`${label}: authoritative fields drifted`);
 keys(manifest,['schemaVersion','baseImages','sources','noticeDirectory','apt','python'],'manifest');
 keys(manifest.baseImages,['builder','runtime'],'base images');
 keys(manifest.baseImages.builder,['reference','providedPackages','providedFiles'],'builder image');
@@ -36,7 +67,9 @@ assert.deepEqual(manifest.python.installerFlags,['--require-hashes','--only-bina
 assert.equal(manifest.noticeDirectory,'/usr/share/doc/agent-wechat/licenses');
 assert.equal(manifest.apt.url,'https://snapshot.ubuntu.com/ubuntu');
 const froms=instructions.filter(x=>x.startsWith('FROM '));assert.equal(froms.length,2);
-for(const [name,image] of Object.entries(manifest.baseImages)){assert.match(image.reference,/^[a-z0-9./:-]+@sha256:[a-f0-9]{64}$/);assert.equal(froms.filter(x=>x.split(/\s+/)[1]===image.reference).length,1,`${name} FROM must consume digest`);}
+for(const image of Object.values(manifest.baseImages))assert.match(image.reference,/^[a-z0-9./:-]+@sha256:[a-f0-9]{64}$/);
+assert.equal(froms[0],`FROM ${manifest.baseImages.builder.reference} AS builder`,'builder digest must be bound to the builder stage role');
+assert.equal(froms[1],`FROM ${manifest.baseImages.runtime.reference}`,'runtime digest must be bound to the final stage role');
 exact(`RUN command -v pkg-config && test "$(dpkg-query -W -f='\${Version}' pkg-config)" = "${manifest.baseImages.builder.providedPackages['pkg-config']}"`,'builder package assertion');
 exact('COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt','pinned CA bootstrap');
 const releaseInputNames=['UBUNTU_SNAPSHOT','NOVNC_VERSION','NOVNC_URL','NOVNC_SHA256','SQLCIPHER_VERSION','SQLCIPHER_URL','SQLCIPHER_SHA256','WECHAT_VERSION','WECHAT_AMD64_URL','WECHAT_AMD64_SHA256','WECHAT_ARM64_URL','WECHAT_ARM64_SHA256'];
