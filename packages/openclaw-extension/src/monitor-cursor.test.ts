@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
-import { markCursorMessagesHandled, selectCursorMessages } from "./monitor-cursor.ts";
+import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.ts";
 
 function chat(overrides: Partial<Chat>): Chat {
   return {
@@ -28,7 +28,7 @@ function message(localId: number): Message {
 function advanceToHandledMessages(
   chatId: string,
   lastSeen: Map<string, number>,
-  equalCursorUnreadHandled: Map<string, number>,
+  equalCursorUnreadHandled: Map<string, HandledCursor>,
   messages: Message[],
 ): void {
   const cursor = markCursorMessagesHandled(chatId, messages, equalCursorUnreadHandled);
@@ -39,7 +39,7 @@ function advanceToHandledMessages(
 
 test("restored cursor equal to first unread localId recovers exactly once", () => {
   const lastSeen = new Map([["wxid_first", 1]]);
-  const equalCursorUnreadHandled = new Map<string, number>();
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
   const unreadChat = chat({ unreadCount: 1, lastMsgLocalId: 1 });
   const messages = [message(1)];
 
@@ -66,7 +66,7 @@ test("restored cursor equal to first unread localId recovers exactly once", () =
 
 test("normal first dispatch followed by stale unread snapshot does not redispatch", () => {
   const lastSeen = new Map<string, number>();
-  const equalCursorUnreadHandled = new Map<string, number>();
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
 
   const first = selectCursorMessages(
     "wxid_first",
@@ -91,7 +91,7 @@ test("normal first dispatch followed by stale unread snapshot does not redispatc
 
 test("catch-up cursor advancement blocks later stale equal-cursor unread", () => {
   const lastSeen = new Map([["wxid_first", 3]]);
-  const equalCursorUnreadHandled = new Map<string, number>();
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
 
   const catchup = selectCursorMessages(
     "wxid_first",
@@ -115,7 +115,7 @@ test("catch-up cursor advancement blocks later stale equal-cursor unread", () =>
 
 test("restart keeps restored equal-cursor recovery available once", () => {
   const restoredLastSeen = new Map([["wxid_first", 7]]);
-  const restartedEqualCursorUnreadHandled = new Map<string, number>();
+  const restartedEqualCursorUnreadHandled = new Map<string, HandledCursor>();
   const unreadChat = chat({ unreadCount: 1, lastMsgLocalId: 7 });
   const messages = [message(7)];
 
@@ -146,7 +146,7 @@ test("restart keeps restored equal-cursor recovery available once", () => {
 
 test("handled cursor state retains only the latest cursor per chat", () => {
   const lastSeen = new Map<string, number>();
-  const equalCursorUnreadHandled = new Map<string, number>();
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
 
   for (let localId = 1; localId <= 10_000; localId += 1) {
     advanceToHandledMessages(
@@ -158,7 +158,7 @@ test("handled cursor state retains only the latest cursor per chat", () => {
   }
 
   assert.equal(equalCursorUnreadHandled.size, 1);
-  assert.equal(equalCursorUnreadHandled.get("wxid_first"), 10_000);
+  assert.equal(equalCursorUnreadHandled.get("wxid_first")?.localId, 10_000);
 
   advanceToHandledMessages(
     "wxid_second",
@@ -167,13 +167,14 @@ test("handled cursor state retains only the latest cursor per chat", () => {
     [{ ...message(20_000), chatId: "wxid_second" }],
   );
   assert.equal(equalCursorUnreadHandled.size, 2);
-  assert.equal(equalCursorUnreadHandled.get("wxid_first"), 10_000);
-  assert.equal(equalCursorUnreadHandled.get("wxid_second"), 20_000);
+  assert.equal(equalCursorUnreadHandled.get("wxid_first")?.localId, 10_000);
+  assert.equal(equalCursorUnreadHandled.get("wxid_second")?.localId, 20_000);
 });
 
 test("advancing a chat replaces the stale handled cursor", () => {
   const lastSeen = new Map([["wxid_first", 7]]);
-  const equalCursorUnreadHandled = new Map([["wxid_first", 7]]);
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
+  markCursorMessagesHandled("wxid_first", [message(7)], equalCursorUnreadHandled);
 
   advanceToHandledMessages(
     "wxid_first",
@@ -182,7 +183,7 @@ test("advancing a chat replaces the stale handled cursor", () => {
     [message(8), message(9)],
   );
 
-  assert.deepEqual([...equalCursorUnreadHandled.entries()], [["wxid_first", 9]]);
+  assert.equal(equalCursorUnreadHandled.get("wxid_first")?.localId, 9);
   const stale = selectCursorMessages(
     "wxid_first",
     chat({ unreadCount: 1, lastMsgLocalId: 9 }),
@@ -191,6 +192,32 @@ test("advancing a chat replaces the stale handled cursor", () => {
     equalCursorUnreadHandled,
   );
   assert.deepEqual(stale.messages, []);
+});
+
+test("reused localId with a different message identity is recovered once", () => {
+  const lastSeen = new Map([["wxid_first", 1]]);
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
+  const oldMessage = message(1);
+  markCursorMessagesHandled("wxid_first", [oldMessage], equalCursorUnreadHandled);
+
+  const replacement = {
+    ...message(1),
+    serverId: 2002,
+    timestamp: "2026-08-17T00:17:00.000Z",
+    content: "wechat-local-e2e-001",
+  };
+  const unreadChat = chat({ unreadCount: 1, lastMsgLocalId: 1 });
+  const recovered = selectCursorMessages(
+    "wxid_first", unreadChat, [replacement], lastSeen, equalCursorUnreadHandled,
+  );
+  assert.deepEqual(recovered.messages, [replacement]);
+
+  advanceToHandledMessages("wxid_first", lastSeen, equalCursorUnreadHandled, recovered.messages);
+  const repeated = selectCursorMessages(
+    "wxid_first", unreadChat, [replacement], lastSeen, equalCursorUnreadHandled,
+  );
+  assert.deepEqual(repeated.messages, []);
+  assert.equal(equalCursorUnreadHandled.size, 1);
 });
 
 test("normal non-first polls only select ids above the cursor", () => {
