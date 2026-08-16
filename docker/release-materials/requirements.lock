@@ -355,7 +355,7 @@ frida==17.17.0 \
     --hash=sha256:f9c3d431144d143d5eaf6830f0b85042c34517f63b2cf0e83aaa5e2ba4b636dd
     # via frida-tools
 frida-tools==14.10.4 \
-    --hash=sha256:7a2c544b545d095040fffbd3768a287a426343dad89095b4a24f4b20382d926a
+    --hash=sha256:8e4e7375053f16803cdd6585d4b56a322ee426290385c4a675f669a479547f50
     # via -r /tmp/requirements.in
 idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2 \

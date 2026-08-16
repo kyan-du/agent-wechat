@@ -9,7 +9,7 @@ Audit lineage began at `24a3d6843e627a061f0dd52ee66a8448837efaf7`; evidence is r
 | npm CLI | project/shared code, bundled commander/zod, external qrcode-terminal, and `dist/device_identity.py` | Repository and all three public package manifests contain no `license`; repository has no `LICENSE`/`NOTICE`. No authoritative grant from the upstream copyright holder was found in repository history or GitHub's license endpoint (404). Bundling also makes dependency notices a release input. | **BLOCKED**: obtain/document an authoritative source-code license, add package license metadata and ship the applicable license/notices. |
 | npm OpenClaw extension | project/shared code, bundled zod/qrcode-terminal, `openclaw.plugin.json`; OpenClaw is external | Same absent upstream grant. | **BLOCKED** for the same reason. |
 | npm Wechaty puppet | project/shared code and bundled zod; peer `wechaty-puppet` and runtime `file-box` remain external | Same absent upstream grant. | **BLOCKED** for the same reason. |
-| GHCR runtime image | project Rust binary/tools, Ubuntu packages, noVNC, websockify/frida/silk Python packages, SQLCipher CLI plus vendored SQLCipher/OpenSSL in Rust, and proprietary WeChat | Base/package licenses must be captured from the exact built image. noVNC v1.5.0 is mixed-license (MPL-2.0 core plus BSD-2-Clause/OFL-1.1/CC-BY-SA-3.0 assets and embedded components) per its tagged `LICENSE.txt`; SQLCipher v4.6.1 is BSD-3-Clause per tagged `LICENSE.md`, requiring the notice in binary redistribution materials. The Dockerfile neither pins base images by digest nor retains these notices. WeChat is downloaded from Tencent but no authoritative redistribution terms/version/hash are recorded. | **BLOCKED**: no image publication. Resolve every condition below and generate an exact-image SBOM/license report. |
+| GHCR runtime image | project Rust binary/tools, Ubuntu packages, noVNC, websockify/frida/silk Python packages, SQLCipher CLI plus vendored SQLCipher/OpenSSL in Rust, and proprietary WeChat | Base/package licenses must be captured from the exact built image. noVNC v1.5.0 is mixed-license (MPL-2.0 core plus BSD-2-Clause/OFL-1.1/CC-BY-SA-3.0 assets and embedded components) per its tagged `LICENSE.txt`; SQLCipher v4.6.1 is BSD-3-Clause per tagged `LICENSE.md`, requiring the notice in binary redistribution materials. Base images are digest-pinned; noVNC and SQLCipher notices are retained. WeChat provenance, version, architecture, and hashes are recorded, but no authoritative redistribution grant is established. | **BLOCKED**: no image publication. Resolve every condition below and generate an exact-image SBOM/license report. |
 | source archive / GitHub release attachment | repository source | No repository license/grant. GitHub-generated archives are hosting conveniences, not evidence of redistribution permission. | **BLOCKED**: do not attach or describe source as redistributable until an authoritative grant exists. |
 
 Private workspaces (`agent-server`, `shared`, `wechaty-gateway`, root/docs) are not npm release artifacts. If P1-A changes `private`, names, `files`, build output, or image identity, rerun this audit against that exact commit.
@@ -19,18 +19,16 @@ Private workspaces (`agent-server`, `shared`, `wechaty-gateway`, root/docs) are 
 * Upstream source: `https://github.com/thisnick/agent-wechat` license API returned 404; this fork also has no detected license. Absence of a license means no redistribution permission is inferred.
 * noVNC: tagged source `https://github.com/novnc/noVNC/blob/v1.5.0/LICENSE.txt` (the Dockerfile fetches that tag). Preserve the complete tagged distribution and notices; review MPL source-availability and asset attribution/share-alike duties before shipping.
 * SQLCipher: tagged source `https://github.com/sqlcipher/sqlcipher/blob/v4.6.1/LICENSE.md`. Binary distributions must reproduce its copyright, conditions, and disclaimer in documentation/materials.
-* WeChat: payload URL `https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_{x86_64,arm64}.deb` proves origin only. It is mutable, unhashed, unversioned in the build, and is not a redistribution grant.
+* WeChat: payload URL `https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_{x86_64,arm64}.deb` proves origin only. The build selects architecture-specific audited SHA-256 values and verifies package/version/architecture, but this provenance is not a redistribution grant.
 * `rust:1.93-bookworm` and `ubuntu:22.04` are now pinned to audited multi-architecture index digests in `docker/release-inputs.json`; exact installed package/license conclusions still require the P1-C1b image report.
 
 ## Release blockers
 
 1. Written, authoritative licensing provenance for upstream project code and the fork's right to redistribute it; then an approved root `LICENSE`/`NOTICE` and matching package metadata.
 2. WeChat terms that explicitly permit the intended third-party container redistribution. If permission cannot be established, redesign release artifacts to require user-side acquisition; a Tencent download URL alone is insufficient.
-3. **Mechanically addressed by P1-C1a:** base images and direct archives/payloads are pinned or hash-verified, and WeChat version/SHA-256/architecture/source evidence is recorded without committing its binary/cache. Re-verify freshness and exact evidence at publication approval.
-4. **Notice carriage addressed by P1-C1a:** complete identified noVNC and SQLCipher notices are retained in the image. Legal review must still establish and satisfy noVNC's file-level mixed-license obligations.
-5. Produce an SBOM and license report from each exact final multi-arch image, including apt, pip, Rust/vendored C/OpenSSL, noVNC/web assets, SQLCipher and WeChat package contents. Review all `NOASSERTION`, unknown and copyleft entries.
-6. Produce dependency license evidence for the exact npm lock/build graph and include notices required by code bundled by esbuild.
-7. P1-A release identities/manifests are not final. Re-run `scripts/audit-release.sh` after its merge and review the resulting tarball lists before release approval.
+3. Produce an SBOM and license report from each exact final multi-arch image, including apt, pip, Rust/vendored C/OpenSSL, noVNC/web assets, SQLCipher and WeChat package contents. Review all `NOASSERTION`, unknown and copyleft entries.
+4. Produce dependency license evidence for the exact npm lock/build graph and include notices required by code bundled by esbuild.
+5. P1-A release identities/manifests are not final. Re-run `scripts/audit-release.sh` after its merge and review the resulting tarball lists before release approval.
 
 ## Required exclusions
 
@@ -48,8 +46,9 @@ The committed inventory describes the tree content, not a self-referential commi
 
 ## P1-C1a immutable-input and notice update
 
-P1-C1a pins the multi-architecture Docker base-image indexes by digest and
-records all release-relevant direct downloads in `docker/release-inputs.json`.
+P1-C1a pins the multi-architecture Docker base-image indexes by digest,
+uses the builder image's pinned pkg-config and CA bundle without mutable Debian
+resolution, and records all release-relevant direct downloads in `docker/release-inputs.json`.
 noVNC 1.5.0 and SQLCipher 4.6.1 archives are SHA-256 verified before extraction;
 the complete noVNC top-level/docs/pako license set and SQLCipher `LICENSE.md`
 are retained in `/usr/share/doc/agent-wechat/licenses` and asserted during the
@@ -58,9 +57,10 @@ recorded by source, package architecture, and SHA-256, and the build verifies
 hash plus Debian package metadata before installation. Local payloads remain
 excluded from the Docker context and are not committed.
 
-`scripts/validate-release-inputs.mjs` checks manifest/Dockerfile/workflow
-consistency, and `scripts/test-release-inputs.mjs` proves digest, verification,
-and notice drift fail closed. Docker CI remains build-only for amd64 and arm64;
+`scripts/validate-release-inputs.mjs` checks the complete allowlisted
+Dockerfile input graph, manifest, local wheel hash, and workflow consistency.
+`scripts/test-release-inputs.mjs` proves digest, repository, apt/pip injection,
+verification, package-metadata, wheel, cache, and notice drift fail closed. Docker CI remains build-only for amd64 and arm64;
 it has no registry permissions or publication step.
 
 **Publication remains blocked.** Immutable provenance and retained third-party

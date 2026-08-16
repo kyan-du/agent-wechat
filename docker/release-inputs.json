@@ -2,7 +2,13 @@
   "schemaVersion": 1,
   "baseImages": {
     "builder": {
-      "reference": "rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31"
+      "reference": "rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31",
+      "providedPackages": {
+        "pkg-config": "1.8.1-1"
+      },
+      "providedFiles": [
+        "/etc/ssl/certs/ca-certificates.crt"
+      ]
     },
     "runtime": {
       "reference": "ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522a9d915c6f"
@@ -44,7 +50,14 @@
     "lockFile": "release-materials/requirements.lock",
     "installerFlags": [
       "--require-hashes",
-      "--only-binary=:all:"
-    ]
+      "--only-binary=:all:",
+      "--find-links=/opt/release-inputs"
+    ],
+    "localArtifacts": {
+      "frida-tools": {
+        "file": "release-materials/frida_tools-14.10.4-py3-none-any.whl",
+        "sha256": "8e4e7375053f16803cdd6585d4b56a322ee426290385c4a675f669a479547f50"
+      }
+    }
   }
 }

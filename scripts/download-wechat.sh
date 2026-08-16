@@ -18,9 +18,17 @@ esac
 
 URL="https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${ARCH_SUFFIX}.deb"
 
+verify_payload() {
+  echo "$EXPECTED_SHA256  $1" | shasum -a 256 --check
+  test "$(dpkg-deb -f "$1" Package)" = wechat
+  test "$(dpkg-deb -f "$1" Version)" = 4.1.1.8
+  test "$(dpkg-deb -f "$1" Architecture)" = "$EXPECTED_ARCH"
+}
+
 if [ -f "$OUT" ]; then
-  echo "wechat.deb already exists. Delete docker/wechat.deb to re-download."
-  ls -lh "$OUT"
+  echo "Validating cached docker/wechat.deb..."
+  verify_payload "$OUT"
+  echo "Cached audited WeChat 4.1.1.8 package is valid."
   exit 0
 fi
 
@@ -28,10 +36,7 @@ echo "Downloading WeChat for ${ARCH_SUFFIX}..."
 tmp="${OUT}.partial"
 trap 'rm -f "$tmp"' EXIT
 curl --fail --location --retry 3 -o "$tmp" "$URL"
-echo "$EXPECTED_SHA256  $tmp" | shasum -a 256 --check
-test "$(dpkg-deb -f "$tmp" Package)" = wechat
-test "$(dpkg-deb -f "$tmp" Version)" = 4.1.1.8
-test "$(dpkg-deb -f "$tmp" Architecture)" = "$EXPECTED_ARCH"
+verify_payload "$tmp"
 mv "$tmp" "$OUT"
 trap - EXIT
 echo "Saved audited WeChat 4.1.1.8 to docker/wechat.deb ($(du -h "$OUT" | cut -f1))"

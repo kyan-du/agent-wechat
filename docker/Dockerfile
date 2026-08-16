@@ -7,10 +7,10 @@ ARG BUILD_MODE=release
 
 WORKDIR /build
 
-# Install build dependencies for bundled sqlcipher + openssl
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+# pkg-config is already present in the digest-pinned Rust image. Avoid mutable
+# Debian repository resolution in the builder and fail closed if that changes.
+RUN command -v pkg-config \
+    && test "$(dpkg-query -W -f='${Version}' pkg-config)" = "1.8.1-1"
 
 # Copy manifests first for dependency caching
 COPY agent-server-rust/Cargo.toml agent-server-rust/Cargo.lock* ./
@@ -37,6 +37,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Immutable Ubuntu archive snapshot; Valid-Until is intentionally disabled because the snapshot is frozen.
 ARG UBUNTU_SNAPSHOT=20260201T000000Z
+# Bootstrap TLS from the digest-pinned builder; do not contact a mutable Ubuntu
+# mirror merely to obtain CA certificates.
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-updates main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-security main restricted universe multiverse\n' "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" > /etc/apt/sources.list
 
 # ============================================
@@ -78,8 +81,8 @@ RUN apt-get update && apt-get install -y \
 # ============================================
 # Python packages
 # ============================================
-COPY release-materials/requirements.lock /opt/release-inputs/requirements.lock
-RUN pip3 install --require-hashes --only-binary=:all: -r /opt/release-inputs/requirements.lock
+COPY release-materials/requirements.lock release-materials/frida_tools-14.10.4-py3-none-any.whl /opt/release-inputs/
+RUN pip3 install --require-hashes --only-binary=:all: --find-links=/opt/release-inputs -r /opt/release-inputs/requirements.lock
 
 # ============================================
 # noVNC (browser-based VNC viewer) + websockify
