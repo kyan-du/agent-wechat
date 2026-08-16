@@ -43,7 +43,7 @@
   },
   "noticeDirectory": "/usr/share/doc/agent-wechat/licenses",
   "apt": {
-    "snapshot": "20260201T000000Z",
+    "snapshot": "20260801T000000Z",
     "url": "https://snapshot.ubuntu.com/ubuntu"
   },
   "python": {

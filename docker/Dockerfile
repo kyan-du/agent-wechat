@@ -36,7 +36,7 @@ FROM ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Immutable Ubuntu archive snapshot; Valid-Until is intentionally disabled because the snapshot is frozen.
-ARG UBUNTU_SNAPSHOT=20260201T000000Z
+ARG UBUNTU_SNAPSHOT=20260801T000000Z
 # Bootstrap TLS from the digest-pinned builder; do not contact a mutable Ubuntu
 # mirror merely to obtain CA certificates.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -46,7 +46,6 @@ RUN printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jam
 # System packages
 # ============================================
 RUN apt-get update \
-    && apt-get dist-upgrade -y \
     && apt-get install -y \
     # Display
     xvfb fluxbox x11vnc \
