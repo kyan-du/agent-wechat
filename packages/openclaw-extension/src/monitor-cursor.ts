@@ -7,23 +7,19 @@ export type CursorSelection = {
   seedLastSeen?: number;
 };
 
-export function equalCursorUnreadKey(chatId: string, localId: number): string {
-  return `${chatId}:${localId}`;
-}
-
 export function markEqualCursorUnreadHandled(
   chatId: string,
   localId: number | undefined,
-  equalCursorUnreadHandled: Set<string>,
+  equalCursorUnreadHandled: Map<string, number>,
 ): void {
   if (localId === undefined) return;
-  equalCursorUnreadHandled.add(equalCursorUnreadKey(chatId, localId));
+  equalCursorUnreadHandled.set(chatId, localId);
 }
 
 export function markCursorMessagesHandled(
   chatId: string,
   messages: Message[],
-  equalCursorUnreadHandled: Set<string>,
+  equalCursorUnreadHandled: Map<string, number>,
 ): number | undefined {
   if (messages.length === 0) return undefined;
   const cursor = Math.max(...messages.map((message) => message.localId));
@@ -36,7 +32,7 @@ export function selectCursorMessages(
   chat: Chat,
   messages: Message[],
   lastSeenId: Map<string, number>,
-  equalCursorUnreadHandled: Set<string>,
+  equalCursorUnreadHandled: Map<string, number>,
 ): CursorSelection {
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
@@ -78,7 +74,7 @@ export function selectCursorMessages(
   const recoverable =
     equalCursorUnread.length === 1 &&
     chat.lastMsgLocalId === prevLastSeen &&
-    !equalCursorUnreadHandled.has(equalCursorUnreadKey(chatId, prevLastSeen));
+    equalCursorUnreadHandled.get(chatId) !== prevLastSeen;
 
   return {
     firstPoll,

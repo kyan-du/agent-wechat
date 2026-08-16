@@ -110,7 +110,7 @@ export async function startWeChatMonitor(
 
   // Track last-seen message ID per chat
   const lastSeenId = new Map<string, number>();
-  const equalCursorUnreadHandled = new Set<string>();
+  const equalCursorUnreadHandled = new Map<string, number>();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -817,7 +817,7 @@ async function processUnreadChat(
   client: WeChatClient,
   chat: Chat,
   lastSeenId: Map<string, number>,
-  equalCursorUnreadHandled: Set<string>,
+  equalCursorUnreadHandled: Map<string, number>,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
