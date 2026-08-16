@@ -1,0 +1,72 @@
+name: Publish npm prerelease
+
+# First-time package bootstrap must be performed once by the npm owner because
+# npm Trusted Publishing can only be configured after each package exists.
+# After bootstrap, this workflow publishes only explicit `next` prereleases.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Exact next prerelease version, for example 0.12.0-next.0
+        required: true
+        type: string
+
+concurrency:
+  group: npm-prerelease
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish exact npm next prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: npm-prerelease
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install exact dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate, test, build, audit, and clean-install packed artifacts
+        env:
+          CI: true
+        run: |
+          pnpm typecheck
+          pnpm --filter @kyan-du/agent-wechat-shared test
+          pnpm --filter @kyan-du/agent-wechat-cli test
+          pnpm --filter @kyan-du/agent-wechat-openclaw test
+          pnpm --filter @kyan-du/agent-wechat-wechaty-puppet test
+          pnpm test:npm-packages
+          node scripts/validate-release-boundary.mjs
+          node scripts/release-audit.mjs --write
+          git diff --exit-code -- docs/release-audit/npm-materials.json
+
+      - name: Verify exact package set and prerelease version
+        env:
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          node scripts/verify-npm-prerelease.mjs "$EXPECTED_VERSION"
+          git diff --exit-code
+
+      - name: Publish three exact packages to next with provenance
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+        run: |
+          npm publish ./packages/cli --tag next --access public
+          npm publish ./packages/openclaw-extension --tag next --access public
+          npm publish ./packages/wechaty-puppet --tag next --access public

@@ -30,7 +30,8 @@
     "prepare:openclaw-plugin": "node scripts/prepare-openclaw-plugin.mjs",
     "validate:prerelease": "bash scripts/validate-prerelease.sh",
     "test:prerelease-contract": "bash scripts/test-prerelease-contract.sh",
-    "test:prerelease-manifest": "bash scripts/test-prerelease-manifest.sh"
+    "test:prerelease-manifest": "bash scripts/test-prerelease-manifest.sh",
+    "test:npm-packages": "node scripts/smoke-npm-packages.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",

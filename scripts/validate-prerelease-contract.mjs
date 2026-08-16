@@ -98,13 +98,25 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
         [/\bgit\s+(?:tag|push\s+[^\n]*--tags)\b/i, "tag creation/push"],
         [/\bdocker\s+(?:push|buildx\s+build[^\n]*--push)\b/i, "image push"],
       ];
-      for (const [pattern, label] of commands) if (pattern.test(command)) forbidden.push(`${name}: ${label}`);
+      for (const [pattern, label] of commands) {
+        const approvedNpmPublish = name === "npm-prerelease.yml" && label === "npm publish";
+        if (pattern.test(command) && !approvedNpmPublish) forbidden.push(`${name}: ${label}`);
+      }
     }
   }
 }
 const releaseWorkflow = parseYaml(readFileSync(join(workflowDir, "release.yml"), "utf8"));
 const releaseTriggers = releaseWorkflow.on ?? releaseWorkflow.true ?? {};
 for (const event of ["pull_request", "push", "workflow_dispatch"]) if (!(event in releaseTriggers)) fail(`release validation workflow must exercise ${event}`);
+const publishWorkflowText = readFileSync(join(workflowDir, "npm-prerelease.yml"), "utf8");
+const publishWorkflow = parseYaml(publishWorkflowText);
+const publishTriggers = publishWorkflow.on ?? publishWorkflow.true ?? {};
+if (Object.keys(publishTriggers).join(",") !== "workflow_dispatch") fail("npm prerelease publication must remain manual-only");
+if (publishWorkflow.permissions?.contents !== "read" || publishWorkflow.permissions?.["id-token"] !== "write") fail("npm prerelease workflow permissions drift");
+if (!/npm publish \.\/packages\/cli --tag next --access public/.test(publishWorkflowText)
+  || !/npm publish \.\/packages\/openclaw-extension --tag next --access public/.test(publishWorkflowText)
+  || !/npm publish \.\/packages\/wechaty-puppet --tag next --access public/.test(publishWorkflowText)
+  || !/pnpm test:npm-packages/.test(publishWorkflowText)) fail("npm prerelease workflow must smoke packed artifacts and publish exactly three packages to next");
 if (forbidden.length) fail(`workflow publication capability detected:\n${forbidden.join("\n")}`);
 
 const rootManifest = readJson("package.json");

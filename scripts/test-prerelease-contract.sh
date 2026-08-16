@@ -64,8 +64,12 @@ mutate_and_reject package.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.scripts.release="pnpm changeset publish";fs.writeFileSync(p,JSON.stringify(j));' \
   'root publish script'
 
-if grep -RInE 'npm publish|changeset publish|push:[[:space:]]*true|docker/login-action|gh release create|git tag|packages:[[:space:]]*write' .github/workflows >/dev/null; then
-  echo "workflow source contains publication capability" >&2
+if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|gh release create|git tag|packages:[[:space:]]*write' .github/workflows >/dev/null; then
+  echo "workflow source contains forbidden publication capability" >&2
+  exit 1
+fi
+if grep -RIn 'npm publish' .github/workflows --exclude=npm-prerelease.yml >/dev/null; then
+  echo "npm publication capability exists outside the reviewed prerelease workflow" >&2
   exit 1
 fi
 

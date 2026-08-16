@@ -16,6 +16,7 @@ on:
       - 'scripts/validate-prerelease.sh'
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
+      - 'scripts/smoke-npm-packages.mjs'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -33,6 +34,7 @@ on:
       - 'scripts/validate-prerelease.sh'
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
+      - 'scripts/smoke-npm-packages.mjs'
       - '.github/workflows/release.yml'
       - 'package.json'
       - 'pnpm-lock.yaml'
@@ -77,3 +79,6 @@ jobs:
         env:
           CI: true
         run: ./scripts/validate-prerelease.sh
+
+      - name: Clean-install and import packed public packages
+        run: pnpm test:npm-packages

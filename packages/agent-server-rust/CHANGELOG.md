@@ -1,5 +1,20 @@
 # @agent-wechat/agent-server
 
+## 0.12.0-next.0
+
+### Patch Changes
+
+- [#4](https://github.com/kyan-du/agent-wechat/pull/4) [`4a494e9`](https://github.com/kyan-du/agent-wechat/commit/4a494e9a9417375424ceeeb7c4bc09e603ef5037) Thanks [@kyan-du](https://github.com/kyan-du)! - Add a bounded server-side outbound send queue for `/api/messages/send` with conservative spacing, jitter for burst smoothing, queued-task expiry, short-lived `idempotencyKey` replay, explicit queue-full responses, and an emergency read-only kill switch.
+
+- [#3](https://github.com/kyan-du/agent-wechat/pull/3) [`8b28b10`](https://github.com/kyan-du/agent-wechat/commit/8b28b10d5aa32e017b0c030333deca1efc14c0f1) Thanks [@kyan-du](https://github.com/kyan-du)! - feat: parse merged-forward (chat history) messages (type 49, subtype 19)
+
+  Previously, "Combine and Forward" messages only showed the title (e.g.
+  "Chat History of Group X"). Now the agent extracts the full
+  `<recorditem>` XML and renders each forwarded message as
+  `sender: content`, giving agents visibility into the actual conversation.
+
+  Closes #126
+
 ## 0.11.15
 
 ## 0.11.14

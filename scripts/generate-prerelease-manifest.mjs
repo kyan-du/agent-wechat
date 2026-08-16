@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { prereleaseEnterRequired } from "./prerelease-state.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const outputArg = process.argv.indexOf("--output");
@@ -71,7 +72,10 @@ try {
     .sort()
     .map((file) => ({ file: `.changeset/${file}`, sha256: sha256(join(stage, ".changeset", file)) }));
 
-  run(join(stage, "node_modules/.bin/changeset"), ["pre", "enter", contract.versionPrerelease], stage);
+  const preState = join(stage, ".changeset", "pre.json");
+  if (prereleaseEnterRequired(preState, contract.versionPrerelease)) {
+    run(join(stage, "node_modules/.bin/changeset"), ["pre", "enter", contract.versionPrerelease], stage);
+  }
   run(join(stage, "node_modules/.bin/changeset"), ["version"], stage);
   run("pnpm", ["--filter", "@kyan-du/agent-wechat-shared", "build"], stage);
   for (const name of contract.publicPackages) run("pnpm", ["--filter", name, "build"], stage);

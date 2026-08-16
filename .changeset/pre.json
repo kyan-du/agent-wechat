@@ -1,0 +1,19 @@
+{
+  "mode": "pre",
+  "tag": "next",
+  "initialVersions": {
+    "@kyan-du/agent-wechat-docs": "0.0.1",
+    "@kyan-du/agent-wechat-agent-server": "0.11.15",
+    "@kyan-du/agent-wechat-cli": "0.11.15",
+    "@kyan-du/agent-wechat-openclaw": "0.11.15",
+    "@kyan-du/agent-wechat-shared": "0.1.0",
+    "@kyan-du/agent-wechat-wechaty-gateway": "0.11.15",
+    "@kyan-du/agent-wechat-wechaty-puppet": "0.11.15"
+  },
+  "changesets": [
+    "openclaw-2026.5-compat",
+    "outbound-send-throttle",
+    "parse-merged-forward",
+    "risk-anti-detection"
+  ]
+}

@@ -13,6 +13,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+node --test scripts/prerelease-state.test.mjs
+
 # The canonical stage must build from a clean source tree with no checkout dist.
 rm -rf packages/shared/dist packages/cli/dist packages/openclaw-extension/dist packages/wechaty-puppet/dist
 node scripts/generate-prerelease-manifest.mjs --image-digest "$digest" --output "$first" >/dev/null
