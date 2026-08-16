@@ -63,14 +63,6 @@ jobs:
           node scripts/verify-npm-prerelease.mjs "$EXPECTED_VERSION"
           git diff --exit-code
 
-      # Trusted Publishing requires npm >=11.5.1. Do not depend on the npm
-      # version bundled with the mutable runner or selected Node release.
-      - name: Install and verify Trusted Publishing npm
-        run: |
-          npm install --global npm@11.5.1
-          npm --version
-          node -e 'const [major, minor, patch] = process.versions.npm.split(".").map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) throw new Error(`Trusted Publishing requires npm >=11.5.1; found ${process.versions.npm}`)'
-
       - name: Publish three exact packages to next with provenance
         env:
           NPM_CONFIG_PROVENANCE: "true"
