@@ -35,6 +35,12 @@ on:
 permissions:
   contents: read
 
+# Keep the architecture jobs for only the newest commit of each PR. Main runs
+# are intentionally isolated so a later push cannot cancel an earlier gate.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   guard:
     name: Publication boundary guard

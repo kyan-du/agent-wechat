@@ -13,6 +13,18 @@ function forbiddenPackedPath(path){
  const parts=path.split('/');
  return parts.some(part=>forbiddenComponent.test(part)||sensitiveSubstring.test(part)||sensitiveSegment.test(part)||captureSegment.test(part))||forbiddenExtension.test(parts.at(-1));
 }
+if(process.argv.includes('--test-forbidden-paths')){
+ const forbidden=[
+  'dist/mysecret.txt','dist/mycredential.txt','dist/mytoken.txt',
+  'dist/.env.local','dist/myenvironment.txt','dist/my-private-key.txt',
+  'dist/my-api-key.txt','dist/mycert.txt','dist/client.crt',
+ ];
+ const allowed=['dist/index.js','dist/formatter.js','dist/configuration.js','README.md'];
+ for(const path of forbidden) if(!forbiddenPackedPath(path)) throw Error(`forbidden-path rule missed ${path}`);
+ for(const path of allowed) if(forbiddenPackedPath(path)) throw Error(`forbidden-path rule rejected ${path}`);
+ console.log(`Validated ${forbidden.length} forbidden and ${allowed.length} allowed packed-path fixtures.`);
+ process.exit(0);
+}
 const run=(cmd,args,cwd=root)=>execFileSync(cmd,args,{cwd,encoding:'utf8',stdio:['ignore','pipe','inherit']});
 const workspaces=JSON.parse(run('pnpm',['-r','list','--depth','-1','--json']));
 const found=[];

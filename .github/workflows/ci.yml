@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+# Superseded commits on the same PR do not need to finish. Main pushes use the
+# run id so separate commits are never cancelled by a newer push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -157,6 +163,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/agent-server-rust -> target
 
       - name: Cargo check
         run: cargo check --manifest-path packages/agent-server-rust/Cargo.toml
