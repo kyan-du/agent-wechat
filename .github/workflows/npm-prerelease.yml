@@ -42,7 +42,7 @@ jobs:
       - name: Install exact dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Validate, test, build, and audit release artifacts
+      - name: Validate, test, build, audit, and clean-install packed artifacts
         env:
           CI: true
         run: |
@@ -51,7 +51,7 @@ jobs:
           pnpm --filter @kyan-du/agent-wechat-cli test
           pnpm --filter @kyan-du/agent-wechat-openclaw test
           pnpm --filter @kyan-du/agent-wechat-wechaty-puppet test
-          pnpm --filter '!@kyan-du/agent-wechat-docs' build
+          pnpm test:npm-packages
           node scripts/validate-release-boundary.mjs
           node scripts/release-audit.mjs --write
           git diff --exit-code -- docs/release-audit/npm-materials.json
