@@ -2,10 +2,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { parse } from 'yaml';
 
 const root = new URL('../', import.meta.url);
 const text = readFileSync(new URL('.github/workflows/ghcr-prerelease.yml', root), 'utf8');
+const runtime = process.argv[2] === '--runtime';
+if (runtime) {
+  const version = process.argv[3];
+  const sha = process.argv[4];
+  assert.match(version ?? '', /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-next\.(?:0|[1-9]\d*)$/, 'version must be an exact next semver prerelease');
+  assert.match(sha ?? '', /^[a-f0-9]{40}$/);
+  const main = execFileSync('git', ['rev-parse', 'origin/main'], { encoding: 'utf8' }).trim();
+  assert.equal(sha, main, 'release SHA must equal origin/main');
+  const contract = JSON.parse(readFileSync(new URL('release/prerelease-contract.json', root)));
+  assert.equal(contract.imageRepository, 'ghcr.io/kyan-du/agent-wechat');
+  assert.equal(contract.versionPrerelease, 'next');
+  assert.equal(contract.externalSideEffects, true, 'release contract must explicitly authorize publication');
+  console.log('GHCR runtime authorization passed');
+  process.exit(0);
+}
+const { parse } = await import('yaml');
 const workflow = parse(text);
 const trigger = workflow.on ?? workflow.true;
 assert.deepEqual(Object.keys(trigger), ['workflow_dispatch'], 'GHCR publication must be manual-only');
@@ -26,17 +41,4 @@ assert.equal((text.match(/--tag /g) ?? []).length, 1, 'only the merge job may cr
 assert.equal((text.match(/packages: write/g) ?? []).length, 1);
 assert.match(text, /type=gha,scope=ghcr-\$\{\{ matrix\.arch \}\}/);
 
-const runtime = process.argv[2] === '--runtime';
-if (runtime) {
-  const version = process.argv[3];
-  const sha = process.argv[4];
-  assert.match(version ?? '', /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-next\.(?:0|[1-9]\d*)$/, 'version must be an exact next semver prerelease');
-  assert.match(sha ?? '', /^[a-f0-9]{40}$/);
-  const main = execFileSync('git', ['rev-parse', 'origin/main'], { encoding: 'utf8' }).trim();
-  assert.equal(sha, main, 'release SHA must equal origin/main');
-  const contract = JSON.parse(readFileSync(new URL('release/prerelease-contract.json', root)));
-  assert.equal(contract.imageRepository, workflow.env.IMAGE);
-  assert.equal(contract.versionPrerelease, 'next');
-  assert.equal(contract.externalSideEffects, true, 'release contract must explicitly authorize publication');
-}
-console.log(runtime ? 'GHCR runtime authorization passed' : 'GHCR workflow policy passed');
+console.log('GHCR workflow policy passed');
