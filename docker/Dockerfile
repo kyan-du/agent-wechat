@@ -45,7 +45,9 @@ RUN printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jam
 # ============================================
 # System packages
 # ============================================
-RUN apt-get update && apt-get install -y \
+RUN apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get install -y \
     # Display
     xvfb fluxbox x11vnc \
     # Input automation
