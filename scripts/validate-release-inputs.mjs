@@ -23,28 +23,22 @@ const instructions=[]; let current='';
 for(const line of raw.split(/\r?\n/))assert.doesNotMatch(line,/^\s*#\s*(?:syntax|escape|check)\s*=/i,'Docker parser directives are forbidden');
 for(const source of raw.split(/\r?\n/)){const line=source.replace(/\s+#.*$/,'').trim();if(!line||(!current&&line.startsWith('#')))continue;current+=(current?' ':'')+line.replace(/\\$/,'').trim();if(!line.endsWith('\\')){instructions.push(current.replace(/\s+/g,' '));current='';}}
 assert.equal(current,'','unterminated Docker instruction');
-assert.equal(instructionAllowlist.schemaVersion,1);
 const keys=(value,expected,label)=>assert.deepEqual(Object.keys(value).sort(),[...expected].sort(),`${label}: authoritative fields drifted`);
-keys(instructionAllowlist,['schemaVersion','instructions'],'instruction allowlist');
-assert.ok(Array.isArray(instructionAllowlist.instructions)&&instructionAllowlist.instructions.every(x=>typeof x==='string'),'instruction allowlist must contain strings');
-assert.deepEqual(instructions,instructionAllowlist.instructions,'effective Docker instruction graph is not exactly allowlisted');
-// This policy is deliberately independent of the mutable allowlist. Any instruction
-// that can fetch or install content must remain one of these reviewed semantics.
-const approvedSensitiveInstructionHashes=new Set([
-  'ba45fa654185163d06d04e7f70994f03728b5f34ffb0cc04be9719f5927c5919', // runtime packages
-  '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
-  '37e36f1c351c0e2ac331cde6312c4a29e295195b5925f55015f33a2d923f48be', // noVNC
-  'b8503078e0209a9b88097c0033abc09a9fc9a9aeda6ac1c3b460f31133328869', // SQLCipher
-  '62f5855ebd13501fb39e0ec32750d14ec11fec98641f8f66ede8d4a25bfc109a', // WeChat
-  '5d9641c7a8ed47f58706396e3b1f4202cd45a6ac7e5c2339ca014bc6b87e760d', // debug-only gdbserver
-]);
+assert.equal(instructionAllowlist.schemaVersion,1);
+keys(instructionAllowlist,['schemaVersion','instructions'],'derived instruction listing');
+assert.ok(Array.isArray(instructionAllowlist.instructions)&&instructionAllowlist.instructions.every(x=>typeof x==='string'));
+assert.deepEqual(instructions,instructionAllowlist.instructions,'derived instruction listing is stale');
+// This listing is diagnostic/derived only and is not authority; the independent code hash below governs.
+// Independent closed positive policy: these digests are code-reviewed authority,
+// not editable data adjacent to the Dockerfile. The graph digest covers every
+// normalized instruction, in order, across every stage. Any added, removed, moved,
+// case-changed, shell/JSON-form, ONBUILD, SHELL, ADD/COPY, or RUN instruction changes
+// the digest and is rejected, regardless of changes to other Docker-side files.
 const digest=x=>createHash('sha256').update(x).digest('hex');
-for(const instruction of instructions){
-  assert.ok(!/^ADD\s+https?:\/\//i.test(instruction),'remote ADD is forbidden');
-  if(/^RUN\s/.test(instruction)&&/\b(?:curl|wget)\b|\bapt(?:-get)?\s+(?:update|install)\b|\bpip3?\s+install\b/.test(instruction))assert.ok(approvedSensitiveInstructionHashes.has(digest(instruction)),'unreviewed network or package-install instruction is forbidden');
-}
-const sqlcipherIndex=instructions.findIndex(x=>x.startsWith('RUN SQLCIPHER_VERSION='));
-for(const instruction of instructions.slice(sqlcipherIndex+1))assert.doesNotMatch(instruction,/^(?:ADD|COPY)\b.*(?:sqlcipher|\/opt\/novnc|wechat\.deb)/i,'verified artifact may not be overwritten by a later ADD/COPY');
+const CANONICAL_GRAPH_SHA256='6d4f8d9181f3c25455647d0c4dd3a2f8505edf4f1aa94dece19ff9914eee8c57';
+const CANONICAL_MANIFEST_SHA256='667a73d67092dff459b7846fd06d4441c815d7a974dd27c56f0fa32342d1a439';
+assert.equal(digest(JSON.stringify(instructions)),CANONICAL_GRAPH_SHA256,'complete effective Docker build graph is not the independently approved graph');
+assert.equal(digest(JSON.stringify(manifest)),CANONICAL_MANIFEST_SHA256,'release manifest is not the independently approved canonical policy');
 const one=(prefix,label)=>{const xs=instructions.filter(x=>x.startsWith(prefix));assert.equal(xs.length,1,`${label}: expected exactly one semantic instruction`);return xs[0];};
 const exact=(value,label)=>assert.equal(instructions.filter(x=>x===value).length,1,`${label}: exact instruction required`);
 assert.equal(manifest.schemaVersion,1);
@@ -91,5 +85,5 @@ for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageA
 assert.ok(wrun.startsWith(`RUN WECHAT_VERSION=${w.version} && `),'immutable WeChat version must exactly match manifest');
 for(const check of ['echo "$WECHAT_SHA256 /tmp/wechat.deb" | sha256sum --check --strict && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat','test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION"','test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH"'])assert.ok(wrun.includes(check),`WeChat semantic check missing: ${check}`);
 for(const [copy,presence] of [['&& cp /opt/novnc/LICENSE.txt /opt/novnc/docs/LICENSE.* /usr/share/doc/agent-wechat/licenses/novnc/ &&','test -s /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt'],['&& cp LICENSE.md /usr/share/doc/agent-wechat/licenses/sqlcipher/ &&','test -s /usr/share/doc/agent-wechat/licenses/sqlcipher/LICENSE.md']]){assert.ok(runs.some(x=>x.includes(copy)),`notice copy missing: ${copy}`);assert.ok(wrun.includes(presence));}
-for(const p of ['docker/release-inputs.json','docker/release-instruction-allowlist.json','docker/release-materials/requirements.lock','docker/release-materials/frida_tools-14.10.4-py3-none-any.whl','scripts/validate-release-inputs.mjs','scripts/test-release-inputs.mjs','scripts/download-wechat.sh'])assert.ok(workflow.includes(`- '${p}'`),`workflow path missing: ${p}`);
-console.log('Release inputs are semantically pinned, hash-bound, allowlisted, and notice-checked.');
+for(const p of ['docker/release-inputs.json','docker/release-materials/requirements.lock','docker/release-materials/frida_tools-14.10.4-py3-none-any.whl','scripts/validate-release-inputs.mjs','scripts/test-release-inputs.mjs','scripts/download-wechat.sh'])assert.ok(workflow.includes(`- '${p}'`),`workflow path missing: ${p}`);
+console.log('Release inputs match the independent closed positive build graph and canonical manifest.');
