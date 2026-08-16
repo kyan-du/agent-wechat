@@ -84,6 +84,9 @@ RUN apt-get update \
 # ============================================
 COPY release-materials/requirements.lock release-materials/frida_tools-14.10.4-py3-none-any.whl /opt/release-inputs/
 RUN pip3 install --require-hashes --only-binary=:all: --find-links=/opt/release-inputs -r /opt/release-inputs/requirements.lock
+COPY python/ /opt/python-compat/
+ENV PYTHONPATH=/opt/python-compat
+RUN python3 -c "import frida, sys, typing; assert sys.version_info[:2] == (3, 10); assert getattr(typing, 'NotRequired', None) is not None; assert frida.__version__ == '17.17.0'; print('frida import smoke ok', frida.__version__)"
 
 # ============================================
 # noVNC (browser-based VNC viewer) + websockify
