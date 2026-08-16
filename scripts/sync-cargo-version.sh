@@ -9,7 +9,11 @@ RUST_DIR="$SCRIPT_DIR/../packages/agent-server-rust"
 VERSION=$(node -p "require('$RUST_DIR/package.json').version")
 
 # Update the version in [package] section of Cargo.toml
-sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$RUST_DIR/Cargo.toml"
+if sed --version >/dev/null 2>&1; then
+  sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$RUST_DIR/Cargo.toml"
+else
+  sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" "$RUST_DIR/Cargo.toml"
+fi
 
 echo "Synced Cargo.toml version to $VERSION"
 

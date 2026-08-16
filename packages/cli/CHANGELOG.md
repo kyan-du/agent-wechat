@@ -1,5 +1,17 @@
 # @agent-wechat/cli
 
+## 0.12.0-next.0
+
+### Minor Changes
+
+- [#8](https://github.com/kyan-du/agent-wechat/pull/8) [`522415f`](https://github.com/kyan-du/agent-wechat/commit/522415fa1208919f7b4edf5ad785ca6fa11d0095) Thanks [@vangie](https://github.com/vangie)! - Experimental fingerprint and send-pacing changes. Not a guarantee of account safety.
+
+  - Per-volume machine-id; hostname/MAC generated before create (`wx up` or `scripts/device-identity.sh`) and passed into Docker. Compose fails closed if they are unset.
+  - Outbound queue (from #4) plus chat cooldown, hourly/daily budgets, quiet hours, and inbound-length reading delay
+  - Same-chat identity prefers live a11y header + local DB; Frida verify-only is fallback when that is ambiguous
+  - Reconnect catch-up stays `read-only` unless `catchUpMode` is exactly `latest`. Auto-replies are capped at `catchUpChatBudget` chats (default 5), one per poll; leftovers stay held until the budget is raised or a human handles them
+  - Security popups pause outbound; resume via POST /api/status/outbound/resume
+
 ## 0.11.15
 
 ## 0.11.14
