@@ -1,0 +1,136 @@
+name: Publish exact GHCR prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact semver prerelease from release/prerelease-contract.json
+        required: true
+        type: string
+
+concurrency:
+  group: ghcr-prerelease-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/kyan-du/agent-wechat
+
+jobs:
+  authorize:
+    name: Authorize main release
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.guard.outputs.sha }}
+      version: ${{ steps.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: guard
+        name: Fail-closed release authorization
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+          node scripts/validate-ghcr-release.mjs --runtime "$VERSION" "$GITHUB_SHA"
+          status=$(curl --silent --show-error --output /tmp/versions.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" --header 'Accept: application/vnd.github+json' \
+            'https://api.github.com/users/kyan-du/packages/container/agent-wechat/versions?per_page=100')
+          if [ "$status" = 200 ]; then
+            ! node -e 'const fs=require("fs");const [p,v]=process.argv.slice(1);const xs=JSON.parse(fs.readFileSync(p));process.exit(xs.some(x=>x.metadata?.container?.tags?.includes(v))?0:1)' /tmp/versions.json "$VERSION"
+          elif [ "$status" != 404 ]; then
+            cat /tmp/versions.json >&2
+            exit 1
+          fi
+          printf 'sha=%s\nversion=%s\n' "$GITHUB_SHA" "$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }} digest
+    needs: authorize
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+      - name: Prepare Docker context
+        run: |
+          rm -rf docker/agent-server-rust
+          mkdir -p docker/agent-server-rust
+          cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
+          [ -f packages/agent-server-rust/Cargo.lock ] && cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
+          cp -r packages/agent-server-rust/src packages/agent-server-rust/migrations docker/agent-server-rust/
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@v4
+      - id: build
+        name: Push content-addressed image only
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=ghcr-${{ matrix.arch }}
+          cache-to: type=gha,scope=ghcr-${{ matrix.arch }},mode=max
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          test "${digest#sha256:}" != "$digest"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Create exact version manifest
+    needs: [authorize, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@v4
+      - name: Publish exact tag and verify platforms
+        env:
+          VERSION: ${{ needs.authorize.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find /tmp/digests -type f | sort)
+          test "${#files[@]}" -eq 2
+          refs=()
+          for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .}}' > manifest.json
+          node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ps=(j.manifest?.manifests??j.manifests??[]).map(x=>`${x.platform?.os}/${x.platform?.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`platforms: ${ps}`)'
