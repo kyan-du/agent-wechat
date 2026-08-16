@@ -37,39 +37,39 @@ pnpm build
 pnpm build:image
 
 # Start the locally built container
-pnpm cli up
+pnpm cli start
 
 # Login (displays QR code in terminal)
-wx auth login
+pnpm cli auth login
 
 # List your chats
-wx chats list
+pnpm cli chats
 
 # Send a message
-wx messages send <chatId> --text "Hello"
+pnpm cli send <chatId> --text "Hello"
 
 # Read messages
-wx messages list <chatId>
+pnpm cli messages <chatId>
 
 # Stop the container
-wx down
+pnpm cli stop
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `wx up [--proxy user:pass@host:port] [--image <reference>]` | Start a local image, or an explicit published fork version/digest |
-| `wx down` | Stop and remove container |
-| `wx logs` | Stream container logs |
-| `wx status` | Show server and login status |
-| `wx auth login` | Login flow (shows QR code) |
-| `wx chats list` | List chats |
-| `wx find <name>` | Find chat by name |
-| `wx messages list <id>` | List messages in a chat |
-| `wx messages send <id> --text <msg>` | Send text message |
-| `wx messages send <id> --image <file>` | Send image |
-| `wx messages media <id> <localId>` | Download media attachment |
+| `pnpm cli start [--proxy user:pass@host:port] [--image <reference>]` | Start a local image, or an explicit published fork version/digest |
+| `pnpm cli stop` | Stop and remove container |
+| `pnpm cli logs` | Stream container logs |
+| `pnpm cli status` | Show server and login status |
+| `pnpm cli auth login` | Login flow (shows QR code) |
+| `pnpm cli chats` | List chats |
+| `pnpm cli find <name>` | Find chat by name |
+| `pnpm cli messages <id>` | List messages in a chat |
+| `pnpm cli send <id> --text <msg>` | Send text message |
+| `pnpm cli send <id> --image <file>` | Send image |
+| `pnpm cli messages media <id> <localId>` | Download media attachment |
 
 ## Architecture
 
@@ -97,7 +97,7 @@ wx down
 
 ```bash
 pnpm build:image
-pnpm cli up    # uses agent-wechat:<host architecture>
+pnpm cli start    # uses agent-wechat:<host architecture>
 ```
 
 **Option B: local image with Docker Compose** (for custom networking)
@@ -182,7 +182,7 @@ pnpm build:image:amd64       # Build Docker image (Intel)
 
 These are experimental fingerprint and pacing changes. They are not a guarantee the account stays unrestricted. Do not trial them on a primary account.
 
-- One account, one persistent device identity (`machine-id` / hostname / MAC). `wx up` writes this once and passes hostname/MAC at create time. Compose: `eval "$(./scripts/device-identity.sh)"` before `docker compose up` — the script emits `export KEY=value` so Compose interpolation can see them. Hostname/MAC cannot be changed from inside the container. A mismatched identity aborts the entrypoint before WeChat starts.
+- One account, one persistent device identity (`machine-id` / hostname / MAC). `wx start` writes this once and passes hostname/MAC at create time. Compose: `eval "$(./scripts/device-identity.sh)"` before `docker compose up` — the script emits `export KEY=value` so Compose interpolation can see them. Hostname/MAC cannot be changed from inside the container. A mismatched identity aborts the entrypoint before WeChat starts.
 - Prefer a stable residential exit in the same city as the phone. Do not rotate the proxy mid-session. Do not share one IP across accounts.
 - Sends go through the outbound queue: spacing, chat cooldown, hourly/daily budgets, quiet hours (00:30–07:30 local), and a reading delay when callers pass `inboundChars`. After reconnect, at most `catchUpChatBudget` chats (default 5) auto-reply, one per poll. Leftovers stay in reconnect-hold (`catchup_hold`) and are not flipped to a live burst. Raise `channels.wechat.catchUpChatBudget` (hot-reload) to continue the hold, or handle the remaining unread chats yourself.
 - A security/verification popup pauses outbound. Recover with `POST /api/status/outbound/resume` after you handle it yourself.

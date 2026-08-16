@@ -80,7 +80,7 @@ pub fn list_contacts(
     account_dir: &str,
     keys: &HashMap<String, String>,
     limit: i64,
-    offset: i64,
+    cursor: Option<&str>,
 ) -> Vec<Contact> {
     let contact_key = match keys.get("contact.db") {
         Some(k) => k,
@@ -89,8 +89,20 @@ pub fn list_contacts(
 
     let contact_db = get_db_path(account_dir, "contact.db");
 
+    let cursor_clause = match cursor {
+        Some(raw) => {
+            let Ok((remark_missing, label, username)) = crate::tools::page_cursor::decode::<(bool, String, String)>("contacts", raw) else {
+                return Vec::new();
+            };
+            let remark_rank = if remark_missing { 0 } else { 1 };
+            let escaped_label = label.replace('\'', "''");
+            let escaped_username = username.replace('\'', "''");
+            format!(" AND ((remark != '') < {remark_rank} OR ((remark != '') = {remark_rank} AND (lower(CASE WHEN remark != '' THEN remark ELSE nick_name END) > '{escaped_label}' OR (lower(CASE WHEN remark != '' THEN remark ELSE nick_name END) = '{escaped_label}' AND username > '{escaped_username}'))))")
+        }
+        None => String::new(),
+    };
+    let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 200);
     // local_type: 0=system notifications, 1=contacts+official, 2=chatrooms, 3=contacts, 5=openim
-    // Include 1, 3, 5 (skip 0=system notifications, 2=chatrooms)
     let rows = query_wechat_db(
         &contact_db,
         contact_key,
@@ -98,9 +110,9 @@ pub fn list_contacts(
             "SELECT username, nick_name, remark, alias, small_head_url, local_type
              FROM contact
              WHERE local_type IN (1, 3, 5)
-               AND username NOT LIKE '%@chatroom'
-             ORDER BY remark != '' DESC, nick_name COLLATE NOCASE ASC
-             LIMIT {limit} OFFSET {offset};"
+               AND username NOT LIKE '%@chatroom'{cursor_clause}
+             ORDER BY remark != '' DESC, lower(CASE WHEN remark != '' THEN remark ELSE nick_name END) ASC, username ASC
+             LIMIT {safe_limit};"
         ),
     );
 

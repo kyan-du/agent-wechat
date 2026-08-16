@@ -182,8 +182,9 @@ ENV AGENT_PORT=6174
 # ============================================
 COPY entrypoint.sh /entrypoint.sh
 COPY identity.sh /opt/identity.sh
+COPY reset-device-identity.sh /opt/reset-device-identity.sh
 COPY supervise-agent-server.sh /opt/supervise-agent-server.sh
-RUN chmod +x /entrypoint.sh /opt/identity.sh /opt/supervise-agent-server.sh
+RUN chmod +x /entrypoint.sh /opt/identity.sh /opt/reset-device-identity.sh /opt/supervise-agent-server.sh
 
 EXPOSE 6174 1234
 

@@ -11,10 +11,10 @@ agent-wechat can route all container traffic through a transparent proxy. This i
 
 ```bash
 # HTTP proxy
-pnpm cli up --proxy user:pass@host:port
+pnpm cli start --proxy user:pass@host:port
 
 # SOCKS5 proxy
-pnpm cli up --proxy socks5://user:pass@host:port
+pnpm cli start --proxy socks5://user:pass@host:port
 ```
 
 ### Via Docker Compose
@@ -57,8 +57,8 @@ cap_add:
 To change the proxy, stop and restart the container with the new value:
 
 ```bash
-pnpm cli down
-pnpm cli up --proxy new-proxy:port
+pnpm cli stop
+pnpm cli start --proxy new-proxy:port
 ```
 
 Or update the `PROXY` environment variable and recreate:

@@ -8,7 +8,6 @@ import type {
   LoginResult,
   LoginSubscriptionEvent,
   OpenChatResult,
-  Session,
   SendParams,
 } from "./types/index.js";
 
@@ -18,7 +17,15 @@ export type StatusResponse = {
   container: string;
   loginState: LoginState;
   version: string;
+  apiVersion: number;
 };
+export type CursorPage<T> = {
+  schemaVersion: 1;
+  items: T[];
+  nextCursor?: string;
+  errorCode?: string;
+};
+
 export type AuthStatus = {
   status: "logged_in" | "logged_out" | "app_not_running" | "unknown";
   loggedInUser?: string;
@@ -27,7 +34,6 @@ export type AuthStatus = {
 export interface WeChatClientOptions {
   baseUrl: string;
   token?: string;
-  sessionId?: string;
   headers?: Record<string, string>;
 }
 
@@ -108,8 +114,6 @@ export class WeChatClient {
     this.base = normalizeUrl(options.baseUrl);
     this.headers = { "Content-Type": "application/json" };
     if (options.token) this.headers.Authorization = `Bearer ${options.token}`;
-    if (options.sessionId)
-      this.headers["X-Session-Id"] = options.sessionId;
     if (options.headers) Object.assign(this.headers, options.headers);
   }
 
@@ -138,15 +142,6 @@ export class WeChatClient {
     return res.json() as Promise<T>;
   }
 
-  private async del<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.base}${path}`, {
-      method: "DELETE",
-      headers: this.headers,
-    });
-    if (!res.ok) await throwHttpError(res);
-    return res.json() as Promise<T>;
-  }
-
   // ---- Status ----
 
   async status(): Promise<StatusResponse> {
@@ -170,13 +165,24 @@ export class WeChatClient {
     return this.post("/api/status/logout");
   }
 
+  async resetAuth(): Promise<{ success: boolean; errorCode?: string; error?: string }> {
+    return this.post("/api/status/auth/reset");
+  }
+
   // ---- Chats ----
 
-  async listChats(
+  async listChatsPage(
     limit?: number,
-    offset?: number,
-  ): Promise<Chat[]> {
-    return this.get(`/api/chats${qs({ limit, offset })}`);
+    cursor?: string,
+    unreadOnly?: boolean,
+  ): Promise<CursorPage<Chat>> {
+    const page = await this.get<CursorPage<Chat>>(`/api/chats${qs({ limit, cursor, unreadOnly })}`);
+    if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
+    return page;
+  }
+
+  async listChats(limit?: number): Promise<Chat[]> {
+    return (await this.listChatsPage(limit)).items;
   }
 
   async getChat(id: string): Promise<Chat | null> {
@@ -185,6 +191,10 @@ export class WeChatClient {
 
   async findChats(name: string): Promise<Chat[]> {
     return this.get(`/api/chats/find${qs({ name })}`);
+  }
+
+  async markChatRead(chatId: string): Promise<OpenChatResult & { beforeUnread?: number; afterUnread?: number }> {
+    return this.post(`/api/chats/${encodeURIComponent(chatId)}/mark-read`);
   }
 
   async openChat(
@@ -198,11 +208,14 @@ export class WeChatClient {
 
   // ---- Contacts ----
 
-  async listContacts(
-    limit?: number,
-    offset?: number,
-  ): Promise<Contact[]> {
-    return this.get(`/api/contacts${qs({ limit, offset })}`);
+  async listContactsPage(limit?: number, cursor?: string): Promise<CursorPage<Contact>> {
+    const page = await this.get<CursorPage<Contact>>(`/api/contacts${qs({ limit, cursor })}`);
+    if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
+    return page;
+  }
+
+  async listContacts(limit?: number): Promise<Contact[]> {
+    return (await this.listContactsPage(limit)).items;
   }
 
   async findContacts(name: string): Promise<Contact[]> {
@@ -211,14 +224,20 @@ export class WeChatClient {
 
   // ---- Messages ----
 
-  async listMessages(
+  async listMessagesPage(
     chatId: string,
     limit?: number,
-    offset?: number,
-  ): Promise<Message[]> {
-    return this.get(
-      `/api/messages/${encodeURIComponent(chatId)}${qs({ limit, offset })}`,
+    cursor?: string,
+  ): Promise<CursorPage<Message>> {
+    const page = await this.get<CursorPage<Message>>(
+      `/api/messages/${encodeURIComponent(chatId)}${qs({ limit, cursor })}`,
     );
+    if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
+    return page;
+  }
+
+  async listMessages(chatId: string, limit?: number): Promise<Message[]> {
+    return (await this.listMessagesPage(chatId, limit)).items;
   }
 
   async getMedia(
@@ -282,36 +301,6 @@ export class WeChatClient {
   }
 
   // ---- Sessions ----
-
-  async createSession(name: string): Promise<Session> {
-    return this.post("/api/sessions", { name });
-  }
-
-  async listSessions(): Promise<Session[]> {
-    return this.get("/api/sessions");
-  }
-
-  async getSession(id: string): Promise<Session | null> {
-    return this.get(`/api/sessions/${encodeURIComponent(id)}`);
-  }
-
-  async startSession(id: string): Promise<Session> {
-    return this.post(
-      `/api/sessions/${encodeURIComponent(id)}/start`,
-    );
-  }
-
-  async stopSession(id: string): Promise<Session> {
-    return this.post(
-      `/api/sessions/${encodeURIComponent(id)}/stop`,
-    );
-  }
-
-  async deleteSession(
-    id: string,
-  ): Promise<{ success: boolean }> {
-    return this.del(`/api/sessions/${encodeURIComponent(id)}`);
-  }
 
   // ---- Login subscription (WebSocket) ----
 

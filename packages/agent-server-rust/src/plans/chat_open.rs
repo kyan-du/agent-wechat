@@ -1,7 +1,7 @@
 use super::Plan;
 use crate::ia::actions;
 use crate::ia::helpers::find_edit_and_send_button;
-use crate::ia::selectors::{query_selector, query_selector_all};
+use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
 
@@ -20,7 +20,6 @@ pub struct ChatOpenPlanState {
 pub enum ChatOpenPhase {
     Opening,
     Focusing,
-    ClickingAudio,
     Done,
 }
 
@@ -131,8 +130,10 @@ impl Plan for ChatOpenPlan {
                         }
                     };
 
-                    plan_state.phase = ChatOpenPhase::ClickingAudio;
-                    tracing::info!("[chat_open] Focusing → ClickingAudio, edit_bounds={:?}", edit_node.bounds);
+                    // Focusing the verified target is sufficient to let WeChat clear the
+                    // conversation unread count. Never click message content while marking read.
+                    plan_state.phase = ChatOpenPhase::Done;
+                    tracing::info!("[chat_open] Focusing → Done, edit_bounds={:?}", edit_node.bounds);
 
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
@@ -141,44 +142,6 @@ impl Plan for ChatOpenPlan {
                         });
                     }
                     continue;
-                }
-
-                ChatOpenPhase::ClickingAudio => {
-                    if main_state_id != Some("chat_open") {
-                        tracing::info!("[chat_open] ClickingAudio: wrong state {:?}", main_state_id);
-                        return None;
-                    }
-
-                    let unplayed = query_selector_all(
-                        a11y,
-                        r#"list[name="Messages"] > list-item[name=/^Audio.*Unplay/s]"#,
-                    );
-
-                    // Build a sequence: click each unplayed audio with a wait between
-                    let mut seq: Vec<Action> = Vec::new();
-                    for node in &unplayed {
-                        if let Some(bounds) = &node.bounds {
-                            let x = (bounds.x + 100.0).round();
-                            let y = (bounds.y + bounds.height / 2.0).round();
-                            seq.push(actions::click_at(x, y));
-                            seq.push(Action::Wait { ms: 500 });
-                        }
-                    }
-                    tracing::info!("[chat_open] ClickingAudio: found {} unplayed, sequence of {} actions", unplayed.len(), seq.len());
-
-                    plan_state.phase = ChatOpenPhase::Done;
-
-                    if seq.is_empty() {
-                        return Some(SelectedAction {
-                            action: actions::wait_short(),
-                            frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
-                        });
-                    }
-
-                    return Some(SelectedAction {
-                        action: Action::Sequence { actions: seq },
-                        frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
-                    });
                 }
 
                 ChatOpenPhase::Done => return None,

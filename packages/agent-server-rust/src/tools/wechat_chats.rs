@@ -7,7 +7,8 @@ pub fn list_chats(
     account_dir: &str,
     keys: &HashMap<String, String>,
     limit: i64,
-    offset: i64,
+    cursor: Option<&str>,
+    unread_only: bool,
 ) -> Vec<Chat> {
     let session_key = match keys.get("session.db") {
         Some(k) => k,
@@ -21,6 +22,18 @@ pub fn list_chats(
     let session_db = get_db_path(account_dir, "session.db");
     let contact_db = get_db_path(account_dir, "contact.db");
 
+    let cursor_clause = match cursor {
+        Some(raw) => {
+            let Ok((sort_timestamp, username)) = crate::tools::page_cursor::decode::<(i64, String)>("chats", raw) else {
+                return Vec::new();
+            };
+            let escaped = username.replace('\'', "''");
+            format!(" AND (sort_timestamp < {sort_timestamp} OR (sort_timestamp = {sort_timestamp} AND username > '{escaped}'))")
+        }
+        None => String::new(),
+    };
+    let unread_clause = if unread_only { " AND unread_count > 0" } else { "" };
+    let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 100);
     let sessions = query_wechat_db(
         &session_db,
         session_key,
@@ -29,9 +42,9 @@ pub fn list_chats(
                     sort_timestamp, last_msg_sender, last_sender_display_name, is_hidden,
                     last_msg_locald_id
              FROM SessionTable
-             WHERE is_hidden = 0
-             ORDER BY sort_timestamp DESC
-             LIMIT {limit} OFFSET {offset};"
+             WHERE is_hidden = 0{unread_clause}{cursor_clause}
+             ORDER BY sort_timestamp DESC, username ASC
+             LIMIT {safe_limit};"
         ),
     );
 
@@ -140,6 +153,7 @@ pub fn list_chats(
                 last_message_preview,
                 last_message_sender,
                 last_activity_at,
+                sort_timestamp: session.get("sort_timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
                 last_msg_local_id,
             })
         })
@@ -233,6 +247,7 @@ pub fn get_chat_by_username(
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_default()
             }),
+        sort_timestamp: session.get("sort_timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
         last_msg_local_id: session
             .get("last_msg_locald_id")
             .and_then(|v| v.as_i64()),
@@ -357,6 +372,7 @@ pub fn find_chats_by_name(
                             .map(|dt| dt.to_rfc3339())
                             .unwrap_or_default()
                     }),
+                sort_timestamp: session.get("sort_timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
                 last_msg_local_id: session
                     .get("last_msg_locald_id")
                     .and_then(|v| v.as_i64()),

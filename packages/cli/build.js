@@ -30,4 +30,14 @@ copyFileSync(
   join(here, "dist/device_identity.py"),
 );
 
+const compatibility = {
+  schemaVersion: 1,
+  cliVersion: pkg.version,
+  repository: "ghcr.io/kyan-du/agent-wechat",
+  apiVersion: 1,
+  allowedReferences: ["local-build", "exact-semver-tag", "sha256-digest"],
+  floatingTagsAllowed: false,
+};
+writeFileSync(join(here, "dist/image-compatibility.json"), `${JSON.stringify(compatibility, null, 2)}\n`);
+
 writeFileSync("dist/.release-metafile.json", JSON.stringify(result.metafile, null, 2) + "\n");

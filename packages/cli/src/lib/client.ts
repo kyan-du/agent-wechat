@@ -4,7 +4,6 @@ import type { LoginSubscriptionEvent } from "@kyan-du/agent-wechat-shared";
 export interface SubscriptionClientOptions {
   url: string;
   token?: string;
-  sessionId?: string;
 }
 
 // Subscription client interface for WebSocket-based subscriptions
@@ -41,7 +40,6 @@ export function createSubscriptionClient(options: SubscriptionClientOptions): Su
   const wechatClient = new WeChatClient({
     baseUrl: options.url,
     token: options.token,
-    sessionId: options.sessionId,
   });
 
   let activeHandle: { close: () => void } | null = null;
