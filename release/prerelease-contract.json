@@ -22,5 +22,5 @@
     "@kyan-du/agent-wechat-wechaty-gateway"
   ],
   "requiredApprovals": ["owner", "legalRedistribution"],
-  "externalSideEffects": false
+  "externalSideEffects": true
 }

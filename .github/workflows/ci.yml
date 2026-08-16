@@ -41,6 +41,9 @@ jobs:
               - '.github/dependabot.yml'
               - 'src/**'
               - 'scripts/validate-release-boundary.mjs'
+              - 'scripts/validate-ghcr-release.mjs'
+              - 'scripts/test-ghcr-release.mjs'
+              - '.github/workflows/ghcr-prerelease.yml'
               - '.github/workflows/docker-rebuild.yml'
               - '.github/workflows/ci.yml'
               - 'scripts/audit-release.sh'
@@ -141,6 +144,7 @@ jobs:
       - name: Guard unreleased channels and root CLI image behavior
         run: |
           pnpm test:release-boundary -- --require-rendered
+          pnpm test:ghcr-release
           pnpm test:root-cli-image
 
       - name: Lint availability

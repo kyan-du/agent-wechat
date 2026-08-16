@@ -31,7 +31,8 @@
     "validate:prerelease": "bash scripts/validate-prerelease.sh",
     "test:prerelease-contract": "bash scripts/test-prerelease-contract.sh",
     "test:prerelease-manifest": "bash scripts/test-prerelease-manifest.sh",
-    "test:npm-packages": "node scripts/smoke-npm-packages.mjs"
+    "test:npm-packages": "node scripts/smoke-npm-packages.mjs",
+    "test:ghcr-release": "node scripts/validate-ghcr-release.mjs && node scripts/test-ghcr-release.mjs"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.2",

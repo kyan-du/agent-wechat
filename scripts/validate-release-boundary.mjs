@@ -138,7 +138,7 @@ const workflows = readdirSync(".github/workflows").filter((name) => /\.ya?ml$/.t
 for (const name of workflows) {
   const path = join(".github/workflows", name);
   const text = readFileSync(path, "utf8");
-  if (/docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
+  if (name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
     failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
   }
   if (GHCR_LATEST.test(text) || LOCAL_LATEST.test(text)) failures.push(`${path} can reference or move :latest before first-release authorization`);

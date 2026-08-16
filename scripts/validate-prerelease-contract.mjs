@@ -13,7 +13,7 @@ const same = (left, right) => JSON.stringify([...left].sort()) === JSON.stringif
 const contract = readJson("release/prerelease-contract.json");
 if (contract.npmDistTag !== "next" || contract.versionPrerelease !== "next") fail("prerelease contract must use next exclusively");
 if (!contract.forbiddenDistTags?.includes("latest")) fail("prerelease contract must explicitly forbid latest");
-if (contract.externalSideEffects !== false) fail("P1-B1 must remain validation-only");
+if (contract.externalSideEffects !== true) fail("approved prerelease publication must remain explicit");
 if (!same(contract.requiredApprovals ?? [], ["owner", "legalRedistribution"])) fail("owner and legal/redistribution approvals must remain hard gates");
 
 const workspaceList = JSON.parse(run("pnpm", ["-r", "list", "--depth", "-1", "--json"]));
@@ -80,7 +80,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
   const checkPermissions = (permissions, where) => {
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
-    for (const scope of ["packages", "contents"]) if (permissions[scope] === "write") forbidden.push(`${name}: ${where} ${scope} write permission`);
+    for (const scope of ["packages", "contents"]) if (permissions[scope] === "write" && !(name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")) forbidden.push(`${name}: ${where} ${scope} write permission`);
   };
   checkPermissions(workflow.permissions, "workflow");
   for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
@@ -88,9 +88,9 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     for (const step of job?.steps ?? []) {
       const uses = String(step?.uses ?? "");
       const command = String(step?.run ?? "");
-      if (/docker\/login-action/i.test(uses)) forbidden.push(`${name}: registry login action`);
+      if (/docker\/login-action/i.test(uses) && name !== "ghcr-prerelease.yml") forbidden.push(`${name}: registry login action`);
       if (/softprops\/action-gh-release|actions\/create-release/i.test(uses)) forbidden.push(`${name}: GitHub Release action`);
-      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true) forbidden.push(`${name}: image push action`);
+      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && name !== "ghcr-prerelease.yml") forbidden.push(`${name}: image push action`);
       const commands = [
         [/\b(?:npm|pnpm)\s+publish\b/i, "npm publish"],
         [/\bchangeset\s+publish\b/i, "changeset publish"],
@@ -99,8 +99,8 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
         [/\bdocker\s+(?:push|buildx\s+build[^\n]*--push)\b/i, "image push"],
       ];
       for (const [pattern, label] of commands) {
-        const approvedNpmPublish = name === "npm-prerelease.yml" && label === "npm publish";
-        if (pattern.test(command) && !approvedNpmPublish) forbidden.push(`${name}: ${label}`);
+        const approvedPublish = (name === "npm-prerelease.yml" && label === "npm publish") || (name === "ghcr-prerelease.yml" && label === "image push");
+        if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
   }
@@ -123,4 +123,4 @@ const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");
 if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md"))) fail("P1-B1 runbook is missing");
 
-console.log(`prerelease contract valid: next only; ${contract.publicPackages.length} public packages; private coupling audited; workflows read-only`);
+console.log(`prerelease contract valid: next only; ${contract.publicPackages.length} public packages; approved workflows are capability-scoped`);
