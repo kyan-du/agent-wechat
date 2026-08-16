@@ -46,22 +46,22 @@ The committed inventory describes the tree content, not a self-referential commi
 
 ## P1-C1a immutable-input and notice update
 
-P1-C1a pins the multi-architecture Docker base-image indexes by digest,
-uses the builder image's pinned pkg-config and CA bundle without mutable Debian
-resolution, and records all release-relevant direct downloads in `docker/release-inputs.json`.
-noVNC 1.5.0 and SQLCipher 4.6.1 archives are SHA-256 verified before extraction;
-the complete noVNC top-level/docs/pako license set and SQLCipher `LICENSE.md`
-are retained in `/usr/share/doc/agent-wechat/licenses` and asserted during the
-image build. The WeChat 4.1.1.8 amd64/arm64 downloads are independently
-recorded by source, package architecture, and SHA-256, and the build verifies
-hash plus Debian package metadata before installation. Local payloads remain
+P1-C1a acceptance is limited to the release inputs and publication boundary
+controlled directly by this repository: the multi-architecture Docker base
+images are pinned by digest; direct remote artifacts with explicit versions
+(noVNC 1.5.0, SQLCipher 4.6.1, and WeChat 4.1.1.8 for amd64/arm64) are recorded
+and SHA-256 verified; required noVNC and SQLCipher notices are retained and
+asserted during the image build; and Docker CI remains build-only for amd64 and
+arm64, with no registry permissions or publication step. Local payloads remain
 excluded from the Docker context and are not committed.
 
-`scripts/validate-release-inputs.mjs` checks the complete allowlisted
-Dockerfile input graph, manifest, local wheel hash, and workflow consistency.
-`scripts/test-release-inputs.mjs` proves digest, repository, apt/pip injection,
-verification, package-metadata, wheel, cache, and notice drift fail closed. Docker CI remains build-only for amd64 and arm64;
-it has no registry permissions or publication step.
+The validator enforces those repository-controlled inputs, notices, supported
+architectures, and the publication boundary. Repository-level reproducibility
+of mutable apt/pip indexes is an accepted limitation and is not a P1-C1a
+blocker. Revalidation of a WeChat package already present in the build cache is
+also an accepted limitation and is not a P1-C1a blocker. Existing dependency
+pinning or cache-validation safeguards may remain where they are useful; these
+limitations do not require removing them.
 
 **Publication remains blocked.** Immutable provenance and retained third-party
 notices do not supply the absent upstream source-code grant, do not establish
