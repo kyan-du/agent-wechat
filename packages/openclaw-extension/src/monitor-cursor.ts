@@ -11,12 +11,32 @@ export function equalCursorUnreadKey(chatId: string, localId: number): string {
   return `${chatId}:${localId}`;
 }
 
+export function markEqualCursorUnreadHandled(
+  chatId: string,
+  localId: number | undefined,
+  equalCursorUnreadHandled: Set<string>,
+): void {
+  if (localId === undefined) return;
+  equalCursorUnreadHandled.add(equalCursorUnreadKey(chatId, localId));
+}
+
+export function markCursorMessagesHandled(
+  chatId: string,
+  messages: Message[],
+  equalCursorUnreadHandled: Set<string>,
+): number | undefined {
+  if (messages.length === 0) return undefined;
+  const cursor = Math.max(...messages.map((message) => message.localId));
+  markEqualCursorUnreadHandled(chatId, cursor, equalCursorUnreadHandled);
+  return cursor;
+}
+
 export function selectCursorMessages(
   chatId: string,
   chat: Chat,
   messages: Message[],
   lastSeenId: Map<string, number>,
-  equalCursorUnreadDispatched: Set<string>,
+  equalCursorUnreadHandled: Set<string>,
 ): CursorSelection {
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
@@ -58,7 +78,7 @@ export function selectCursorMessages(
   const recoverable =
     equalCursorUnread.length === 1 &&
     chat.lastMsgLocalId === prevLastSeen &&
-    !equalCursorUnreadDispatched.has(equalCursorUnreadKey(chatId, prevLastSeen));
+    !equalCursorUnreadHandled.has(equalCursorUnreadKey(chatId, prevLastSeen));
 
   return {
     firstPoll,
