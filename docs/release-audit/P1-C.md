@@ -9,7 +9,7 @@ Audit lineage began at `24a3d6843e627a061f0dd52ee66a8448837efaf7`; evidence is r
 | npm CLI | project/shared code, bundled commander/zod, external qrcode-terminal, and `dist/device_identity.py` | Repository and all three public package manifests contain no `license`; repository has no `LICENSE`/`NOTICE`. No authoritative grant from the upstream copyright holder was found in repository history or GitHub's license endpoint (404). Bundling also makes dependency notices a release input. | **BLOCKED**: obtain/document an authoritative source-code license, add package license metadata and ship the applicable license/notices. |
 | npm OpenClaw extension | project/shared code, bundled zod/qrcode-terminal, `openclaw.plugin.json`; OpenClaw is external | Same absent upstream grant. | **BLOCKED** for the same reason. |
 | npm Wechaty puppet | project/shared code and bundled zod; peer `wechaty-puppet` and runtime `file-box` remain external | Same absent upstream grant. | **BLOCKED** for the same reason. |
-| GHCR runtime image | project Rust binary/tools, Ubuntu packages, noVNC, websockify/frida/silk Python packages, SQLCipher CLI plus vendored SQLCipher/OpenSSL in Rust, and proprietary WeChat | Base/package licenses must be captured from the exact built image. noVNC v1.5.0 is mixed-license (MPL-2.0 core plus BSD-2-Clause/OFL-1.1/CC-BY-SA-3.0 assets and embedded components) per its tagged `LICENSE.txt`; SQLCipher v4.6.1 is BSD-3-Clause per tagged `LICENSE.md`, requiring the notice in binary redistribution materials. Base images are digest-pinned; noVNC and SQLCipher notices are retained. WeChat provenance, version, architecture, and hashes are recorded, but no authoritative redistribution grant is established. | **BLOCKED**: no image publication. Resolve every condition below and generate an exact-image SBOM/license report. |
+| GHCR runtime image | project Rust binary/tools, Ubuntu packages, noVNC, websockify/frida/silk Python packages, SQLCipher CLI plus vendored SQLCipher/OpenSSL in Rust, and proprietary WeChat | Base/package licenses must be captured from the exact built image. noVNC v1.5.0 is mixed-license (MPL-2.0 core plus BSD-2-Clause/OFL-1.1/CC-BY-SA-3.0 assets and embedded components) per its tagged `LICENSE.txt`; SQLCipher v4.6.1 is BSD-3-Clause per tagged `LICENSE.md`, requiring the notice in binary redistribution materials. Base images are digest-pinned and direct critical artifacts have recorded versions and hashes. This project is currently private/internal-use and not externally distributed, so in-image notice packaging is deferred to a separate pre-distribution compliance task. noVNC, SQLCipher, upstream-code, and WeChat obligations are not waived or concluded absent. | **BLOCKED for external distribution**: complete the licensing/notice review and exact-image SBOM/license report first. |
 | source archive / GitHub release attachment | repository source | No repository license/grant. GitHub-generated archives are hosting conveniences, not evidence of redistribution permission. | **BLOCKED**: do not attach or describe source as redistributable until an authoritative grant exists. |
 
 Private workspaces (`agent-server`, `shared`, `wechaty-gateway`, root/docs) are not npm release artifacts. If P1-A changes `private`, names, `files`, build output, or image identity, rerun this audit against that exact commit.
@@ -44,26 +44,28 @@ Run `corepack pnpm install --frozen-lockfile`, build the three public packages, 
 
 The committed inventory describes the tree content, not a self-referential commit SHA. CI proves the exact audited head by regenerating it and requiring a zero diff. The GitHub Actions run and head SHA are the external immutable evidence pair.
 
-## P1-C1a immutable-input and notice update
+## P1-C1a private/internal-use launch-path update
 
-P1-C1a acceptance is limited to the release inputs and publication boundary
-controlled directly by this repository: the multi-architecture Docker base
-images are pinned by digest; direct remote artifacts with explicit versions
-(noVNC 1.5.0, SQLCipher 4.6.1, and WeChat 4.1.1.8 for amd64/arm64) are recorded
-and SHA-256 verified; required noVNC and SQLCipher notices are retained and
-asserted during the image build; and Docker CI remains build-only for amd64 and
-arm64, with no registry permissions or publication step. Local payloads remain
-excluded from the Docker context and are not committed.
+P1-C1a acceptance is limited to what is directly necessary to run the current
+private/internal-use launch path: digest-pinned base images; explicit versions
+and SHA-256 verification for direct critical artifacts (noVNC 1.5.0,
+SQLCipher 4.6.1, and WeChat 4.1.1.8 for amd64/arm64); successful build-only CI
+for the two architectures used by the project; and a fail-closed publication
+boundary with no registry permissions or publication step. Local payloads
+remain excluded from the Docker context and are not committed.
 
-The validator enforces those repository-controlled inputs, notices, supported
+The validator enforces those repository-controlled inputs, supported
 architectures, and the publication boundary. Repository-level reproducibility
 of mutable apt/pip indexes is an accepted limitation and is not a P1-C1a
 blocker. Revalidation of a WeChat package already present in the build cache is
 also an accepted limitation and is not a P1-C1a blocker. Existing dependency
 pinning or cache-validation safeguards may remain where they are useful; these
-limitations do not require removing them.
+limitations do not require removing them. Copying noVNC/SQLCipher notices into
+the image is also outside current acceptance and is deferred to an independent
+compliance task that must be completed before any external distribution. This
+deferral does not claim that present or future license obligations are absent.
 
-**Publication remains blocked.** Immutable provenance and retained third-party
-notices do not supply the absent upstream source-code grant, do not establish
-permission to redistribute WeChat, and do not replace the exact-image SBOM and
-license report required by P1-C1b.
+**External distribution remains blocked.** Immutable provenance does not supply
+the absent upstream source-code grant, establish permission to redistribute
+WeChat, satisfy third-party notice obligations, or replace the exact-image SBOM
+and license report required before external distribution.

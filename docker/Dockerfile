@@ -95,9 +95,6 @@ RUN NOVNC_VERSION=1.5.0 \
     && echo "$NOVNC_SHA256  /tmp/novnc.tar.gz" | sha256sum --check --strict \
     && tar xzf /tmp/novnc.tar.gz -C /opt \
     && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc \
-    && mkdir -p /usr/share/doc/agent-wechat/licenses/novnc \
-    && cp /opt/novnc/LICENSE.txt /opt/novnc/docs/LICENSE.* /usr/share/doc/agent-wechat/licenses/novnc/ \
-    && cp /opt/novnc/vendor/pako/LICENSE /usr/share/doc/agent-wechat/licenses/novnc/PAKO-LICENSE \
     && rm /tmp/novnc.tar.gz
 
 # ============================================
@@ -111,8 +108,6 @@ RUN SQLCIPHER_VERSION=4.6.1 \
     && echo "$SQLCIPHER_SHA256  sqlcipher.tar.gz" | sha256sum --check --strict \
     && tar xzf sqlcipher.tar.gz \
     && cd sqlcipher-${SQLCIPHER_VERSION} \
-    && mkdir -p /usr/share/doc/agent-wechat/licenses/sqlcipher \
-    && cp LICENSE.md /usr/share/doc/agent-wechat/licenses/sqlcipher/ \
     && ./configure --enable-tempstore=yes CFLAGS="-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_OPENSSL" LDFLAGS="-lcrypto" \
     && make -j$(nproc) \
     && cp sqlcipher /usr/local/bin/sqlcipher \
@@ -145,9 +140,7 @@ RUN WECHAT_VERSION=4.1.1.8 \
     && test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION" \
     && test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH" \
     && (dpkg -i /tmp/wechat.deb || (apt-get update && apt-get install -y -f)) \
-    && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb \
-    && test -s /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt \
-    && test -s /usr/share/doc/agent-wechat/licenses/sqlcipher/LICENSE.md
+    && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb
 
 RUN useradd -m -s /bin/bash wechat
 

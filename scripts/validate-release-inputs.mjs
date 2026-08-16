@@ -33,9 +33,9 @@ assert.deepEqual(instructions,instructionAllowlist.instructions,'effective Docke
 const approvedSensitiveInstructionHashes=new Set([
   'ba45fa654185163d06d04e7f70994f03728b5f34ffb0cc04be9719f5927c5919', // runtime packages
   '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
-  '37e36f1c351c0e2ac331cde6312c4a29e295195b5925f55015f33a2d923f48be', // noVNC
-  'b8503078e0209a9b88097c0033abc09a9fc9a9aeda6ac1c3b460f31133328869', // SQLCipher
-  '62f5855ebd13501fb39e0ec32750d14ec11fec98641f8f66ede8d4a25bfc109a', // WeChat
+  '29745539dec974d85e96332400d4d9911ef953f356213ea8150ea6b5b72a29bc', // noVNC
+  '9b8d3cee08d655c745e64a8669864c81ba19db346c0d22821c2f5a1901282c02', // SQLCipher
+  '658e94a35843ff39076e03d30baa995cfce7ba3e3add7657b8a57f6429d9e3d6', // WeChat
   '5d9641c7a8ed47f58706396e3b1f4202cd45a6ac7e5c2339ca014bc6b87e760d', // debug-only gdbserver
 ]);
 const digest=x=>createHash('sha256').update(x).digest('hex');
@@ -48,7 +48,7 @@ for(const instruction of instructions.slice(sqlcipherIndex+1))assert.doesNotMatc
 const one=(prefix,label)=>{const xs=instructions.filter(x=>x.startsWith(prefix));assert.equal(xs.length,1,`${label}: expected exactly one semantic instruction`);return xs[0];};
 const exact=(value,label)=>assert.equal(instructions.filter(x=>x===value).length,1,`${label}: exact instruction required`);
 assert.equal(manifest.schemaVersion,1);
-keys(manifest,['schemaVersion','baseImages','sources','noticeDirectory','apt','python'],'manifest');
+keys(manifest,['schemaVersion','baseImages','sources','apt','python'],'manifest');
 keys(manifest.baseImages,['builder','runtime'],'base images');
 keys(manifest.baseImages.builder,['reference','providedPackages','providedFiles'],'builder image');
 keys(manifest.baseImages.runtime,['reference'],'runtime image');
@@ -64,7 +64,6 @@ keys(manifest.python,['lockFile','installerFlags','localArtifacts'],'Python auth
 keys(manifest.python.localArtifacts,['frida-tools'],'Python local artifacts');
 keys(manifest.python.localArtifacts['frida-tools'],['file','sha256'],'frida-tools artifact');
 assert.deepEqual(manifest.python.installerFlags,['--require-hashes','--only-binary=:all:','--find-links=/opt/release-inputs'],'Python installer flags');
-assert.equal(manifest.noticeDirectory,'/usr/share/doc/agent-wechat/licenses');
 assert.equal(manifest.apt.url,'https://snapshot.ubuntu.com/ubuntu');
 const froms=instructions.filter(x=>x.startsWith('FROM '));assert.equal(froms.length,2);
 for(const image of Object.values(manifest.baseImages))assert.match(image.reference,/^[a-z0-9./:-]+@sha256:[a-f0-9]{64}$/);
@@ -90,6 +89,5 @@ const w=manifest.sources.wechat;assert.match(w.version,/^\d+\.\d+\.\d+\.\d+$/);c
 for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageArchitecture,a);assert.equal(v.url,`https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${a==='amd64'?'x86_64':'arm64'}.deb`);assert.ok(wrun.includes(`WECHAT_${a.toUpperCase()}_URL=${v.url} && WECHAT_${a.toUpperCase()}_SHA256=${v.sha256} && `),`${a}: immutable WeChat constants must exactly match manifest`);assert.ok(wrun.includes(`${a}) WECHAT_URL=`));}
 assert.ok(wrun.startsWith(`RUN WECHAT_VERSION=${w.version} && `),'immutable WeChat version must exactly match manifest');
 for(const check of ['echo "$WECHAT_SHA256 /tmp/wechat.deb" | sha256sum --check --strict && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat','test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION"','test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH"'])assert.ok(wrun.includes(check),`WeChat semantic check missing: ${check}`);
-for(const [copy,presence] of [['&& cp /opt/novnc/LICENSE.txt /opt/novnc/docs/LICENSE.* /usr/share/doc/agent-wechat/licenses/novnc/ &&','test -s /usr/share/doc/agent-wechat/licenses/novnc/LICENSE.txt'],['&& cp LICENSE.md /usr/share/doc/agent-wechat/licenses/sqlcipher/ &&','test -s /usr/share/doc/agent-wechat/licenses/sqlcipher/LICENSE.md']]){assert.ok(runs.some(x=>x.includes(copy)),`notice copy missing: ${copy}`);assert.ok(wrun.includes(presence));}
 for(const p of ['docker/release-inputs.json','docker/release-instruction-allowlist.json','docker/release-materials/requirements.lock','docker/release-materials/frida_tools-14.10.4-py3-none-any.whl','scripts/validate-release-inputs.mjs','scripts/test-release-inputs.mjs','scripts/download-wechat.sh'])assert.ok(workflow.includes(`- '${p}'`),`workflow path missing: ${p}`);
-console.log('Release inputs are semantically pinned, hash-bound, allowlisted, and notice-checked.');
+console.log('Release inputs are semantically pinned, hash-bound, and allowlisted.');
