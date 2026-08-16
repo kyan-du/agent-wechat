@@ -32,13 +32,25 @@ const mutations=[
  d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN rm -rf /opt/novnc && cp -r /tmp/evil /opt/novnc\nRUN useradd -m -s /bin/bash wechat'),
  d=>replace(d,'docker/Dockerfile','ENV DISPLAY=:99','ENV EVIL_URL=https://evil.example/payload\nENV DISPLAY=:99'),
  d=>replace(d,'docker/release-inputs.json','https://snapshot.ubuntu.com/ubuntu','https://mirror.example/ubuntu'),
- d=>{replace(d,'docker/release-inputs.json','\"version\": \"1.5.0\"','\"version\": \"1.6.0\"');replace(d,'docker/Dockerfile','ARG NOVNC_VERSION=1.5.0','ARG NOVNC_VERSION=1.6.0');},
- d=>replace(d,'docker/Dockerfile','ARG WECHAT_VERSION=4.1.1.8','ARG WECHAT_VERSION=4.1.1.9'),
+ d=>replace(d,'docker/Dockerfile','RUN UBUNTU_SNAPSHOT=20260801T000000Z','ARG UBUNTU_SNAPSHOT=20260801T000000Z\nRUN UBUNTU_SNAPSHOT=20260801T000000Z'),
+ d=>replace(d,'docker/Dockerfile','RUN UBUNTU_SNAPSHOT=20260801T000000Z','ARG UBUNTU_SNAPSHOT\nRUN UBUNTU_SNAPSHOT=20260801T000000Z'),
+ d=>replace(d,'docker/Dockerfile','RUN UBUNTU_SNAPSHOT=20260801T000000Z','ARG UBUNTU_SNAPSHOT=20990101T000000Z\nRUN UBUNTU_SNAPSHOT="$UBUNTU_SNAPSHOT"'),
+ d=>replace(d,'docker/Dockerfile','RUN NOVNC_VERSION=1.5.0','ARG NOVNC_VERSION=1.5.0\nRUN NOVNC_VERSION=1.5.0'),
+ d=>replace(d,'docker/Dockerfile','RUN NOVNC_VERSION=1.5.0','ARG NOVNC_URL\nRUN NOVNC_VERSION=1.5.0'),
+ d=>replace(d,'docker/Dockerfile','RUN NOVNC_VERSION=1.5.0','RUN NOVNC_VERSION=1.6.0'),
+ d=>replace(d,'docker/Dockerfile','NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz','NOVNC_URL=https://evil.example/novnc.tar.gz'),
+ d=>replace(d,'docker/Dockerfile','NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a','NOVNC_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+ d=>replace(d,'docker/Dockerfile','RUN SQLCIPHER_VERSION=4.6.1','ARG SQLCIPHER_VERSION\nRUN SQLCIPHER_VERSION=4.6.1'),
+ d=>replace(d,'docker/Dockerfile','SQLCIPHER_URL=https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz','SQLCIPHER_URL=https://evil.example/sqlcipher.tar.gz'),
+ d=>replace(d,'docker/Dockerfile','RUN WECHAT_VERSION=4.1.1.8','ARG WECHAT_VERSION=4.1.1.8\nRUN WECHAT_VERSION=4.1.1.8'),
+ d=>replace(d,'docker/Dockerfile','RUN WECHAT_VERSION=4.1.1.8','ARG WECHAT_AMD64_URL\nRUN WECHAT_VERSION=4.1.1.8'),
+ d=>replace(d,'docker/Dockerfile','RUN WECHAT_VERSION=4.1.1.8','RUN WECHAT_VERSION=4.1.1.9'),
+ d=>replace(d,'docker/Dockerfile','WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f','WECHAT_ARM64_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
  d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN cp /tmp/evil /usr/local/bin/sqlcipher && echo cp sqlcipher /usr/local/bin/sqlcipher\nRUN useradd -m -s /bin/bash wechat'),
  d=>replace(d,'docker/release-inputs.json','\"providedFiles\": [','\"providedFiles\": [\n        \"/tmp/unapproved\",'),
  d=>replace(d,'docker/release-inputs.json','\"pkg-config\": \"1.8.1-1\"','\"pkg-config\": \"1.8.1-1\", \"curl\": \"any\"'),
 ];
-for(const mutate of mutations){const d=mkdtempSync(join(tmpdir(),'release-inputs-'));try{for(const x of ['docker','.github','scripts'])cpSync(join(root,x),join(d,x),{recursive:true});mutate(d);const result=run(d);assert.notEqual(result.status,0,`mutation escaped validator: ${result.stdout}`);}finally{rmSync(d,{recursive:true,force:true});}}
+for(const [index,mutate] of mutations.entries()){const d=mkdtempSync(join(tmpdir(),'release-inputs-'));try{for(const x of ['docker','.github','scripts'])cpSync(join(root,x),join(d,x),{recursive:true});mutate(d);const result=run(d);assert.notEqual(result.status,0,`mutation ${index + 1} escaped validator: ${result.stdout}`);}finally{rmSync(d,{recursive:true,force:true});}}
 // Existing cache must be verified before the downloader can report success.
 const d=mkdtempSync(join(tmpdir(),'wechat-cache-'));try{mkdirSync(join(d,'scripts'));mkdirSync(join(d,'docker'));cpSync(join(root,'scripts/download-wechat.sh'),join(d,'scripts/download-wechat.sh'));writeFileSync(join(d,'docker/wechat.deb'),'corrupt cache');const bin=join(d,'bin');mkdirSync(bin);writeFileSync(join(bin,'uname'),'#!/bin/sh\necho arm64\n');chmodSync(join(bin,'uname'),0o755);const r=spawnSync('bash',['scripts/download-wechat.sh'],{cwd:d,env:{...process.env,PATH:`${bin}:${process.env.PATH}`},encoding:'utf8'});assert.notEqual(r.status,0,'corrupt cached WeChat payload was accepted');}finally{rmSync(d,{recursive:true,force:true});}
 console.log(`${mutations.length} semantic release-input mutations and corrupt cache failed closed.`);

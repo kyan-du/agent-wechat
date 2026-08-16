@@ -36,11 +36,11 @@ FROM ubuntu:22.04@sha256:3b06811b2afd352be909dd088a004166d665dc76d38b13eada33522
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Immutable Ubuntu archive snapshot; Valid-Until is intentionally disabled because the snapshot is frozen.
-ARG UBUNTU_SNAPSHOT=20260801T000000Z
 # Bootstrap TLS from the digest-pinned builder; do not contact a mutable Ubuntu
 # mirror merely to obtain CA certificates.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-RUN printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-updates main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-security main restricted universe multiverse\n' "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" > /etc/apt/sources.list
+RUN UBUNTU_SNAPSHOT=20260801T000000Z \
+    && printf 'deb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-updates main restricted universe multiverse\ndeb [check-valid-until=no] https://snapshot.ubuntu.com/ubuntu/%s jammy-security main restricted universe multiverse\n' "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" "$UBUNTU_SNAPSHOT" > /etc/apt/sources.list
 
 # ============================================
 # System packages
@@ -88,10 +88,10 @@ RUN pip3 install --require-hashes --only-binary=:all: --find-links=/opt/release-
 # ============================================
 # noVNC (browser-based VNC viewer) + websockify
 # ============================================
-ARG NOVNC_VERSION=1.5.0
-ARG NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
-ARG NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a
-RUN curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
+RUN NOVNC_VERSION=1.5.0 \
+    && NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz \
+    && NOVNC_SHA256=6a73e41f98388a5348b7902f54b02d177cb73b7e5eb0a7a0dcf688cc2c79b42a \
+    && curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
     && echo "$NOVNC_SHA256  /tmp/novnc.tar.gz" | sha256sum --check --strict \
     && tar xzf /tmp/novnc.tar.gz -C /opt \
     && mv /opt/noVNC-${NOVNC_VERSION} /opt/novnc \
@@ -103,10 +103,10 @@ RUN curl --fail --location --retry 3 -o /tmp/novnc.tar.gz "$NOVNC_URL" \
 # ============================================
 # SQLCipher 4 CLI (needed for wechat-db reads)
 # ============================================
-ARG SQLCIPHER_VERSION=4.6.1
-ARG SQLCIPHER_URL=https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz
-ARG SQLCIPHER_SHA256=d8f9afcbc2f4b55e316ca4ada4425daf3d0b4aab25f45e11a802ae422b9f53a3
-RUN cd /tmp \
+RUN SQLCIPHER_VERSION=4.6.1 \
+    && SQLCIPHER_URL=https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.6.1.tar.gz \
+    && SQLCIPHER_SHA256=d8f9afcbc2f4b55e316ca4ada4425daf3d0b4aab25f45e11a802ae422b9f53a3 \
+    && cd /tmp \
     && curl --fail --location --retry 3 -o sqlcipher.tar.gz "$SQLCIPHER_URL" \
     && echo "$SQLCIPHER_SHA256  sqlcipher.tar.gz" | sha256sum --check --strict \
     && tar xzf sqlcipher.tar.gz \
@@ -129,12 +129,12 @@ RUN mkdir -p /tmp/.X11-unix && chown root:root /tmp/.X11-unix && chmod 1777 /tmp
 # fail closed. This provenance evidence is not a redistribution grant.
 # ============================================
 ARG TARGETARCH
-ARG WECHAT_VERSION=4.1.1.8
-ARG WECHAT_AMD64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb
-ARG WECHAT_AMD64_SHA256=c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b
-ARG WECHAT_ARM64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb
-ARG WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f
-RUN case "$TARGETARCH" in \
+RUN WECHAT_VERSION=4.1.1.8 \
+    && WECHAT_AMD64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb \
+    && WECHAT_AMD64_SHA256=c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b \
+    && WECHAT_ARM64_URL=https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb \
+    && WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f \
+    && case "$TARGETARCH" in \
       amd64) WECHAT_URL="$WECHAT_AMD64_URL"; WECHAT_SHA256="$WECHAT_AMD64_SHA256"; DEB_ARCH=amd64 ;; \
       arm64) WECHAT_URL="$WECHAT_ARM64_URL"; WECHAT_SHA256="$WECHAT_ARM64_SHA256"; DEB_ARCH=arm64 ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
