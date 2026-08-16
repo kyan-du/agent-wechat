@@ -13,11 +13,12 @@ if ./scripts/audit-release.sh >/dev/null 2>&1; then echo 'audit accepted missing
 mv packages/cli/dist.audit-test packages/cli/dist; trap - EXIT
 ./scripts/audit-release.sh
 
-# Every publishable tarball must reject sensitive-looking filenames. Exercise
-# all public packages separately so --write can never legalize leaked material.
+# Exercise every sensitive-name rule directly, then retain one real npm-pack
+# integration probe per public package. This preserves rule and package coverage
+# without repeating the full workspace pack audit for every filename fixture.
+node scripts/release-audit.mjs --test-forbidden-paths
 probe_npm_forbidden() {
-  local package_dir=$1 path=$2
-  mkdir -p "$package_dir/$(dirname "$path")"
+  local package_dir=$1 path=dist/mysecret.txt
   printf 'negative probe\n' > "$package_dir/$path"
   if node scripts/release-audit.mjs --write >/dev/null 2>&1; then
     echo "npm audit accepted forbidden packed path: $package_dir/$path" >&2; exit 1
