@@ -148,6 +148,24 @@ class ChatSelectDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("SUPER_SECRET", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_current_pinned_arm64_build_has_exact_profile(self):
+        profile = chat_select.profile_for_build_id(
+            "9a3558be209dfcf1b85d6ec18bf029c7f97ccb61"
+        )
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["ARCH"], "aarch64")
+        self.assertEqual(profile["SELECT_SESSION"], 0x3939FF8)
+        self.assertEqual(profile["MANAGER_VT_OFF"], 0x7DB5570)
+
+    def test_unknown_build_still_has_no_profile(self):
+        self.assertIsNone(chat_select.profile_for_build_id("00000000deadbeef"))
+
+    def test_frida_command_bootstraps_typing_extensions_on_python310(self):
+        cmd = chat_select.frida_command("123", "/tmp/script.js", quiet=True)
+        self.assertEqual(cmd[:3], [sys.executable, "-c", chat_select.FRIDA_PYTHON_BOOTSTRAP])
+        self.assertIn("typing_extensions", cmd[2])
+        self.assertEqual(cmd[-1], "-q")
+
 
 if __name__ == "__main__":
     unittest.main()
