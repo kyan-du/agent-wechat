@@ -2,7 +2,9 @@
   "schemaVersion": 1,
   "enabled": false,
   "tag": null,
-  "commit": null,
+  "releaseCommit": null,
+  "releaseTree": null,
+  "receiptCommit": null,
   "approvals": {
     "owner": false,
     "legalRedistribution": false,

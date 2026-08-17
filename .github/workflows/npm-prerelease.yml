@@ -64,13 +64,15 @@ jobs:
           version="${RELEASE_TAG#v}"
           test "v$version" = "$RELEASE_TAG"
           printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-next\.[0-9]+$'
-          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$GITHUB_SHA"
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          release_sha="$(git rev-parse HEAD^{commit})"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$release_sha"
+          git merge-base --is-ancestor "$release_sha" origin/main
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
           node scripts/verify-npm-prerelease.mjs "$version"
 
       - name: Require independently reviewed release authorization
         if: ${{ github.event_name == 'push' }}
-        run: node scripts/verify-npm-release-authorization.mjs "$RELEASE_TAG" "$GITHUB_SHA"
+        run: node scripts/verify-npm-release-authorization.mjs "$RELEASE_TAG" "$RELEASE_SHA"
 
       - name: Install exact dependencies
         run: pnpm install --frozen-lockfile

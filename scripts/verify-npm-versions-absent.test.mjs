@@ -4,25 +4,30 @@ import test from "node:test";
 import { classifyNpmView, packages, verifyVersionsAbsent } from "./verify-npm-versions-absent.mjs";
 
 const spec = `${packages[0]}@9.9.9-next.1`;
+function npmJson(code, detail, summary = "Not Found") {
+  return JSON.stringify({ error: { code, summary, detail } });
+}
 
-test("structured package-specific E404 is absent", () => {
+test("npm 10/11 structured stdout E404 is absent", () => {
   const result = classifyNpmView({
     status: 1,
-    stdout: "",
-    stderr: `npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/${encodeURIComponent(spec)} - ${spec} is not in this registry`,
+    stdout: npmJson("E404", `404 Not Found - GET registry - ${spec} is not in this registry.`),
+    stderr: "npm error code E404\nnpm error 404 Not Found",
   }, spec);
   assert.equal(result.kind, "absent");
 });
 
-for (const [label, stderr] of [
-  ["auth", "npm error code E401"],
-  ["rate limit", "npm error code E429"],
-  ["server", "npm error code E500"],
-  ["network", "npm error code EAI_AGAIN"],
-  ["wrong package 404", "npm error code E404 npm error 404 Not Found other@9.9.9-next.1 is not in this registry"],
+for (const [label, stdout, stderr = ""] of [
+  ["auth", npmJson("E401", "authentication required")],
+  ["rate limit", npmJson("E429", "too many requests")],
+  ["server", npmJson("E500", "server error")],
+  ["network", "", "npm error code EAI_AGAIN"],
+  ["malformed", "{not-json"],
+  ["wrong package 404", npmJson("E404", "other@9.9.9-next.1 is not in this registry")],
+  ["generic stderr-only 404", "", `npm error E404 ${spec} is not in this registry`],
 ]) {
   test(`${label} errors fail closed`, () => {
-    assert.equal(classifyNpmView({ status: 1, stdout: "", stderr }, spec).kind, "error");
+    assert.equal(classifyNpmView({ status: 1, stdout, stderr }, spec).kind, "error");
   });
 }
 
@@ -32,8 +37,8 @@ test("all three packages are checked before success", () => {
     calls.push(args[1]);
     return {
       status: 1,
-      stdout: "",
-      stderr: `npm error code E404 npm error 404 Not Found ${args[1]} is not in this registry`,
+      stdout: npmJson("E404", `${args[1]} is not in this registry`),
+      stderr: "npm error code E404",
     };
   });
   assert.equal(results.length, 3);

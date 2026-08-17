@@ -93,9 +93,9 @@ Rollback does not grant production approval. Repeat exact-head validation and P2
 
 ## Tag-triggered npm prerelease automation
 
-The tag trigger is intentionally absent while `release/npm-release-authorization.json` has `enabled=false`. A tag cannot start this workflow until a separately reviewed commit both enables the exact tag trigger, binds authorization to one exact tag+commit, and sets every owner/legal/environment/publisher/tag-rule/registry-reconciliation gate true. After those repository and legal gates are independently verified, an authorized tag `vX.Y.Z-next.N` may trigger `.github/workflows/npm-prerelease.yml`. The workflow checks that:
+The tag trigger is intentionally absent while `release/npm-release-authorization.json` has `enabled=false`. A tag cannot start this workflow until a separately reviewed authorization receipt commit—created after the already-existing release commit—enables the exact tag trigger, names the exact release tag/commit/tree, and sets every owner/legal/environment/publisher/tag-rule/registry-reconciliation gate true. This avoids a self-referential commit hash: the receipt is independently reviewed and its own commit is recorded, while the release commit/tree already exists unchanged. After those gates are independently verified, an authorized tag `vX.Y.Z-next.N` may trigger `.github/workflows/npm-prerelease.yml`. The workflow checks that:
 
-- the tag resolves to the checked-out commit and that commit is contained in `origin/main`;
+- the peeled tag resolves to checked-out `HEAD`, and that exact resolved commit is contained in `origin/main` and matches the authorization receipt;
 - `X.Y.Z-next.N` exactly matches all three public package versions;
 - install, typecheck, package tests, build, pack smoke, publication-boundary audit, and release audit pass with no generated diff;
 - none of the three exact package versions already exists on npm.

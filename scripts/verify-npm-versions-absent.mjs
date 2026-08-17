@@ -7,13 +7,26 @@ export const packages = [
   "@kyan-du/agent-wechat-wechaty-puppet",
 ];
 
+function parseJsonError(stdout) {
+  try {
+    const parsed = JSON.parse(stdout);
+    return parsed?.error && typeof parsed.error === "object" ? parsed.error : null;
+  } catch {
+    return null;
+  }
+}
+
 export function classifyNpmView(result, packageSpec) {
   if (result.status === 0) return { kind: "exists" };
-  const detail = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-  const notFound = /(?:^|\s)E404(?:\s|$)/.test(detail) &&
+  const error = parseJsonError(result.stdout ?? "");
+  const detail = `${error?.summary ?? ""}\n${error?.detail ?? ""}`;
+  const notFound = error?.code === "E404" &&
     /(?:is not in this registry|not found|404 Not Found)/i.test(detail) &&
     detail.includes(packageSpec);
-  return notFound ? { kind: "absent" } : { kind: "error", detail };
+  return notFound ? { kind: "absent" } : {
+    kind: "error",
+    detail: `${result.stdout ?? ""}\n${result.stderr ?? ""}`,
+  };
 }
 
 export function verifyVersionsAbsent(version, run = spawnSync) {
