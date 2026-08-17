@@ -1,6 +1,5 @@
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -39,6 +38,41 @@ function retryStorePath(accountId: string, stateDir?: string): string {
   return join(root, "wechat", `monitor-retry-${safeAccount}.json`);
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function validateMessage(message: unknown): message is Message {
+  if (message === null || typeof message !== "object") return false;
+  const row = message as Record<string, unknown>;
+  return Number.isSafeInteger(row.localId) &&
+    typeof row.chatId === "string" &&
+    Number.isSafeInteger(row.type) &&
+    typeof row.timestamp === "string" &&
+    (row.serverId === undefined || Number.isSafeInteger(row.serverId)) &&
+    (row.content === undefined || typeof row.content === "string") &&
+    (row.sender === undefined || typeof row.sender === "string") &&
+    (row.isSelf === undefined || typeof row.isSelf === "boolean") &&
+    (row.isMentioned === undefined || typeof row.isMentioned === "boolean");
+}
+
+function validateChat(chat: unknown): chat is Chat {
+  if (chat === null || typeof chat !== "object") return false;
+  const row = chat as Record<string, unknown>;
+  return typeof row.id === "string" &&
+    typeof row.name === "string" &&
+    Number.isSafeInteger(row.unreadCount) &&
+    typeof row.isGroup === "boolean" &&
+    (row.username === undefined || typeof row.username === "string") &&
+    (row.lastMsgLocalId === undefined || Number.isSafeInteger(row.lastMsgLocalId)) &&
+    (row.remark === undefined || typeof row.remark === "string") &&
+    (row.members === undefined || isStringArray(row.members));
+}
+
 function validateEntries(entries: Array<[string, MessageScanContinuation]>): void {
   if (entries.length > MAX_PENDING_RESET_CHATS) {
     throw new PendingRetryStateError("WeChat pending retry chat capacity exceeded", "RETRY_CAPACITY");
@@ -49,7 +83,14 @@ function validateEntries(entries: Array<[string, MessageScanContinuation]>): voi
       throw new PendingRetryStateError("WeChat retry state entry is invalid", "RETRY_STATE_CORRUPT");
     }
     const pending = entry[1];
-    if (pending?.readyForDispatch !== true || !Array.isArray(pending.messages)) {
+    if (pending?.readyForDispatch !== true ||
+        !validateChat(pending.chat) ||
+        !Array.isArray(pending.messages) ||
+        !pending.messages.every(validateMessage) ||
+        (pending.generationReset !== undefined && typeof pending.generationReset !== "boolean") ||
+        (pending.retryCount !== undefined && !Number.isSafeInteger(pending.retryCount)) ||
+        (pending.nextRetryAt !== undefined && !isFiniteNumber(pending.nextRetryAt)) ||
+        (pending.createdAt !== undefined && !isFiniteNumber(pending.createdAt))) {
       throw new PendingRetryStateError("WeChat pending retry payload is invalid", "RETRY_STATE_CORRUPT");
     }
     total += pending.messages.length;
@@ -74,15 +115,18 @@ export function loadPendingResetRetries(
     validateEntries(entries);
     return new Map(entries);
   } catch (error) {
-    const quarantine = `${path}.corrupt-${Date.now()}`;
+    const quarantine = `${path}.corrupt`;
     try {
-      copyFileSync(path, quarantine);
-    } catch {
-      // Preserve the original even if quarantine creation itself fails.
+      rmSync(quarantine, { force: true });
+      renameSync(path, quarantine);
+    } catch (quarantineError) {
+      throw new PendingRetryStateError(
+        `WeChat retry state is unreadable at ${path}; quarantine failed (${String(quarantineError)}). Stop the channel and move this file aside manually.`,
+        "RETRY_STATE_CORRUPT",
+      );
     }
-    if (error instanceof PendingRetryStateError) throw error;
     throw new PendingRetryStateError(
-      `WeChat retry state is unreadable at ${path}; preserved for recovery (${String(error)})`,
+      `WeChat retry state was quarantined to ${quarantine}. Inspect/restore it, or remove the quarantine after reconciling undelivered messages. Cause: ${String(error)}`,
       "RETRY_STATE_CORRUPT",
     );
   }
@@ -211,15 +255,25 @@ export function monitorChatsToProcess(
 export function commitResetDispatchPrefix(
   state: MonitorRetryState,
   chatId: string,
-  cursor: number | undefined,
+  cursorMessage: Message | undefined,
 ): void {
-  if (cursor === undefined) return;
+  if (cursorMessage === undefined) return;
+  const cursor = cursorMessage.localId;
   const pending = state.pendingMessageScans.get(chatId);
   if (!pending?.readyForDispatch) {
     state.lastSeenId.set(chatId, cursor);
     return;
   }
-  const remaining = pending.messages.filter((message) => message.localId > cursor);
+  const exactIndex = pending.messages.findIndex(
+    (message) => cursorMessageKey(message) === cursorMessageKey(cursorMessage),
+  );
+  if (exactIndex < 0) {
+    throw new PendingRetryStateError(
+      `Successful reset cursor identity is absent from pending chat ${chatId}`,
+      "RETRY_STATE_CORRUPT",
+    );
+  }
+  const remaining = pending.messages.slice(exactIndex + 1);
   const projected = new Map(state.pendingMessageScans);
   if (remaining.length === 0) {
     projected.delete(chatId);

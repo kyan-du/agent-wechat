@@ -90,7 +90,7 @@ test("mid-reset dispatch failure atomically commits prefix and merges later traf
     Array.from({ length: 100 }, (_, index) => message(index + 1)),
     0,
   );
-  commitResetDispatchPrefix(retry, "wxid_reset", 40);
+  commitResetDispatchPrefix(retry, "wxid_reset", message(40));
   mergePendingResetMessages(retry, "wxid_reset", chat(1, 101), [message(101)]);
 
   assert.equal(retry.lastSeenId.get("wxid_reset"), 40);
@@ -99,8 +99,28 @@ test("mid-reset dispatch failure atomically commits prefix and merges later traf
     Array.from({ length: 61 }, (_, index) => index + 41),
   );
 
-  commitResetDispatchPrefix(retry, "wxid_reset", 101);
+  commitResetDispatchPrefix(retry, "wxid_reset", message(101));
   assert.equal(retry.pendingMessageScans.has("wxid_reset"), false);
+});
+
+test("partial equal-ID generation commit preserves the failed identity across restart", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-equal-"));
+  const retry = state();
+  const first = message(100, 1);
+  const second = message(100, 2);
+  queueResetGenerationRetry(retry, "wxid_reset", chat(2), [first, second], 0);
+  retry.persist = () => persistPendingResetRetries("default", retry.pendingMessageScans, dir);
+
+  commitResetDispatchPrefix(retry, "wxid_reset", first);
+  const restored = loadPendingResetRetries("default", dir);
+  assert.deepEqual(restored.get("wxid_reset")?.messages.map((item) => item.serverId), [20_100]);
+
+  const afterRestart: MonitorRetryState = {
+    pendingMessageScans: restored,
+    lastSeenId: new Map([["wxid_reset", 100]]),
+  };
+  commitResetDispatchPrefix(afterRestart, "wxid_reset", second);
+  assert.equal(afterRestart.pendingMessageScans.has("wxid_reset"), false);
 });
 
 test("a second reset generation remains distinct while the first is pending", () => {
@@ -145,9 +165,33 @@ test("corrupt retry persistence is quarantined and stops recovery", () => {
 
   assert.throws(
     () => loadPendingResetRetries("default", dir),
+    (error) => error instanceof PendingRetryStateError &&
+      error.code === "RETRY_STATE_CORRUPT" &&
+      error.message.includes(`${path}.corrupt`) &&
+      error.message.includes("Inspect/restore"),
+  );
+  assert.equal(existsSync(path), false);
+  assert.equal(existsSync(`${path}.corrupt`), true);
+  assert.equal(loadPendingResetRetries("default", dir).size, 0);
+});
+
+test("persisted retry validation rejects malformed chat and message fields", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-schema-"));
+  const path = join(dir, "wechat", "monitor-retry-default.json");
+  mkdirSync(join(dir, "wechat"), { recursive: true });
+  writeFileSync(path, JSON.stringify({
+    version: 1,
+    entries: [["wxid_reset", {
+      chat: { ...chat(1), unreadCount: "1" },
+      messages: [{ ...message(1), localId: "1" }],
+      readyForDispatch: true,
+    }]],
+  }));
+  assert.throws(
+    () => loadPendingResetRetries("default", dir),
     (error) => error instanceof PendingRetryStateError && error.code === "RETRY_STATE_CORRUPT",
   );
-  assert.equal(existsSync(path), true);
+  assert.equal(existsSync(`${path}.corrupt`), true);
 });
 
 test("101st pending chat is rejected without erasing existing retries", () => {

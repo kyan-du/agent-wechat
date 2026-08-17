@@ -1042,10 +1042,18 @@ async function processUnreadChat(
       if (baseline && cursor >= baseline.localId) {
         startupBaselines.delete(chatId);
       }
+      const exactCursorMessage = handledMessages.reduce<Message | undefined>(
+        (latest, message) => latest === undefined || message.localId > latest.localId
+          ? message
+          : message.localId === latest.localId
+            ? message
+            : latest,
+        undefined,
+      );
       commitResetDispatchPrefix(
         { pendingMessageScans, lastSeenId, persist: persistRetryState },
         chatId,
-        cursor,
+        exactCursorMessage,
       );
     }
   };
