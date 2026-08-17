@@ -23,6 +23,11 @@ import {
 } from "./monitor-scan.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
+  commitResetDispatchPrefix,
+  monitorChatsToProcess,
+  queueResetGenerationRetry,
+} from "./monitor-retry.js";
+import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
   resolveWeChatInboundAccessDecision,
@@ -246,7 +251,6 @@ export async function startWeChatMonitor(
       const unreadChats = chats.filter(
         (c) => c.unreadCount > 0 && !isOfficialAccount(c.username ?? c.id),
       );
-      const chatsToProcess = new Map<string, Chat>();
       for (const chat of unreadChats) {
         const chatId = chat.username ?? chat.id;
         if (
@@ -256,11 +260,13 @@ export async function startWeChatMonitor(
         ) {
           startupBaselines.set(chatId, { localId: 0 });
         }
-        chatsToProcess.set(chatId, chat);
       }
-      for (const pending of pendingMessageScans.values()) {
-        const chatId = pending.chat.username ?? pending.chat.id;
-        if (!isOfficialAccount(chatId)) chatsToProcess.set(chatId, pending.chat);
+      const chatsToProcess = monitorChatsToProcess(
+        unreadChats,
+        { pendingMessageScans, lastSeenId },
+      );
+      for (const chatId of chatsToProcess.keys()) {
+        if (isOfficialAccount(chatId)) chatsToProcess.delete(chatId);
       }
       if (unreadChats.length > 0) {
         log?.info?.(
@@ -927,29 +933,35 @@ async function processUnreadChat(
   let messages: Message[];
   let generationResetConfirmed = false;
   try {
-    const scan = await listMessagesForMonitorCursor(client, chatId, {
-      chat,
-      firstPoll,
-      prevLastSeen,
-      startupBaseline,
-      handledCursor: equalCursorUnreadHandled.get(chatId),
-      continuation: pendingMessageScans.get(chatId),
-    });
-    if (!scan.complete) {
-      pendingMessageScans.set(chatId, {
+    const pending = pendingMessageScans.get(chatId);
+    if (pending?.readyForDispatch) {
+      messages = pending.messages;
+      generationResetConfirmed = pending.generationReset === true;
+    } else {
+      const scan = await listMessagesForMonitorCursor(client, chatId, {
         chat,
-        cursor: scan.nextCursor,
-        messages: scan.messages,
-        generationReset: scan.generationReset,
+        firstPoll,
+        prevLastSeen,
+        startupBaseline,
+        handledCursor: equalCursorUnreadHandled.get(chatId),
+        continuation: pending,
       });
-      log?.info?.(
-        `[wechat:${liveAccount.accountId}] ${chatId}: deferred after ${scan.pagesScanned} message page(s); continuing paged scan next tick`,
-      );
-      return "deferred";
+      if (!scan.complete) {
+        pendingMessageScans.set(chatId, {
+          chat,
+          cursor: scan.nextCursor,
+          messages: scan.messages,
+          generationReset: scan.generationReset,
+        });
+        log?.info?.(
+          `[wechat:${liveAccount.accountId}] ${chatId}: deferred after ${scan.pagesScanned} message page(s); continuing paged scan next tick`,
+        );
+        return "deferred";
+      }
+      messages = scan.messages;
+      generationResetConfirmed = scan.generationReset === true;
+      pendingMessageScans.delete(chatId);
     }
-    pendingMessageScans.delete(chatId);
-    messages = scan.messages;
-    generationResetConfirmed = scan.generationReset === true;
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to list messages for ${chatId}: ${err}`,
@@ -978,19 +990,21 @@ async function processUnreadChat(
     generationResetConfirmed,
   );
   let newMessages = selected.messages;
-  if (selected.generationReset) {
-    lastSeenId.delete(chatId);
-    equalCursorUnreadHandled.delete(chatId);
-    startupBaselines.delete(chatId);
+  if (selected.generationReset && !pendingMessageScans.get(chatId)?.readyForDispatch) {
+    queueResetGenerationRetry({ pendingMessageScans, lastSeenId }, chatId, chat, newMessages);
   }
   const advanceLastSeen = (handledMessages: Message[]) => {
     const cursor = markCursorMessagesHandled(chatId, handledMessages, equalCursorUnreadHandled);
     if (cursor !== undefined) {
       lastSeenId.set(chatId, cursor);
+      if (selected.generationReset) {
+        startupBaselines.delete(chatId);
+      }
       const baseline = startupBaselines.get(chatId);
       if (baseline && cursor >= baseline.localId) {
         startupBaselines.delete(chatId);
       }
+      commitResetDispatchPrefix({ pendingMessageScans, lastSeenId }, chatId, cursor);
     }
   };
   const seedLastSeen = selected.seedLastSeen;
@@ -998,6 +1012,9 @@ async function processUnreadChat(
     advanceLastSeen(messages.filter((message) => message.localId <= seedLastSeen));
   }
   if (newMessages.length === 0) {
+    if (selected.generationReset) {
+      pendingMessageScans.delete(chatId);
+    }
     if (chat.unreadCount > 0) {
       await openChatIfNeeded();
     }

@@ -58,6 +58,7 @@ export type MessageScanContinuation = {
   cursor?: string;
   messages: Message[];
   generationReset?: boolean;
+  readyForDispatch?: boolean;
 };
 
 export type MonitorMessageScan = {
