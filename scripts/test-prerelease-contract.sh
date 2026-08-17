@@ -57,15 +57,18 @@ mutate_and_reject .github/workflows/release.yml \
 mutate_and_reject .github/workflows/release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("- name: Prove validation-only contract\n        run: ./scripts/test-prerelease-contract.sh","- uses: softprops/action-gh-release@v2"));' \
   'GitHub Release capability'
-mutate_and_reject .github/workflows/release.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("  workflow_dispatch:","  workflow_dispatch:\n  push:\n    tags: [v*]"));' \
-  'tag-triggered workflow'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("v[0-9]+.[0-9]+.[0-9]+-next.[0-9]+","v*"));' \
+  'broad publish tag trigger'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ github.event_name == '\''push'\'' }}","if: ${{ always() }}"));' \
+  'manual publication bypass'
 mutate_and_reject package.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.scripts.release="pnpm changeset publish";fs.writeFileSync(p,JSON.stringify(j));' \
   'root publish script'
 
-if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|gh release create|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml >/dev/null; then
-  echo "workflow source contains forbidden publication capability outside the reviewed GHCR workflow" >&2
+if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-prerelease.yml >/dev/null; then
+  echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1
 fi
 node scripts/validate-ghcr-release.mjs
