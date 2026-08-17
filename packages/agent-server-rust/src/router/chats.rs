@@ -134,6 +134,15 @@ pub struct OpenChatParams {
     clear_unreads: bool,
 }
 
+fn chat_open_execution_error_code(error: Option<&str>) -> &'static str {
+    match error {
+        Some(message) if message.starts_with("Unknown state for") => "UNKNOWN_UI_STATE_TIMEOUT",
+        Some(message) if message.starts_with("Execution timeout after") => "EXECUTION_TIMEOUT",
+        Some("Aborted") => "ABORTED",
+        _ => "CHAT_OPEN_FAILED",
+    }
+}
+
 pub async fn mark_read(Path(chat_id): Path<String>) -> Json<serde_json::Value> {
     let session = match get_session("default") {
         Some(session) => session,
@@ -238,10 +247,33 @@ pub async fn open_chat(
             })
         }))
     } else {
+        let error = result.error.unwrap_or_else(|| "Chat open failed".to_string());
+        let error_code = chat_open_execution_error_code(Some(&error));
         Json(serde_json::json!({
             "ok": false,
-            "errorCode": "CHAT_OPEN_FAILED",
-            "error": "Chat open failed"
+            "errorCode": error_code,
+            "error": error
         }))
+    }
+}
+
+#[cfg(test)]
+mod open_chat_tests {
+    use super::*;
+
+    #[test]
+    fn maps_unknown_state_timeout_to_actionable_code() {
+        assert_eq!(
+            chat_open_execution_error_code(Some("Unknown state for 60s - no matching IAState found")),
+            "UNKNOWN_UI_STATE_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn maps_execution_timeout_to_actionable_code() {
+        assert_eq!(
+            chat_open_execution_error_code(Some("Execution timeout after 300s")),
+            "EXECUTION_TIMEOUT"
+        );
     }
 }

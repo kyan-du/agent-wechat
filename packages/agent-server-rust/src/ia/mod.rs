@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod diagnostics;
 pub mod helpers;
 pub mod selectors;
 pub mod states;
@@ -40,6 +41,17 @@ pub fn find_state_by_id(id: &str) -> Option<&'static dyn IAState> {
     None
 }
 
+pub(crate) fn all_ia_states() -> Vec<&'static dyn IAState> {
+    CHAT_STATES
+        .iter()
+        .map(|s| s.as_ref() as &dyn IAState)
+        .chain(LOGIN_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
+        .chain(POPUP_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
+        .chain(std::iter::once(&**CONTACT_CARD_STATE as &dyn IAState))
+        .chain(SETTINGS_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
+        .collect()
+}
+
 /// Identify current states from a11y tree and screenshot.
 ///
 /// Returns the identified states for all FSMs (mainWindow, popup, contactCard),
@@ -56,14 +68,7 @@ pub fn identify_states(a11y_tree: &A11yNode, screenshot: &str) -> IdentifiedStat
     };
 
     // Check chat states first (logged-in), then login states
-    let all_states: Vec<&dyn IAState> = CHAT_STATES
-        .iter()
-        .map(|s| s.as_ref() as &dyn IAState)
-        .chain(LOGIN_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
-        .chain(POPUP_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
-        .chain(std::iter::once(&**CONTACT_CARD_STATE as &dyn IAState))
-        .chain(SETTINGS_STATES.iter().map(|s| s.as_ref() as &dyn IAState))
-        .collect();
+    let all_states = all_ia_states();
 
     for state in &all_states {
         match state.identify(&args) {

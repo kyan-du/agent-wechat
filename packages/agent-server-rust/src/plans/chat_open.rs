@@ -86,8 +86,25 @@ impl Plan for ChatOpenPlan {
 
                     let force = main_state_id == Some("chat");
                     let result = open_chat(&params.chat_id, force, click_xy).await;
+                    tracing::info!(
+                        "[chat_open] chat-select completed ok={} verified={:?} skipped={:?} code={:?} duration_ms={:?} used_frida={:?} attach_count={:?}",
+                        result.ok,
+                        result.verified,
+                        result.skipped,
+                        result.error_code,
+                        result.duration_ms,
+                        result.used_frida,
+                        result.frida_attach_count,
+                    );
 
-                    if confirm_target(&result, &params.chat_id).is_err() {
+                    if let Err(error) = confirm_target(&result, &params.chat_id) {
+                        tracing::warn!(
+                            "[chat_open] target confirmation failed code={} result_ok={} result_verified={:?} result_code={:?}",
+                            error.code(),
+                            result.ok,
+                            result.verified,
+                            result.error_code,
+                        );
                         plan_state.result = Some(result);
                         return None;
                     }
