@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
-import { applyStartupLiveBoundary, markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.ts";
+import {
+  markCursorMessagesHandled,
+  selectCursorMessages,
+  selectMessagesHandledAfterDispatch,
+  type HandledCursor,
+  type StartupBaseline,
+} from "./monitor-cursor.ts";
 
 function chat(overrides: Partial<Chat>): Chat {
   return {
@@ -254,34 +260,28 @@ test("first poll still seeds read history before the unread suffix", () => {
   assert.deepEqual(result.messages.map((m) => m.localId), [3]);
 });
 
-test("first unread DM after monitor startup bypasses recovery read-only", () => {
-  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+test("startup baseline treats a clock-skewed-behind newer row as live", () => {
+  const baseline: StartupBaseline = { localId: 1 };
   const result = selectCursorMessages(
     "wxid_first",
-    chat({ unreadCount: 1, lastMsgLocalId: 4 }),
+    chat({ unreadCount: 0, lastMsgLocalId: 1 }),
     [
-      message(1, "2026-08-17T07:00:00.000Z"),
-      message(2, "2026-08-17T07:05:00.000Z"),
-      message(3, "2026-08-17T07:10:00.000Z"),
-      message(4, "2026-08-17T07:20:34.000Z"),
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:17:59.000Z"),
     ],
     new Map(),
     new Map(),
+    baseline,
   );
 
   assert.equal(result.firstPoll, true);
   assert.equal(result.prevLastSeen, 0);
-  assert.equal(result.seedLastSeen, 3);
-  assert.deepEqual(result.messages.map((m) => m.localId), [4]);
-
-  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
-  assert.equal(boundary.isStartupLive, true);
-  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
-  assert.deepEqual(boundary.backlogMessages, []);
+  assert.equal(result.seedLastSeen, 1);
+  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
 });
 
-test("historical unread backlog on first poll remains recovery", () => {
-  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+test("startup baseline suppresses stale future-skewed rows", () => {
+  const baseline: StartupBaseline = { localId: 4 };
   const result = selectCursorMessages(
     "wxid_first",
     chat({ unreadCount: 1, lastMsgLocalId: 4 }),
@@ -289,38 +289,83 @@ test("historical unread backlog on first poll remains recovery", () => {
       message(1, "2026-08-17T07:00:00.000Z"),
       message(2, "2026-08-17T07:05:00.000Z"),
       message(3, "2026-08-17T07:10:00.000Z"),
-      message(4, "2026-08-17T07:17:00.000Z"),
+      message(4, "2036-08-17T07:20:34.000Z"),
     ],
     new Map(),
     new Map(),
+    baseline,
   );
 
-  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
-  assert.equal(boundary.isStartupLive, false);
-  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
-  assert.deepEqual(boundary.backlogMessages, []);
+  assert.equal(result.seedLastSeen, 4);
+  assert.deepEqual(result.messages, []);
 });
 
-test("mixed first-poll unread suffix advances historical prefix and keeps live tail", () => {
-  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+test("startup baseline uses ids for same-second and subsecond rows", () => {
+  const baseline: StartupBaseline = { localId: 2 };
   const result = selectCursorMessages(
     "wxid_first",
-    chat({ unreadCount: 2, lastMsgLocalId: 4 }),
+    chat({ unreadCount: 1, lastMsgLocalId: 2 }),
     [
-      message(1, "2026-08-17T07:00:00.000Z"),
-      message(2, "2026-08-17T07:05:00.000Z"),
-      message(3, "2026-08-17T07:17:00.000Z"),
-      message(4, "2026-08-17T07:20:34.000Z"),
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:18:00.000Z"),
+      message(3, "2026-08-17T07:18:00.250Z"),
     ],
     new Map(),
     new Map(),
+    baseline,
   );
 
   assert.equal(result.seedLastSeen, 2);
-  assert.deepEqual(result.messages.map((m) => m.localId), [3, 4]);
+  assert.deepEqual(result.messages.map((m) => m.localId), [3]);
+});
 
-  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
-  assert.equal(boundary.isStartupLive, true);
-  assert.deepEqual(boundary.backlogMessages.map((m) => m.localId), [3]);
-  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
+test("startup baseline catches a message arriving between listChats and listMessages", () => {
+  const baseline: StartupBaseline = { localId: 1 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 1 }),
+    [
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:18:00.000Z"),
+    ],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, 1);
+  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+});
+
+test("post-initial first-seen chat can dispatch from an explicit zero baseline", () => {
+  const baseline: StartupBaseline = { localId: 0 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 1 }),
+    [message(1, "2036-08-17T07:20:34.000Z")],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1]);
+});
+
+test("dispatch failure only advances through successful prefix segments", () => {
+  const handled = selectMessagesHandledAfterDispatch(
+    [message(1), message(2), message(3)],
+    [1],
+  );
+
+  assert.deepEqual(handled.map((m) => m.localId), [1]);
+});
+
+test("failed first segment leaves every segment retryable", () => {
+  const handled = selectMessagesHandledAfterDispatch(
+    [message(1), message(2), message(3)],
+    [],
+  );
+
+  assert.deepEqual(handled, []);
 });
