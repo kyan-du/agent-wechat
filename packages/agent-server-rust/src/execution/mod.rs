@@ -2,6 +2,7 @@ pub mod actions;
 
 use base64::Engine;
 use crate::context::Context;
+use crate::ia::diagnostics::diagnostics_json;
 use crate::ia::{find_state_by_id, identify_states};
 use crate::ia::types::*;
 use crate::tools::a11y::get_a11y_desktop;
@@ -28,6 +29,7 @@ pub struct ExecutionResult {
 
 const EXECUTION_TIMEOUT_MS: u64 = 300_000; // 5 minutes
 const UNKNOWN_STATE_TIMEOUT_MS: u64 = 60_000; // 1 minute
+const UNKNOWN_STATE_DIAGNOSTIC_INTERVAL_MS: u64 = 15_000;
 const MAX_STEPS: u32 = 500;
 
 /// Run the FSM execution loop with a generic plan.
@@ -112,6 +114,7 @@ where
 
     let execution_start = std::time::Instant::now();
     let mut unknown_state_since: Option<std::time::Instant> = None;
+    let mut unknown_state_last_diagnostic: Option<std::time::Instant> = None;
 
     for step in 0..MAX_STEPS {
         // Check execution timeout
@@ -151,10 +154,15 @@ where
         if identified.main_window.is_none() {
             if unknown_state_since.is_none() {
                 unknown_state_since = Some(std::time::Instant::now());
+                unknown_state_last_diagnostic = None;
             }
             let elapsed = unknown_state_since.unwrap().elapsed();
             if elapsed.as_millis() as u64 > UNKNOWN_STATE_TIMEOUT_MS {
-                tracing::error!("[exec] Unknown state timeout after {}s", elapsed.as_secs());
+                tracing::error!(
+                    "[exec] Unknown state timeout after {}s diagnostics={}",
+                    elapsed.as_secs(),
+                    diagnostics_json(&a11y, &screenshot)
+                );
                 return (ExecutionResult {
                     success: false,
                     error: Some(format!(
@@ -163,12 +171,27 @@ where
                     )),
                 }, plan_state);
             }
-            tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
+            let should_log_diagnostic = unknown_state_last_diagnostic
+                .map(|last| {
+                    last.elapsed().as_millis() as u64 >= UNKNOWN_STATE_DIAGNOSTIC_INTERVAL_MS
+                })
+                .unwrap_or(true);
+            if should_log_diagnostic {
+                unknown_state_last_diagnostic = Some(std::time::Instant::now());
+                tracing::warn!(
+                    "[exec] Unknown state ({}s), waiting... diagnostics={}",
+                    elapsed.as_secs(),
+                    diagnostics_json(&a11y, &screenshot)
+                );
+            } else {
+                tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
+            }
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             continue;
         }
 
         unknown_state_since = None;
+        unknown_state_last_diagnostic = None;
 
         // Log identified states
         tracing::info!(

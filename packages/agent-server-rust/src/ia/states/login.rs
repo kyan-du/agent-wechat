@@ -236,6 +236,16 @@ mod tests {
         )
     }
 
+    fn load_fixture(name: &str) -> A11yNode {
+        let json = match name {
+            "saved_account_enter_weixin" => {
+                include_str!("test_fixtures/saved_account_enter_weixin.json")
+            }
+            _ => panic!("unknown fixture {name}"),
+        };
+        serde_json::from_str(json).expect("fixture parses")
+    }
+
     fn ghost_then_wechat_tree(ghost_login: bool, wechat_login: bool, wechat_switch: bool) -> A11yNode {
         let mut wechat_kids = vec![node("label", "Current User Test", None)];
         if wechat_login {
@@ -303,6 +313,30 @@ mod tests {
     }
 
     #[test]
+    fn identifies_enter_wechat_with_switch_account() {
+        let tree = login_account_tree("Enter WeChat", "Switch Account");
+        assert_eq!(identified_main_id(&tree).as_deref(), Some("login_account"));
+    }
+
+    #[test]
+    fn identifies_enter_weixin_with_switch_account() {
+        let tree = login_account_tree("Enter Weixin", "Switch Account");
+        assert_eq!(identified_main_id(&tree).as_deref(), Some("login_account"));
+    }
+
+    #[test]
+    fn identifies_captured_enter_weixin_saved_account_fixture() {
+        let tree = load_fixture("saved_account_enter_weixin");
+        assert_eq!(identified_main_id(&tree).as_deref(), Some("login_account"));
+
+        let action = saved_account_login_click(&tree).expect("saved account login click");
+        let Action::ClickCoords { x, y } = action else {
+            panic!("expected exact bounds click");
+        };
+        assert_eq!((x, y), (640.0, 487.0));
+    }
+
+    #[test]
     fn identifies_chinese_login_with_switch_account() {
         let tree = login_account_tree("登录", "切换账号");
         assert_eq!(identified_main_id(&tree).as_deref(), Some("login_account"));
@@ -331,7 +365,14 @@ mod tests {
         };
         assert_eq!(selector, SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR);
 
-        for name in ["Log In", "Open WeChat", "登录", "打开微信"] {
+        for name in [
+            "Log In",
+            "Open WeChat",
+            "Enter WeChat",
+            "Enter Weixin",
+            "登录",
+            "打开微信",
+        ] {
             let tree = node("push-button", name, None);
             assert!(query_selector(&tree, SAVED_ACCOUNT_LOGIN_SELECTOR).is_some());
         }
