@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
 import {
+  cursorMessageKey,
   markCursorMessagesHandled,
   selectCursorMessages,
   selectMessagesHandledAfterDispatch,
@@ -365,6 +366,43 @@ test("startup baseline detects local-id generation reset below the baseline", ()
   assert.equal(result.generationReset, true);
   assert.equal(result.seedLastSeen, 1);
   assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+});
+
+test("startup baseline detects a reset generation that regrows to the same local id", () => {
+  const oldBaseline = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 10_000 + index + 1,
+    content: `reset-${index + 1}`,
+  }));
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: cursorMessageKey(oldBaseline) },
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("matching same-id startup baseline remains history and is not replayed", () => {
+  const baselineMessage = message(100);
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    [baselineMessage],
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: cursorMessageKey(baselineMessage) },
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.equal(result.seedLastSeen, 100);
+  assert.deepEqual(result.messages, []);
 });
 
 test("steady-state cursor detects local-id generation reset below the cursor", () => {

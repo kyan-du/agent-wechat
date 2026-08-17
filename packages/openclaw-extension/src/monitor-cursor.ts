@@ -64,11 +64,20 @@ export function selectCursorMessages(
   if (baselineActive) {
     const baselineRow = sorted.find((message) => message.localId === startupBaseline.localId);
     const generationReset =
-      baselineRow === undefined &&
       sorted.length > 0 &&
-      sorted.every((message) => message.localId < startupBaseline.localId) &&
       typeof chat.lastMsgLocalId === "number" &&
-      chat.lastMsgLocalId < startupBaseline.localId;
+      chat.lastMsgLocalId <= startupBaseline.localId &&
+      (
+        (
+          baselineRow === undefined &&
+          sorted.every((message) => message.localId < startupBaseline.localId)
+        ) ||
+        (
+          baselineRow !== undefined &&
+          startupBaseline.messageKey !== undefined &&
+          cursorMessageKey(baselineRow) !== startupBaseline.messageKey
+        )
+      );
     if (generationReset) {
       const unread = Math.min(chat.unreadCount ?? 0, sorted.length);
       return {
