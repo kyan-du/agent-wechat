@@ -418,6 +418,63 @@ test("steady-state cursor detects local-id generation reset below the cursor", (
   assert.deepEqual(result.messages.map((m) => m.localId), [1, 2]);
 });
 
+test("steady-state cursor detects a reset generation that regrows to the same local id", () => {
+  const oldCursor = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 20_000 + index + 1,
+    content: `steady-reset-${index + 1}`,
+  }));
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(oldCursor) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("matching same-id steady-state cursor does not replay the unread suffix", () => {
+  const cursorMessage = message(100);
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(cursorMessage) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    Array.from({ length: 100 }, (_, index) => message(index + 1)),
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.deepEqual(result.messages, []);
+});
+
+test("missing steady-state cursor identity preserves one-row equal-cursor recovery", () => {
+  const cursorMessage = message(100);
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    [cursorMessage],
+    new Map([["wxid_first", 100]]),
+    new Map(),
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.deepEqual(result.messages, [cursorMessage]);
+});
+
 test("dispatch failure only advances through successful prefix segments", () => {
   const handled = selectMessagesHandledAfterDispatch(
     [message(1), message(2), message(3)],

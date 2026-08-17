@@ -106,6 +106,36 @@ test("message scan crosses recovery window and API page boundary before completi
   assert.deepEqual(cursors, [undefined, "older"]);
 });
 
+test("steady-state equal-ID reset scan reads the complete unread generation", async () => {
+  const pages = [
+    Array.from({ length: 40 }, (_, index) => message(100 - index)),
+    Array.from({ length: 60 }, (_, index) => message(60 - index)),
+  ];
+  const cursors: Array<string | undefined> = [];
+  const client = {
+    async listMessagesPage(
+      _chatId: string,
+      _limit?: number,
+      cursor?: string,
+    ): Promise<CursorPage<Message>> {
+      cursors.push(cursor);
+      return cursor === "older"
+        ? { schemaVersion: 1, items: pages[1] }
+        : { schemaVersion: 1, items: pages[0], nextCursor: "older" };
+    },
+  };
+
+  const scan = await listMessagesForMonitorCursor(client, "wxid_test", {
+    chat: chat("wxid_test", { unreadCount: 100, lastMsgLocalId: 100 }),
+    firstPoll: false,
+    prevLastSeen: 100,
+  });
+
+  assert.equal(scan.complete, true);
+  assert.equal(scan.messages.length, 100);
+  assert.deepEqual(cursors, [undefined, "older"]);
+});
+
 test("message scan can be durably continued without dropping the first page", async () => {
   const client = {
     async listMessagesPage(

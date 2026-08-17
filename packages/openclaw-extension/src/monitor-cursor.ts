@@ -136,13 +136,22 @@ export function selectCursorMessages(
   }
 
   const unread = chat.unreadCount ?? 0;
-  const generationReset =
+  const handled = equalCursorUnreadHandled.get(chatId);
+  const equalCursorRows = sorted.filter((message) => message.localId === prevLastSeen);
+  const equalIdGenerationReset =
+    unread > 0 &&
+    chat.lastMsgLocalId === prevLastSeen &&
+    sorted.every((message) => message.localId <= prevLastSeen) &&
+    equalCursorRows.length === 1 &&
+    handled?.localId === prevLastSeen &&
+    handled.messageKey !== cursorMessageKey(equalCursorRows[0]);
+  const lowerIdGenerationReset =
     unread > 0 &&
     sorted.length > 0 &&
     sorted.every((message) => message.localId < prevLastSeen) &&
     typeof chat.lastMsgLocalId === "number" &&
     chat.lastMsgLocalId < prevLastSeen;
-  if (generationReset) {
+  if (lowerIdGenerationReset || equalIdGenerationReset) {
     return {
       firstPoll,
       prevLastSeen,
@@ -159,11 +168,8 @@ export function selectCursorMessages(
   const recoverable =
     equalCursorUnread.length === 1 &&
     chat.lastMsgLocalId === prevLastSeen &&
-    (() => {
-      const handled = equalCursorUnreadHandled.get(chatId);
-      return handled?.localId !== prevLastSeen ||
-        handled.messageKey !== cursorMessageKey(equalCursorUnread[0]);
-    })();
+    (handled?.localId !== prevLastSeen ||
+      handled.messageKey !== cursorMessageKey(equalCursorUnread[0]));
 
   return {
     firstPoll,

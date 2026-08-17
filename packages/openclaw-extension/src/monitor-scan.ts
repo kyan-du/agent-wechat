@@ -104,8 +104,17 @@ function hasReachedStableMessageBoundary(
     return true;
   }
 
-  if (sorted.some((message) => message.localId <= prevLastSeen)) return true;
   const unread = chat.unreadCount ?? 0;
+  const possibleGenerationReset =
+    unread > 0 &&
+    typeof chat.lastMsgLocalId === "number" &&
+    chat.lastMsgLocalId <= prevLastSeen;
+  if (possibleGenerationReset) {
+    // A reset can regrow to the old cursor. Read the full unread suffix before
+    // identity comparison so an equal-ID replacement cannot hide older rows.
+    return messages.length >= unread;
+  }
+  if (sorted.some((message) => message.localId <= prevLastSeen)) return true;
   return unread > 0 && messages.length >= unread;
 }
 
