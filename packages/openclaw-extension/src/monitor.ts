@@ -23,9 +23,15 @@ import {
 } from "./monitor-scan.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
+  clearPendingResetRetry,
   commitResetDispatchPrefix,
+  loadPendingResetRetries,
+  mergePendingResetMessages,
   monitorChatsToProcess,
+  persistPendingResetRetries,
   queueResetGenerationRetry,
+  recordResetRetryFailure,
+  trimPendingResetRetries,
 } from "./monitor-retry.js";
 import {
   normalizeWeChatCommandBody,
@@ -133,7 +139,20 @@ export async function startWeChatMonitor(
   const equalCursorUnreadHandled = new Map<string, HandledCursor>();
   const startupBaselines = new Map<string, StartupBaseline>();
   const chatScanState: ChatScanState = { initialScanComplete: false };
-  const pendingMessageScans = new Map<string, MessageScanContinuation>();
+  const pendingMessageScans = loadPendingResetRetries(account.accountId);
+  for (const [chatId, pending] of pendingMessageScans) {
+    const cursor = pending.messages.reduce(
+      (max, message) => Math.max(max, message.localId),
+      0,
+    );
+    if (cursor > 0) lastSeenId.set(chatId, cursor);
+  }
+  const retryState = {
+    pendingMessageScans,
+    lastSeenId,
+    persist: () => persistPendingResetRetries(account.accountId, pendingMessageScans),
+  };
+  trimPendingResetRetries(retryState);
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -261,10 +280,7 @@ export async function startWeChatMonitor(
           startupBaselines.set(chatId, { localId: 0 });
         }
       }
-      const chatsToProcess = monitorChatsToProcess(
-        unreadChats,
-        { pendingMessageScans, lastSeenId },
-      );
+      const chatsToProcess = monitorChatsToProcess(unreadChats, retryState);
       for (const chatId of chatsToProcess.keys()) {
         if (isOfficialAccount(chatId)) chatsToProcess.delete(chatId);
       }
@@ -286,6 +302,7 @@ export async function startWeChatMonitor(
             equalCursorUnreadHandled,
             startupBaselines,
             pendingMessageScans,
+            retryState.persist,
             account,
             cfg,
             log,
@@ -328,6 +345,7 @@ export async function startWeChatMonitor(
           equalCursorUnreadHandled,
           startupBaselines,
           pendingMessageScans,
+          retryState.persist,
           account,
           cfg,
           log,
@@ -884,6 +902,7 @@ async function processUnreadChat(
   equalCursorUnreadHandled: Map<string, HandledCursor>,
   startupBaselines: Map<string, StartupBaseline>,
   pendingMessageScans: Map<string, MessageScanContinuation>,
+  persistRetryState: () => void,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -935,7 +954,24 @@ async function processUnreadChat(
   try {
     const pending = pendingMessageScans.get(chatId);
     if (pending?.readyForDispatch) {
-      messages = pending.messages;
+      const pendingTail = pending.messages.at(-1)?.localId ?? 0;
+      const currentTail = chat.lastMsgLocalId ?? 0;
+      if (currentTail > pendingTail || currentTail < pendingTail) {
+        const scan = await listMessagesForMonitorCursor(client, chatId, {
+          chat,
+          firstPoll: false,
+          prevLastSeen: pendingTail,
+          handledCursor: equalCursorUnreadHandled.get(chatId),
+        });
+        messages = mergePendingResetMessages(
+          { pendingMessageScans, lastSeenId, persist: persistRetryState },
+          chatId,
+          chat,
+          scan.messages,
+        );
+      } else {
+        messages = pending.messages;
+      }
       generationResetConfirmed = pending.generationReset === true;
     } else {
       const scan = await listMessagesForMonitorCursor(client, chatId, {
@@ -991,7 +1027,12 @@ async function processUnreadChat(
   );
   let newMessages = selected.messages;
   if (selected.generationReset && !pendingMessageScans.get(chatId)?.readyForDispatch) {
-    queueResetGenerationRetry({ pendingMessageScans, lastSeenId }, chatId, chat, newMessages);
+    queueResetGenerationRetry(
+      { pendingMessageScans, lastSeenId, persist: persistRetryState },
+      chatId,
+      chat,
+      newMessages,
+    );
   }
   const advanceLastSeen = (handledMessages: Message[]) => {
     const cursor = markCursorMessagesHandled(chatId, handledMessages, equalCursorUnreadHandled);
@@ -1004,7 +1045,11 @@ async function processUnreadChat(
       if (baseline && cursor >= baseline.localId) {
         startupBaselines.delete(chatId);
       }
-      commitResetDispatchPrefix({ pendingMessageScans, lastSeenId }, chatId, cursor);
+      commitResetDispatchPrefix(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+        cursor,
+      );
     }
   };
   const seedLastSeen = selected.seedLastSeen;
@@ -1013,7 +1058,10 @@ async function processUnreadChat(
   }
   if (newMessages.length === 0) {
     if (selected.generationReset) {
-      pendingMessageScans.delete(chatId);
+      clearPendingResetRetry(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+      );
     }
     if (chat.unreadCount > 0) {
       await openChatIfNeeded();
@@ -1219,6 +1267,12 @@ async function processUnreadChat(
       ? newMessages
       : selectMessagesHandledAfterDispatch(newMessages, successfulSegmentLastLocalIds);
     advanceLastSeen(handledMessages);
+    if (!allDispatched) {
+      recordResetRetryFailure(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+      );
+    }
     return allDispatched ? "dispatched" : "skipped";
   }
 

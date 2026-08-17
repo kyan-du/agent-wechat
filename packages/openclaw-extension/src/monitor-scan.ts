@@ -59,6 +59,9 @@ export type MessageScanContinuation = {
   messages: Message[];
   generationReset?: boolean;
   readyForDispatch?: boolean;
+  retryCount?: number;
+  nextRetryAt?: number;
+  createdAt?: number;
 };
 
 export type MonitorMessageScan = {
