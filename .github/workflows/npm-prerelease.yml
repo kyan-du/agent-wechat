@@ -4,9 +4,8 @@ name: Publish tagged npm prerelease
 # that the tag, all public package manifests, and origin/main identify the same
 # immutable release before any registry write.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+-next.[0-9]+'
+  # Intentionally manual-only while legal/environment/publisher/tag-rule gates
+  # remain blocked. Re-enabling tag push requires a separately reviewed change.
   workflow_dispatch:
     inputs:
       tag:
@@ -24,11 +23,12 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+  id-token: none
 
 env:
-  RELEASE_TAG: ${{ always() && github.ref_name || inputs.tag }}
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  TRUSTED_NPM_VERSION: 11.5.1
 
 jobs:
   publish:
@@ -47,9 +47,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      - name: Pin Trusted Publishing npm client
+        run: |
+          npm install --global "npm@$TRUSTED_NPM_VERSION"
+          test "$(node --version)" = "v22.14.0"
+          test "$(npm --version)" = "$TRUSTED_NPM_VERSION"
 
       - name: Authorize immutable tag on main
         run: |
@@ -61,6 +67,10 @@ jobs:
           test "$(git rev-list -n1 "$RELEASE_TAG")" = "$GITHUB_SHA"
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           node scripts/verify-npm-prerelease.mjs "$version"
+
+      - name: Require independently reviewed release authorization
+        if: ${{ github.event_name == 'push' }}
+        run: node scripts/verify-npm-release-authorization.mjs "$RELEASE_TAG" "$GITHUB_SHA"
 
       - name: Install exact dependencies
         run: pnpm install --frozen-lockfile
@@ -83,19 +93,7 @@ jobs:
 
       - name: Refuse an already-published version
         if: ${{ github.event_name == 'push' }}
-        run: |
-          set -euo pipefail
-          version="${RELEASE_TAG#v}"
-          for package in \
-            @kyan-du/agent-wechat-cli \
-            @kyan-du/agent-wechat-openclaw \
-            @kyan-du/agent-wechat-wechaty-puppet
-          do
-            if npm view "$package@$version" version >/dev/null 2>&1; then
-              echo "Refusing duplicate publication: $package@$version" >&2
-              exit 1
-            fi
-          done
+        run: node scripts/verify-npm-versions-absent.mjs "${RELEASE_TAG#v}"
 
       - name: Publish three exact packages to next with provenance
         if: ${{ github.event_name == 'push' }}

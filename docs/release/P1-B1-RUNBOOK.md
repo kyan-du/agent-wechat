@@ -93,14 +93,14 @@ Rollback does not grant production approval. Repeat exact-head validation and P2
 
 ## Tag-triggered npm prerelease automation
 
-After this workflow is merged and repository release gates are configured, an authorized tag `vX.Y.Z-next.N` triggers `.github/workflows/npm-prerelease.yml`. The workflow checks that:
+The tag trigger is intentionally absent while `release/npm-release-authorization.json` has `enabled=false`. A tag cannot start this workflow until a separately reviewed commit both enables the exact tag trigger, binds authorization to one exact tag+commit, and sets every owner/legal/environment/publisher/tag-rule/registry-reconciliation gate true. After those repository and legal gates are independently verified, an authorized tag `vX.Y.Z-next.N` may trigger `.github/workflows/npm-prerelease.yml`. The workflow checks that:
 
 - the tag resolves to the checked-out commit and that commit is contained in `origin/main`;
 - `X.Y.Z-next.N` exactly matches all three public package versions;
 - install, typecheck, package tests, build, pack smoke, publication-boundary audit, and release audit pass with no generated diff;
 - none of the three exact package versions already exists on npm.
 
-Only then does it publish all three packages under `next` with npm provenance and create a GitHub prerelease. It never publishes `latest`. Do not create the real tag until owner/legal release gates and exact-head approvals are complete.
+Only then does it publish all three packages under `next` with npm provenance and create a GitHub prerelease. It never publishes `latest`. Do not create the real tag until owner/legal release gates and exact-head approvals are complete. The workflow pins Node 22.14.0 and npm 11.5.1 for Trusted Publishing.
 
 A safe validation without npm or GitHub Release writes is available from Actions → **Publish tagged npm prerelease** → **Run workflow**. Supply an existing tag and leave `dry_run=true`. Manual dispatch never publishes; the input is deliberately required to make that boundary visible.
 
@@ -110,5 +110,6 @@ Repository administration required before the first real tag:
 2. Prefer npm Trusted Publishing for each of the three package names, bound to repository `kyan-du/agent-wechat` and workflow `.github/workflows/npm-prerelease.yml`. The workflow grants `id-token: write`; no long-lived token is needed after Trusted Publishing is configured.
 3. npm requires a one-time owner bootstrap if a package does not yet exist. If Trusted Publishing cannot be used, add an environment-scoped `NPM_TOKEN` only as a temporary fallback and retain required reviewers. Never add it as a repository file or broad workflow secret.
 4. Protect release tags matching `v*-next.*` and limit tag creation to maintainers. A pushed tag is the publication command and cannot be treated as a harmless annotation.
+5. Reconcile current npm state before enabling: all three `0.12.0-next.0` versions already exist and both `next` and `latest` currently point to them. Record the intended corrected mappings and independently verify them; this workflow will reject duplicate exact versions and never moves `latest`.
 
 The workflow is intentionally npm-only. GHCR remains a separate exact-version workflow so a container redistribution decision and image digest can be approved independently.

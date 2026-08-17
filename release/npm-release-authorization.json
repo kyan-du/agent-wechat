@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "tag": null,
+  "commit": null,
+  "approvals": {
+    "owner": false,
+    "legalRedistribution": false,
+    "protectedEnvironment": false,
+    "trustedPublishers": false,
+    "protectedTagRules": false,
+    "registryStateReconciled": false
+  }
+}

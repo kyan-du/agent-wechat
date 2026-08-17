@@ -81,8 +81,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents"]) {
-      const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
-        || (name === "npm-prerelease.yml" && where === "workflow" && scope === "contents");
+      const approvedWrite = name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages";
       if (permissions[scope] === "write" && !approvedWrite) forbidden.push(`${name}: ${where} ${scope} write permission`);
     }
   };
@@ -116,17 +115,20 @@ for (const event of ["pull_request", "push", "workflow_dispatch"]) if (!(event i
 const publishWorkflowText = readFileSync(join(workflowDir, "npm-prerelease.yml"), "utf8");
 const publishWorkflow = parseYaml(publishWorkflowText);
 const publishTriggers = publishWorkflow.on ?? publishWorkflow.true ?? {};
-if (!("push" in publishTriggers) || !("workflow_dispatch" in publishTriggers)) fail("npm prerelease workflow must support tag push and manual dry-run");
-const publishTags = publishTriggers.push?.tags ?? [];
-if (JSON.stringify(publishTags) !== JSON.stringify(["v[0-9]+.[0-9]+.[0-9]+-next.[0-9]+"])) fail("npm prerelease tag trigger must be exact next semver");
+if ("push" in publishTriggers || !("workflow_dispatch" in publishTriggers)) fail("npm prerelease workflow must remain manual dry-run only until independent authorization");
 if (publishTriggers.workflow_dispatch?.inputs?.dry_run?.default !== true) fail("manual npm prerelease dispatch must default to dry-run");
-if (publishWorkflow.permissions?.contents !== "write" || publishWorkflow.permissions?.["id-token"] !== "write") fail("npm prerelease workflow permissions drift");
+if (publishWorkflow.env?.RELEASE_TAG !== "${{ github.event_name == 'push' && github.ref_name || inputs.tag }}") fail("npm prerelease workflow must resolve the tag from the triggering event");
+if (publishWorkflow.permissions?.contents !== "read" || publishWorkflow.permissions?.["id-token"] !== "none") fail("inert npm prerelease workflow permissions drift");
 if (!/npm publish \.\/packages\/cli --tag next --access public/.test(publishWorkflowText)
   || !/npm publish \.\/packages\/openclaw-extension --tag next --access public/.test(publishWorkflowText)
   || !/npm publish \.\/packages\/wechaty-puppet --tag next --access public/.test(publishWorkflowText)
   || !/pnpm test:npm-packages/.test(publishWorkflowText)
+  || !/node scripts\/verify-npm-release-authorization\.mjs/.test(publishWorkflowText)
+  || !/node scripts\/verify-npm-versions-absent\.mjs/.test(publishWorkflowText)
+  || !/TRUSTED_NPM_VERSION: 11\.5\.1/.test(publishWorkflowText)
+  || !/node-version: 22\.14\.0/.test(publishWorkflowText)
   || !/gh release create/.test(publishWorkflowText)
-  || (publishWorkflowText.match(/if: \$\{\{ github\.event_name == 'push' \}\}/g) ?? []).length !== 3) fail("npm prerelease workflow must tag-gate smoke-tested publication and GitHub prerelease creation");
+  || (publishWorkflowText.match(/if: \$\{\{ github\.event_name == 'push' \}\}/g) ?? []).length !== 4) fail("npm prerelease workflow must tag-gate authorization, registry preflight, publication, and GitHub prerelease creation");
 if (forbidden.length) fail(`workflow publication capability detected:\n${forbidden.join("\n")}`);
 
 const rootManifest = readJson("package.json");
