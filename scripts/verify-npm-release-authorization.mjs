@@ -2,13 +2,13 @@
 import { execFileSync } from "node:child_process";
 import { parseDocument } from "yaml";
 
-const [tag, releaseCommit, receiptRef, expectedReceiptCommit, expectedReceiptTagOid] = process.argv.slice(2);
-if (!tag || !releaseCommit || !receiptRef || !expectedReceiptCommit || !expectedReceiptTagOid) {
-  throw new Error("usage: verify-npm-release-authorization.mjs <tag> <release-commit> <receipt-ref> <receipt-commit> <receipt-tag-oid>");
+const [tag, releaseCommit, receiptRef, expectedReceiptCommit, expectedReceiptTagOid, expectedReleaseTagOid] = process.argv.slice(2);
+if (!tag || !releaseCommit || !receiptRef || !expectedReceiptCommit || !expectedReceiptTagOid || !expectedReleaseTagOid) {
+  throw new Error("usage: verify-npm-release-authorization.mjs <tag> <release-commit> <receipt-ref> <receipt-commit> <receipt-tag-oid> <release-tag-oid>");
 }
 const run = (args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 const oid = /^[0-9a-f]{40}$/;
-for (const value of [releaseCommit, expectedReceiptCommit, expectedReceiptTagOid]) {
+for (const value of [releaseCommit, expectedReceiptCommit, expectedReceiptTagOid, expectedReleaseTagOid]) {
   if (!oid.test(value)) throw new Error("release, receipt commit, and receipt tag must be exact OIDs");
 }
 if (!/^refs\/tags\/npm-release-auth\/v[0-9]+\.[0-9]+\.[0-9]+-next\.[0-9]+$/.test(receiptRef)) {
@@ -33,6 +33,7 @@ if (run(["cat-file", "-t", expectedReceiptTagOid]) !== "tag" ||
 }
 const releaseTagRef = `refs/tags/${tag}`;
 const releaseTagOid = run(["rev-parse", releaseTagRef]);
+if (releaseTagOid !== expectedReleaseTagOid) throw new Error("release tag object does not match the protected exact OID");
 const releaseTarget = tagTarget(releaseTagOid);
 if (run(["cat-file", "-t", releaseTagOid]) !== "tag" ||
     !releaseTarget || run(["cat-file", "-t", releaseTarget]) !== "commit" ||
@@ -47,9 +48,16 @@ if (entry.length !== 4 || entry[0] !== "100644" || entry[1] !== "blob" || entry[
   throw new Error("authorization receipt must be one regular mode-100644 blob");
 }
 const raw = run(["show", `${expectedReceiptCommit}:${path}`]);
-const document = parseDocument(raw, { uniqueKeys: true, prettyErrors: false });
-if (document.errors.length) throw new Error(`authorization receipt JSON is ambiguous: ${document.errors[0].message}`);
-const authorization = document.toJSON();
+let authorization;
+try {
+  authorization = JSON.parse(raw);
+} catch {
+  throw new Error("authorization receipt must be strict JSON");
+}
+const duplicateDocument = parseDocument(raw, { uniqueKeys: true, prettyErrors: false });
+if (duplicateDocument.errors.length) {
+  throw new Error(`authorization receipt JSON is ambiguous: ${duplicateDocument.errors[0].message}`);
+}
 const exactKeys = (object, keys, label) => {
   if (!object || typeof object !== "object" || Array.isArray(object) ||
       JSON.stringify(Object.keys(object).sort()) !== JSON.stringify([...keys].sort())) {

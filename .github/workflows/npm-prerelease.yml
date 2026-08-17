@@ -75,15 +75,18 @@ jobs:
         env:
           NPM_AUTHORIZATION_SHA: ${{ vars.NPM_AUTHORIZATION_SHA }}
           NPM_AUTHORIZATION_TAG_OID: ${{ vars.NPM_AUTHORIZATION_TAG_OID }}
+          NPM_RELEASE_TAG_OID: ${{ vars.NPM_RELEASE_TAG_OID }}
         run: |
           set -euo pipefail
           test -n "$NPM_AUTHORIZATION_SHA"
           test -n "$NPM_AUTHORIZATION_TAG_OID"
+          test -n "$NPM_RELEASE_TAG_OID"
           authorization_ref="refs/tags/npm-release-auth/$RELEASE_TAG"
           git fetch origin "$authorization_ref:$authorization_ref" --no-tags
           node scripts/verify-npm-release-authorization.mjs \
             "$RELEASE_TAG" "$RELEASE_SHA" "$authorization_ref" \
-            "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID"
+            "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" \
+            "$NPM_RELEASE_TAG_OID"
 
       - name: Install exact dependencies
         run: pnpm install --frozen-lockfile

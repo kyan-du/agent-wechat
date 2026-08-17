@@ -15,6 +15,7 @@ if (!text.includes('test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$release_
 if (!text.includes('authorization_ref="refs/tags/npm-release-auth/$RELEASE_TAG"')) throw new Error('protected authorization ref missing');
 if (!text.includes('"$RELEASE_TAG" "$RELEASE_SHA" "$authorization_ref"')) throw new Error('independent release authorization missing');
 if (!text.includes('"$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID"')) throw new Error('authorization commit/tag object binding missing');
+if (!text.includes('"$NPM_RELEASE_TAG_OID"')) throw new Error('release tag object binding missing');
 if (!text.includes('node scripts/test-npm-release-authorization.mjs')) throw new Error('authorization Git E2E matrix missing from validation');
 if (!text.includes('TRUSTED_NPM_VERSION: 11.5.1') || !text.includes('node-version: 22.14.0') || !text.includes('npm install --global "npm@$TRUSTED_NPM_VERSION"')) throw new Error('Trusted Publishing npm consumer is not pinned');
 if (!text.includes('node scripts/verify-npm-versions-absent.mjs "${RELEASE_TAG#v}"')) throw new Error('fail-closed registry preflight missing');

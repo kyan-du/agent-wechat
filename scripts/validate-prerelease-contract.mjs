@@ -126,6 +126,7 @@ if (!/npm publish \.\/packages\/cli --tag next --access public/.test(publishWork
   || !/release_sha="\$\(git rev-parse HEAD\^\{commit\}\)"/.test(publishWorkflowText)
   || !/authorization_ref="refs\/tags\/npm-release-auth\/\$RELEASE_TAG"/.test(publishWorkflowText)
   || !/"\$NPM_AUTHORIZATION_SHA" "\$NPM_AUTHORIZATION_TAG_OID"/.test(publishWorkflowText)
+  || !/"\$NPM_RELEASE_TAG_OID"/.test(publishWorkflowText)
   || !/node scripts\/verify-npm-versions-absent\.mjs/.test(publishWorkflowText)
   || !/node scripts\/test-npm-release-authorization\.mjs/.test(publishWorkflowText)
   || !/TRUSTED_NPM_VERSION: 11\.5\.1/.test(publishWorkflowText)

@@ -56,6 +56,7 @@ const verify = (state, overrides = {}) => spawnSync(process.execPath, [
   verifier, overrides.tag ?? "v1.2.3-next.4", overrides.release ?? state.release,
   overrides.ref ?? "refs/tags/npm-release-auth/v1.2.3-next.4",
   overrides.receipt ?? state.receiptCommit, overrides.tagOid ?? state.receiptTagOid,
+  overrides.releaseTagOid ?? state.releaseTagOid,
 ], { cwd: state.dir, encoding: "utf8" });
 const expectFail = (scenario, mutate) => {
   const state = setup(); mutate(state);
@@ -68,7 +69,8 @@ expectFail("edited receipt", (s) => {
   writeFileSync(p, readFileSync(p, "utf8").replace('"owner":true', '"owner":false'));
   s.receiptCommit = commit(s.dir, "edited"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "edited");
 });
-expectFail("moved tag object same commit", (s) => { tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "different message"); });
+expectFail("moved receipt tag object same commit", (s) => { tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "different message"); });
+expectFail("moved release tag object same commit", (s) => { tag(s.dir, "v1.2.3-next.4", s.release, "different release message"); });
 expectFail("receipt tag of tag", (s) => { s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptTagOid, "nested"); });
 expectFail("release tag of tag", (s) => { s.releaseTagOid = tag(s.dir, "v1.2.3-next.4", s.releaseTagOid, "nested release"); });
 expectFail("deleted release tag", (s) => git(s.dir, ["tag", "-d", "v1.2.3-next.4"]));
@@ -80,4 +82,10 @@ expectFail("symlink receipt", (s) => { const p = join(s.dir, "release/npm-releas
 expectFail("duplicate JSON keys", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('"owner":true', '"owner":false,"owner":true')); s.receiptCommit = commit(s.dir, "duplicate"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "duplicate"); });
 expectFail("unknown receipt key", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('{"schemaVersion"', '{"unknown":true,"schemaVersion"')); s.receiptCommit = commit(s.dir, "unknown"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "unknown"); });
 expectFail("semantic package drift", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('"distTag":"next"', '"distTag":"latest"')); s.receiptCommit = commit(s.dir, "drift"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "drift"); });
+expectFail("non-JSON YAML receipt", (s) => {
+  const p = join(s.dir, "release/npm-release-authorization.json");
+  writeFileSync(p, "schemaVersion: 1\nenabled: true\ntag: v1.2.3-next.4\nreleaseCommit: " + s.release + "\nreleaseTree: " + s.tree + "\n");
+  s.receiptCommit = commit(s.dir, "yaml");
+  s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "yaml");
+});
 console.log("npm authorization Git E2E matrix passed");
