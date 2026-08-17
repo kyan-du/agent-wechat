@@ -5,8 +5,34 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
-import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.js";
+import {
+  enrichStartupBaselineFromMessages,
+  markCursorMessagesHandled,
+  seedStartupBaselineFromChat,
+  selectCursorMessages,
+  selectMessagesHandledAfterDispatch,
+  type HandledCursor,
+  type StartupBaseline,
+} from "./monitor-cursor.js";
+import {
+  listInitialMonitorChatSnapshot,
+  listMessagesForMonitorCursor,
+  listNextMonitorChatPage,
+  type ChatScanState,
+  type MessageScanContinuation,
+} from "./monitor-scan.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
+import {
+  clearPendingResetRetry,
+  commitResetDispatchPrefix,
+  loadPendingResetRetries,
+  mergePendingResetMessages,
+  monitorChatsToProcess,
+  persistPendingResetRetries,
+  queueResetGenerationRetry,
+  recordResetRetryFailure,
+  trimPendingResetRetries,
+} from "./monitor-retry.js";
 import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
@@ -111,6 +137,22 @@ export async function startWeChatMonitor(
   // Track last-seen message ID per chat
   const lastSeenId = new Map<string, number>();
   const equalCursorUnreadHandled = new Map<string, HandledCursor>();
+  const startupBaselines = new Map<string, StartupBaseline>();
+  const chatScanState: ChatScanState = { initialScanComplete: false };
+  const pendingMessageScans = loadPendingResetRetries(account.accountId);
+  for (const [chatId, pending] of pendingMessageScans) {
+    const cursor = pending.messages.reduce(
+      (max, message) => Math.max(max, message.localId),
+      0,
+    );
+    if (cursor > 0) lastSeenId.set(chatId, cursor);
+  }
+  const retryState = {
+    pendingMessageScans,
+    lastSeenId,
+    persist: () => persistPendingResetRetries(account.accountId, pendingMessageScans),
+  };
+  trimPendingResetRetries(retryState);
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -194,8 +236,18 @@ export async function startWeChatMonitor(
 
       // ---- Message polling ----
       let chats: Chat[];
+      let isInitialSnapshot = false;
       try {
-        chats = await client.listChats(50);
+        if (!chatScanState.initialScanComplete) {
+          // Freeze the complete paged chat snapshot before processing any chat.
+          // Otherwise a later page could absorb a message arriving while earlier
+          // pages are already being processed into its startup baseline.
+          chats = await listInitialMonitorChatSnapshot(client, chatScanState);
+          isInitialSnapshot = true;
+        } else {
+          const page = await listNextMonitorChatPage(client, chatScanState);
+          chats = page.chats;
+        }
       } catch (err) {
         log?.error?.(
           `[wechat:${account.accountId}] Failed to list chats: ${err}`,
@@ -204,10 +256,34 @@ export async function startWeChatMonitor(
         continue;
       }
 
+      if (isInitialSnapshot) {
+        for (const chat of chats) {
+          const chatId = chat.username ?? chat.id;
+          if (!startupBaselines.has(chatId)) {
+            const baseline = seedStartupBaselineFromChat(chat);
+            if (baseline) startupBaselines.set(chatId, baseline);
+          }
+        }
+      }
+
       // Filter to chats with unreads (skip official accounts)
       const unreadChats = chats.filter(
         (c) => c.unreadCount > 0 && !isOfficialAccount(c.username ?? c.id),
       );
+      for (const chat of unreadChats) {
+        const chatId = chat.username ?? chat.id;
+        if (
+          chatScanState.initialScanComplete &&
+          !lastSeenId.has(chatId) &&
+          !startupBaselines.has(chatId)
+        ) {
+          startupBaselines.set(chatId, { localId: 0 });
+        }
+      }
+      const chatsToProcess = monitorChatsToProcess(chats, retryState);
+      for (const chatId of chatsToProcess.keys()) {
+        if (isOfficialAccount(chatId)) chatsToProcess.delete(chatId);
+      }
       if (unreadChats.length > 0) {
         log?.info?.(
           `[wechat:${account.accountId}] ${unreadChats.length} chat(s) with unreads`,
@@ -216,14 +292,17 @@ export async function startWeChatMonitor(
 
       let deferredThisTick = 0;
       let dispatchedThisTick = 0;
-      if (unreadChats.length > 0) {
-        for (const chat of unreadChats) {
+      if (chatsToProcess.size > 0) {
+        for (const chat of chatsToProcess.values()) {
           if (abortSignal.aborted) break;
           const result = await processUnreadChat(
             client,
             chat,
             lastSeenId,
             equalCursorUnreadHandled,
+            startupBaselines,
+            pendingMessageScans,
+            retryState.persist,
             account,
             cfg,
             log,
@@ -264,6 +343,9 @@ export async function startWeChatMonitor(
           chat,
           lastSeenId,
           equalCursorUnreadHandled,
+          startupBaselines,
+          pendingMessageScans,
+          retryState.persist,
           account,
           cfg,
           log,
@@ -818,6 +900,9 @@ async function processUnreadChat(
   chat: Chat,
   lastSeenId: Map<string, number>,
   equalCursorUnreadHandled: Map<string, HandledCursor>,
+  startupBaselines: Map<string, StartupBaseline>,
+  pendingMessageScans: Map<string, MessageScanContinuation>,
+  persistRetryState: () => void,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -845,9 +930,10 @@ async function processUnreadChat(
     cfg,
     surface: "wechat",
   });
-
-  // Open the chat (triggers media downloads + clear unreads)
-  if (!skipOpen) {
+  let opened = false;
+  const openChatIfNeeded = async () => {
+    if (skipOpen || opened) return;
+    opened = true;
     log?.info?.(`[wechat:${liveAccount.accountId}] Opening chat ${chatId}...`);
     try {
       await client.openChat(chatId, true);
@@ -857,17 +943,58 @@ async function processUnreadChat(
         `[wechat:${liveAccount.accountId}] Failed to open chat ${chatId}: ${err}`,
       );
     }
-  }
+  };
 
-  // Bound recovery reads even when WeChat reports a very large unread backlog.
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
-  const recoveryWindow = Math.max(liveAccount.catchUpMaxMessages, 20);
-  const fetchLimit = Math.min(Math.max(chat.unreadCount, 20), recoveryWindow);
+  const startupBaseline = startupBaselines.get(chatId);
 
   let messages: Message[];
+  let generationResetConfirmed = false;
   try {
-    messages = await client.listMessages(chatId, fetchLimit);
+    const pending = pendingMessageScans.get(chatId);
+    if (pending?.readyForDispatch) {
+      const pendingTail = pending.messages.at(-1)?.localId ?? 0;
+      // Always refresh the bounded head before a ready retry: a second reset can
+      // regrow to the same numeric tail with a different stable identity.
+      const scan = await listMessagesForMonitorCursor(client, chatId, {
+        chat,
+        firstPoll: false,
+        prevLastSeen: pendingTail,
+        handledCursor: equalCursorUnreadHandled.get(chatId),
+      });
+      messages = mergePendingResetMessages(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+        chat,
+        scan.messages,
+      );
+      generationResetConfirmed = pending.generationReset === true;
+    } else {
+      const scan = await listMessagesForMonitorCursor(client, chatId, {
+        chat,
+        firstPoll,
+        prevLastSeen,
+        startupBaseline,
+        handledCursor: equalCursorUnreadHandled.get(chatId),
+        continuation: pending,
+      });
+      if (!scan.complete) {
+        pendingMessageScans.set(chatId, {
+          chat,
+          cursor: scan.nextCursor,
+          messages: scan.messages,
+          generationReset: scan.generationReset,
+        });
+        log?.info?.(
+          `[wechat:${liveAccount.accountId}] ${chatId}: deferred after ${scan.pagesScanned} message page(s); continuing paged scan next tick`,
+        );
+        return "deferred";
+      }
+      messages = scan.messages;
+      generationResetConfirmed = scan.generationReset === true;
+      pendingMessageScans.delete(chatId);
+    }
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to list messages for ${chatId}: ${err}`,
@@ -881,34 +1008,86 @@ async function processUnreadChat(
 
   if (messages.length === 0) return "skipped";
 
+  const enrichedBaseline = enrichStartupBaselineFromMessages(startupBaseline, messages);
+  if (enrichedBaseline) {
+    startupBaselines.set(chatId, enrichedBaseline);
+  }
+
   const selected = selectCursorMessages(
     chatId,
     chat,
     messages,
     lastSeenId,
     equalCursorUnreadHandled,
+    enrichedBaseline,
+    generationResetConfirmed,
   );
   let newMessages = selected.messages;
+  if (selected.generationReset && !pendingMessageScans.get(chatId)?.readyForDispatch) {
+    queueResetGenerationRetry(
+      { pendingMessageScans, lastSeenId, persist: persistRetryState },
+      chatId,
+      chat,
+      newMessages,
+    );
+  }
   const advanceLastSeen = (handledMessages: Message[]) => {
     const cursor = markCursorMessagesHandled(chatId, handledMessages, equalCursorUnreadHandled);
-    if (cursor !== undefined) lastSeenId.set(chatId, cursor);
+    if (cursor !== undefined) {
+      lastSeenId.set(chatId, cursor);
+      if (selected.generationReset) {
+        startupBaselines.delete(chatId);
+      }
+      const baseline = startupBaselines.get(chatId);
+      if (baseline && cursor >= baseline.localId) {
+        startupBaselines.delete(chatId);
+      }
+      const exactCursorMessage = handledMessages.reduce<Message | undefined>(
+        (latest, message) => latest === undefined || message.localId > latest.localId
+          ? message
+          : message.localId === latest.localId
+            ? message
+            : latest,
+        undefined,
+      );
+      commitResetDispatchPrefix(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+        exactCursorMessage,
+      );
+    }
   };
   const seedLastSeen = selected.seedLastSeen;
   if (seedLastSeen !== undefined) {
     advanceLastSeen(messages.filter((message) => message.localId <= seedLastSeen));
   }
   if (newMessages.length === 0) {
+    if (selected.generationReset) {
+      clearPendingResetRetry(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+      );
+    }
+    if (chat.unreadCount > 0) {
+      await openChatIfNeeded();
+    }
     // Don't update lastSeenId — if session.db reports a newer message
     // (via lastMsgLocalId) that hasn't appeared in message_N.db yet,
     // the catch-up loop will re-fire on the next poll.
     return "skipped";
   }
 
+  // Open after the durable read-only scan, so clearing unreads cannot erase the
+  // only signal telling us that older unread pages still need to be fetched.
+  await openChatIfNeeded();
+
   const catchUpLimits = {
     maxMessages: liveAccount.catchUpMaxMessages,
     maxAgeMs: liveAccount.catchUpMaxAgeMs,
   };
-  const isRecovery = firstPoll || (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits));
+  const isRecovery =
+    (firstPoll && startupBaseline === undefined) ||
+    (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits));
   if (isRecovery) {
     const selection = selectCatchUpMessages(
       newMessages,
@@ -1062,6 +1241,7 @@ async function processUnreadChat(
       `[wechat:${liveAccount.accountId}] ${chatId}: ${processed.length} dispatchable msg(s) in ${segments.length} segment(s) (${decision.reason})`,
     );
     let allDispatched = true;
+    const successfulSegmentLastLocalIds: number[] = [];
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
       const dispatched = await dispatchSegment(
@@ -1079,13 +1259,25 @@ async function processUnreadChat(
       );
       if (!dispatched) {
         allDispatched = false;
+        break;
       }
+      successfulSegmentLastLocalIds.push(
+        Math.max(...segments[i].map((pm) => pm.msg.localId)),
+      );
     }
     if (clearBufferedHistory && allDispatched && groupHistory) {
       groupHistory.set(chatId, []);
     }
-    const maxId = Math.max(...newMessages.map((m) => m.localId));
-    advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
+    const handledMessages = allDispatched
+      ? newMessages
+      : selectMessagesHandledAfterDispatch(newMessages, successfulSegmentLastLocalIds);
+    advanceLastSeen(handledMessages);
+    if (!allDispatched) {
+      recordResetRetryFailure(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+      );
+    }
     return allDispatched ? "dispatched" : "skipped";
   }
 

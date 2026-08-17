@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
-import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.ts";
+import {
+  cursorMessageKey,
+  markCursorMessagesHandled,
+  selectCursorMessages,
+  selectMessagesHandledAfterDispatch,
+  type HandledCursor,
+  type StartupBaseline,
+} from "./monitor-cursor.ts";
 
 function chat(overrides: Partial<Chat>): Chat {
   return {
@@ -14,14 +21,14 @@ function chat(overrides: Partial<Chat>): Chat {
   };
 }
 
-function message(localId: number): Message {
+function message(localId: number, timestamp = "2026-08-16T00:00:00.000Z"): Message {
   return {
     localId,
     serverId: localId,
     chatId: "wxid_first",
     type: 1,
     content: `m${localId}`,
-    timestamp: "2026-08-16T00:00:00.000Z",
+    timestamp,
   };
 }
 
@@ -252,4 +259,294 @@ test("first poll still seeds read history before the unread suffix", () => {
   );
   assert.equal(result.seedLastSeen, 2);
   assert.deepEqual(result.messages.map((m) => m.localId), [3]);
+});
+
+test("startup baseline treats a clock-skewed-behind newer row as live", () => {
+  const baseline: StartupBaseline = { localId: 1 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 1 }),
+    [
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:17:59.000Z"),
+    ],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.firstPoll, true);
+  assert.equal(result.prevLastSeen, 0);
+  assert.equal(result.seedLastSeen, 1);
+  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+});
+
+test("startup baseline suppresses stale future-skewed rows", () => {
+  const baseline: StartupBaseline = { localId: 4 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 4 }),
+    [
+      message(1, "2026-08-17T07:00:00.000Z"),
+      message(2, "2026-08-17T07:05:00.000Z"),
+      message(3, "2026-08-17T07:10:00.000Z"),
+      message(4, "2036-08-17T07:20:34.000Z"),
+    ],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, 4);
+  assert.deepEqual(result.messages, []);
+});
+
+test("startup baseline uses ids for same-second and subsecond rows", () => {
+  const baseline: StartupBaseline = { localId: 2 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 2 }),
+    [
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:18:00.000Z"),
+      message(3, "2026-08-17T07:18:00.250Z"),
+    ],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, 2);
+  assert.deepEqual(result.messages.map((m) => m.localId), [3]);
+});
+
+test("startup baseline catches a message arriving between listChats and listMessages", () => {
+  const baseline: StartupBaseline = { localId: 1 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 1 }),
+    [
+      message(1, "2026-08-17T07:18:00.000Z"),
+      message(2, "2026-08-17T07:18:00.000Z"),
+    ],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, 1);
+  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+});
+
+test("post-initial first-seen chat can dispatch from an explicit zero baseline", () => {
+  const baseline: StartupBaseline = { localId: 0 };
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 1 }),
+    [message(1, "2036-08-17T07:20:34.000Z")],
+    new Map(),
+    new Map(),
+    baseline,
+  );
+
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1]);
+});
+
+test("startup baseline detects local-id generation reset below the baseline", () => {
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 2 }),
+    [message(1), message(2)],
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: "old-generation" },
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1, 2]);
+});
+
+test("startup baseline detects a reset generation that regrows to the same local id", () => {
+  const oldBaseline = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 10_000 + index + 1,
+    content: `reset-${index + 1}`,
+  }));
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: cursorMessageKey(oldBaseline) },
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("matching same-id startup baseline remains history and is not replayed", () => {
+  const baselineMessage = message(100);
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    [baselineMessage],
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: cursorMessageKey(baselineMessage) },
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.equal(result.seedLastSeen, 100);
+  assert.deepEqual(result.messages, []);
+});
+
+test("steady-state cursor detects local-id generation reset below the cursor", () => {
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 2, lastMsgLocalId: 2 }),
+    [message(1), message(2)],
+    new Map([["wxid_first", 100]]),
+    new Map(),
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1, 2]);
+});
+
+test("steady-state cursor detects a reset generation that regrows to the same local id", () => {
+  const oldCursor = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 20_000 + index + 1,
+    content: `steady-reset-${index + 1}`,
+  }));
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(oldCursor) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("confirmed steady-state reset ignores an underreported unread counter", () => {
+  const oldCursor = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 30_000 + index + 1,
+    content: `underreported-reset-${index + 1}`,
+  }));
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(oldCursor) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("confirmed steady-state reset survives a zero unread transition", () => {
+  const resetMessages = Array.from({ length: 100 }, (_, index) => message(index + 1));
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    new Map(),
+    undefined,
+    true,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("matching same-id steady-state cursor does not replay the unread suffix", () => {
+  const cursorMessage = message(100);
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(cursorMessage) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 100, lastMsgLocalId: 100 }),
+    Array.from({ length: 100 }, (_, index) => message(index + 1)),
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.deepEqual(result.messages, []);
+});
+
+test("missing steady-state cursor identity preserves one-row equal-cursor recovery", () => {
+  const cursorMessage = message(100);
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    [cursorMessage],
+    new Map([["wxid_first", 100]]),
+    new Map(),
+  );
+
+  assert.equal(result.generationReset, undefined);
+  assert.deepEqual(result.messages, [cursorMessage]);
+});
+
+test("dispatch failure only advances through successful prefix segments", () => {
+  const handled = selectMessagesHandledAfterDispatch(
+    [message(1), message(2), message(3)],
+    [1],
+  );
+
+  assert.deepEqual(handled.map((m) => m.localId), [1]);
+});
+
+test("failed first segment leaves every segment retryable", () => {
+  const handled = selectMessagesHandledAfterDispatch(
+    [message(1), message(2), message(3)],
+    [],
+  );
+
+  assert.deepEqual(handled, []);
+});
+
+test("reset dispatch failure keeps the failed suffix retryable", () => {
+  const resetMessages = Array.from({ length: 100 }, (_, index) => message(index + 1));
+  const lastSeen = new Map<string, number>();
+  const handledCursors = new Map<string, HandledCursor>();
+  const handledPrefix = selectMessagesHandledAfterDispatch(resetMessages, [40]);
+  advanceToHandledMessages("wxid_first", lastSeen, handledCursors, handledPrefix);
+
+  assert.deepEqual(handledPrefix.map((m) => m.localId), Array.from({ length: 40 }, (_, i) => i + 1));
+  const retry = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 100 }),
+    resetMessages,
+    lastSeen,
+    handledCursors,
+  );
+  assert.deepEqual(retry.messages.map((m) => m.localId), Array.from({ length: 60 }, (_, i) => i + 41));
 });
