@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -168,11 +168,38 @@ test("corrupt retry persistence is quarantined and stops recovery", () => {
     (error) => error instanceof PendingRetryStateError &&
       error.code === "RETRY_STATE_CORRUPT" &&
       error.message.includes(`${path}.corrupt`) &&
-      error.message.includes("Inspect/restore"),
+      error.message.includes(`${path}.blocked`) &&
+      error.message.includes("explicitly remove"),
   );
   assert.equal(existsSync(path), false);
   assert.equal(existsSync(`${path}.corrupt`), true);
+  assert.equal(existsSync(`${path}.blocked`), true);
+  assert.throws(
+    () => loadPendingResetRetries("default", dir),
+    (error) => error instanceof PendingRetryStateError && error.code === "RETRY_STATE_BLOCKED",
+  );
+  rmSync(`${path}.blocked`);
   assert.equal(loadPendingResetRetries("default", dir).size, 0);
+});
+
+test("operator restore plus blocker acknowledgement resumes retry loading", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-restore-"));
+  const path = join(dir, "wechat", "monitor-retry-default.json");
+  mkdirSync(join(dir, "wechat"), { recursive: true });
+  writeFileSync(path, "truncated");
+  assert.throws(() => loadPendingResetRetries("default", dir));
+
+  const restoredRetry = state();
+  queueResetGenerationRetry(restoredRetry, "wxid_reset", chat(1), [message(100)], 0);
+  persistPendingResetRetries("restored", restoredRetry.pendingMessageScans, dir);
+  const restoredPath = join(dir, "wechat", "monitor-retry-restored.json");
+  renameSync(restoredPath, path);
+  rmSync(`${path}.blocked`);
+
+  assert.deepEqual(
+    loadPendingResetRetries("default", dir).get("wxid_reset")?.messages.map((item) => item.localId),
+    [100],
+  );
 });
 
 test("persisted retry validation rejects malformed chat and message fields", () => {

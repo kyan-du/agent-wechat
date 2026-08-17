@@ -1,11 +1,14 @@
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
 import {
   existsSync,
+  closeSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
+  fsyncSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,9 +20,9 @@ export const MAX_PENDING_RESET_MESSAGES = 10_000;
 export const MAX_RESET_RETRY_DELAY_MS = 60_000;
 
 export class PendingRetryStateError extends Error {
-  readonly code: "RETRY_STATE_CORRUPT" | "RETRY_CAPACITY";
+  readonly code: "RETRY_STATE_CORRUPT" | "RETRY_STATE_BLOCKED" | "RETRY_CAPACITY";
 
-  constructor(message: string, code: "RETRY_STATE_CORRUPT" | "RETRY_CAPACITY") {
+  constructor(message: string, code: "RETRY_STATE_CORRUPT" | "RETRY_STATE_BLOCKED" | "RETRY_CAPACITY") {
     super(message);
     this.name = "PendingRetryStateError";
     this.code = code;
@@ -36,6 +39,27 @@ function retryStorePath(accountId: string, stateDir?: string): string {
   const root = stateDir ?? process.env.OPENCLAW_STATE_DIR?.trim() ?? join(homedir(), ".openclaw");
   const safeAccount = accountId.replace(/[^A-Za-z0-9._-]/g, "_");
   return join(root, "wechat", `monitor-retry-${safeAccount}.json`);
+}
+
+function quarantinePath(path: string): string {
+  return `${path}.corrupt`;
+}
+
+function blockerPath(path: string): string {
+  return `${path}.blocked`;
+}
+
+function syncPath(path: string): void {
+  const fd = openSync(path, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function syncParent(path: string): void {
+  syncPath(dirname(path));
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -105,6 +129,20 @@ export function loadPendingResetRetries(
   stateDir?: string,
 ): Map<string, MessageScanContinuation> {
   const path = retryStorePath(accountId, stateDir);
+  const blocked = blockerPath(path);
+  if (existsSync(blocked)) {
+    let quarantine = quarantinePath(path);
+    try {
+      const marker = JSON.parse(readFileSync(blocked, "utf8")) as { quarantine?: unknown };
+      if (typeof marker.quarantine === "string") quarantine = marker.quarantine;
+    } catch {
+      // A malformed marker is still a durable stop condition.
+    }
+    throw new PendingRetryStateError(
+      `WeChat retry recovery is blocked by ${blocked}. Reconcile ${quarantine}, then explicitly remove the blocker to resume.`,
+      "RETRY_STATE_BLOCKED",
+    );
+  }
   if (!existsSync(path)) return new Map();
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as { version?: unknown; entries?: unknown };
@@ -115,10 +153,14 @@ export function loadPendingResetRetries(
     validateEntries(entries);
     return new Map(entries);
   } catch (error) {
-    const quarantine = `${path}.corrupt`;
+    const quarantine = quarantinePath(path);
+    const blocked = blockerPath(path);
     try {
       rmSync(quarantine, { force: true });
       renameSync(path, quarantine);
+      writeFileSync(blocked, JSON.stringify({ version: 1, quarantine }), { mode: 0o600 });
+      syncPath(blocked);
+      syncParent(path);
     } catch (quarantineError) {
       throw new PendingRetryStateError(
         `WeChat retry state is unreadable at ${path}; quarantine failed (${String(quarantineError)}). Stop the channel and move this file aside manually.`,
@@ -126,7 +168,7 @@ export function loadPendingResetRetries(
       );
     }
     throw new PendingRetryStateError(
-      `WeChat retry state was quarantined to ${quarantine}. Inspect/restore it, or remove the quarantine after reconciling undelivered messages. Cause: ${String(error)}`,
+      `WeChat retry state was quarantined to ${quarantine} and blocked by ${blocked}. Inspect/restore the quarantine, then explicitly remove the blocker to resume or discard after reconciliation. Cause: ${String(error)}`,
       "RETRY_STATE_CORRUPT",
     );
   }
@@ -142,12 +184,15 @@ export function persistPendingResetRetries(
   validateEntries(entries);
   if (entries.length === 0) {
     rmSync(path, { force: true });
+    syncParent(path);
     return;
   }
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.tmp-${process.pid}`;
   writeFileSync(temp, JSON.stringify({ version: 1, entries }), { mode: 0o600 });
+  syncPath(temp);
   renameSync(temp, path);
+  syncParent(path);
 }
 
 function persist(state: MonitorRetryState): void {
