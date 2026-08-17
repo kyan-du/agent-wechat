@@ -280,7 +280,7 @@ export async function startWeChatMonitor(
           startupBaselines.set(chatId, { localId: 0 });
         }
       }
-      const chatsToProcess = monitorChatsToProcess(unreadChats, retryState);
+      const chatsToProcess = monitorChatsToProcess(chats, retryState);
       for (const chatId of chatsToProcess.keys()) {
         if (isOfficialAccount(chatId)) chatsToProcess.delete(chatId);
       }
@@ -955,23 +955,20 @@ async function processUnreadChat(
     const pending = pendingMessageScans.get(chatId);
     if (pending?.readyForDispatch) {
       const pendingTail = pending.messages.at(-1)?.localId ?? 0;
-      const currentTail = chat.lastMsgLocalId ?? 0;
-      if (currentTail > pendingTail || currentTail < pendingTail) {
-        const scan = await listMessagesForMonitorCursor(client, chatId, {
-          chat,
-          firstPoll: false,
-          prevLastSeen: pendingTail,
-          handledCursor: equalCursorUnreadHandled.get(chatId),
-        });
-        messages = mergePendingResetMessages(
-          { pendingMessageScans, lastSeenId, persist: persistRetryState },
-          chatId,
-          chat,
-          scan.messages,
-        );
-      } else {
-        messages = pending.messages;
-      }
+      // Always refresh the bounded head before a ready retry: a second reset can
+      // regrow to the same numeric tail with a different stable identity.
+      const scan = await listMessagesForMonitorCursor(client, chatId, {
+        chat,
+        firstPoll: false,
+        prevLastSeen: pendingTail,
+        handledCursor: equalCursorUnreadHandled.get(chatId),
+      });
+      messages = mergePendingResetMessages(
+        { pendingMessageScans, lastSeenId, persist: persistRetryState },
+        chatId,
+        chat,
+        scan.messages,
+      );
       generationResetConfirmed = pending.generationReset === true;
     } else {
       const scan = await listMessagesForMonitorCursor(client, chatId, {

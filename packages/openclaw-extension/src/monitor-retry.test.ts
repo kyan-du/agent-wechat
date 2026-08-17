@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import {
   commitResetDispatchPrefix,
   loadPendingResetRetries,
   MAX_PENDING_RESET_CHATS,
+  MAX_PENDING_RESET_MESSAGES,
+  PendingRetryStateError,
   mergePendingResetMessages,
   monitorChatsToProcess,
   persistPendingResetRetries,
@@ -135,17 +137,22 @@ test("pending reset retry survives process restart", () => {
   assert.deepEqual(restored.get("wxid_reset")?.messages.map((item) => item.localId), [100]);
 });
 
-test("corrupt retry persistence fails closed to an empty store", () => {
+test("corrupt retry persistence is quarantined and stops recovery", () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-retry-corrupt-"));
   const path = join(dir, "wechat", "monitor-retry-default.json");
   mkdirSync(join(dir, "wechat"), { recursive: true });
   writeFileSync(path, "not-json");
-  assert.equal(loadPendingResetRetries("default", dir).size, 0);
+
+  assert.throws(
+    () => loadPendingResetRetries("default", dir),
+    (error) => error instanceof PendingRetryStateError && error.code === "RETRY_STATE_CORRUPT",
+  );
+  assert.equal(existsSync(path), true);
 });
 
-test("pending reset retries are bounded by chat cardinality", () => {
+test("101st pending chat is rejected without erasing existing retries", () => {
   const retry = state();
-  for (let index = 0; index <= MAX_PENDING_RESET_CHATS; index += 1) {
+  for (let index = 0; index < MAX_PENDING_RESET_CHATS; index += 1) {
     const id = `wxid_${index}`;
     queueResetGenerationRetry(
       retry,
@@ -156,6 +163,43 @@ test("pending reset retries are bounded by chat cardinality", () => {
     );
   }
 
+  assert.throws(
+    () => queueResetGenerationRetry(
+      retry,
+      "wxid_overflow",
+      { ...chat(1), id: "wxid_overflow", username: "wxid_overflow" },
+      [{ ...message(1), chatId: "wxid_overflow" }],
+    ),
+    (error) => error instanceof PendingRetryStateError && error.code === "RETRY_CAPACITY",
+  );
   assert.equal(retry.pendingMessageScans.size, MAX_PENDING_RESET_CHATS);
-  assert.equal(retry.pendingMessageScans.has("wxid_0"), false);
+  assert.equal(retry.pendingMessageScans.has("wxid_0"), true);
+});
+
+test("10001st pending row is rejected without truncating the existing batch", () => {
+  const retry = state();
+  queueResetGenerationRetry(
+    retry,
+    "wxid_reset",
+    chat(1, MAX_PENDING_RESET_MESSAGES),
+    Array.from({ length: MAX_PENDING_RESET_MESSAGES }, (_, index) => message(index + 1)),
+  );
+
+  assert.throws(
+    () => mergePendingResetMessages(
+      retry,
+      "wxid_reset",
+      chat(1, MAX_PENDING_RESET_MESSAGES + 1),
+      [message(MAX_PENDING_RESET_MESSAGES + 1)],
+    ),
+    (error) => error instanceof PendingRetryStateError && error.code === "RETRY_CAPACITY",
+  );
+  assert.equal(retry.pendingMessageScans.get("wxid_reset")?.messages.length, MAX_PENDING_RESET_MESSAGES);
+});
+
+test("equal-tail second reset identities merge instead of hiding behind numeric equality", () => {
+  const retry = state();
+  queueResetGenerationRetry(retry, "wxid_reset", chat(1), [message(100, 1)], 0);
+  const merged = mergePendingResetMessages(retry, "wxid_reset", chat(1), [message(100, 2)]);
+  assert.deepEqual(merged.map((item) => item.serverId), [10_100, 20_100]);
 });
