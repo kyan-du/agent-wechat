@@ -45,6 +45,8 @@ function quarantinePath(path: string): string {
   return `${path}.corrupt`;
 }
 
+// The blocker is the durable gate. A standalone .corrupt file is retained as
+// operator evidence but is non-blocking after explicit blocker acknowledgement.
 function blockerPath(path: string): string {
   return `${path}.blocked`;
 }
@@ -183,8 +185,9 @@ export function persistPendingResetRetries(
   const entries = [...pending.entries()].filter(([, value]) => value.readyForDispatch);
   validateEntries(entries);
   if (entries.length === 0) {
+    if (!existsSync(path)) return;
     rmSync(path, { force: true });
-    syncParent(path);
+    if (existsSync(dirname(path))) syncParent(path);
     return;
   }
   mkdirSync(dirname(path), { recursive: true });

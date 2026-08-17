@@ -103,6 +103,20 @@ test("mid-reset dispatch failure atomically commits prefix and merges later traf
   assert.equal(retry.pendingMessageScans.has("wxid_reset"), false);
 });
 
+test("final prefix commit removes the retry file after parent sync", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-final-"));
+  const retry = state();
+  retry.persist = () => persistPendingResetRetries("default", retry.pendingMessageScans, dir);
+  const final = message(100);
+  queueResetGenerationRetry(retry, "wxid_reset", chat(1), [final], 0);
+  const path = join(dir, "wechat", "monitor-retry-default.json");
+  assert.equal(existsSync(path), true);
+
+  commitResetDispatchPrefix(retry, "wxid_reset", final);
+  assert.equal(existsSync(path), false);
+  assert.equal(existsSync(join(dir, "wechat")), true);
+});
+
 test("partial equal-ID generation commit preserves the failed identity across restart", () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-retry-equal-"));
   const retry = state();
@@ -144,6 +158,25 @@ test("permanent failure backs off instead of hot-looping", () => {
 
   assert.equal(monitorChatsToProcess([], retry, 999).has("wxid_reset"), false);
   assert.equal(monitorChatsToProcess([], retry, 1_000).has("wxid_reset"), true);
+});
+
+test("fresh empty state root persists without creating or syncing a missing parent", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-fresh-"));
+  assert.doesNotThrow(() => persistPendingResetRetries("default", new Map(), dir));
+  assert.equal(existsSync(join(dir, "wechat")), false);
+});
+
+test("empty state under an explicit default-home override is a no-op", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-retry-home-"));
+  const previous = process.env.OPENCLAW_STATE_DIR;
+  process.env.OPENCLAW_STATE_DIR = dir;
+  try {
+    assert.doesNotThrow(() => persistPendingResetRetries("default", new Map()));
+    assert.equal(existsSync(join(dir, "wechat")), false);
+  } finally {
+    if (previous === undefined) delete process.env.OPENCLAW_STATE_DIR;
+    else process.env.OPENCLAW_STATE_DIR = previous;
+  }
 });
 
 test("pending reset retry survives process restart", () => {
