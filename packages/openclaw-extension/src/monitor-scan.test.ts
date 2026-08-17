@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, CursorPage, Message } from "@kyan-du/agent-wechat-shared";
 import {
+  listInitialMonitorChatSnapshot,
   listMessagesForMonitorCursor,
   listNextMonitorChatPage,
   type ChatScanState,
@@ -54,6 +55,25 @@ test("monitor chat scan follows nextCursor beyond the first page", async () => {
     { limit: 100, cursor: undefined },
     { limit: 100, cursor: "next" },
   ]);
+});
+
+test("initial chat snapshot freezes all pages before any chat processing", async () => {
+  let firstPageRequested = false;
+  const client = {
+    async listChatsPage(_limit?: number, cursor?: string): Promise<CursorPage<Chat>> {
+      if (!cursor) {
+        firstPageRequested = true;
+        return { schemaVersion: 1, items: [chat("wxid_1", { lastMsgLocalId: 1 })], nextCursor: "next" };
+      }
+      assert.equal(firstPageRequested, true);
+      return { schemaVersion: 1, items: [chat("wxid_101", { unreadCount: 1, lastMsgLocalId: 7 })] };
+    },
+  };
+  const state: ChatScanState = { initialScanComplete: false };
+  const snapshot = await listInitialMonitorChatSnapshot(client, state);
+
+  assert.deepEqual(snapshot.map((item) => item.lastMsgLocalId), [1, 7]);
+  assert.equal(state.initialScanComplete, true);
 });
 
 test("message scan crosses recovery window and API page boundary before completing", async () => {

@@ -5,6 +5,7 @@ export type CursorSelection = {
   prevLastSeen: number;
   messages: Message[];
   seedLastSeen?: number;
+  generationReset?: boolean;
 };
 
 export type HandledCursor = {
@@ -61,6 +62,24 @@ export function selectCursorMessages(
     startupBaseline !== undefined && (firstPoll || prevLastSeen < startupBaseline.localId);
 
   if (baselineActive) {
+    const baselineRow = sorted.find((message) => message.localId === startupBaseline.localId);
+    const generationReset =
+      baselineRow === undefined &&
+      sorted.length > 0 &&
+      sorted.every((message) => message.localId < startupBaseline.localId) &&
+      typeof chat.lastMsgLocalId === "number" &&
+      chat.lastMsgLocalId < startupBaseline.localId;
+    if (generationReset) {
+      const unread = Math.min(chat.unreadCount ?? 0, sorted.length);
+      return {
+        firstPoll,
+        prevLastSeen,
+        messages: unread > 0 ? sorted.slice(-unread) : [],
+        seedLastSeen: unread < sorted.length ? sorted.at(-(unread + 1))?.localId : undefined,
+        generationReset: true,
+      };
+    }
+
     const live = sorted.filter((message) =>
       message.localId > startupBaseline.localId ||
       (
@@ -108,6 +127,20 @@ export function selectCursorMessages(
   }
 
   const unread = chat.unreadCount ?? 0;
+  const generationReset =
+    unread > 0 &&
+    sorted.length > 0 &&
+    sorted.every((message) => message.localId < prevLastSeen) &&
+    typeof chat.lastMsgLocalId === "number" &&
+    chat.lastMsgLocalId < prevLastSeen;
+  if (generationReset) {
+    return {
+      firstPoll,
+      prevLastSeen,
+      messages: sorted.slice(-Math.min(unread, sorted.length)),
+      generationReset: true,
+    };
+  }
   if (unread <= 0) {
     return { firstPoll, prevLastSeen, messages: [] };
   }

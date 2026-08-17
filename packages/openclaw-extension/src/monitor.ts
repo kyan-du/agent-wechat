@@ -15,6 +15,7 @@ import {
   type StartupBaseline,
 } from "./monitor-cursor.js";
 import {
+  listInitialMonitorChatSnapshot,
   listMessagesForMonitorCursor,
   listNextMonitorChatPage,
   type ChatScanState,
@@ -213,9 +214,16 @@ export async function startWeChatMonitor(
       let chats: Chat[];
       let isInitialSnapshot = false;
       try {
-        const page = await listNextMonitorChatPage(client, chatScanState);
-        chats = page.chats;
-        isInitialSnapshot = page.isInitialSnapshot;
+        if (!chatScanState.initialScanComplete) {
+          // Freeze the complete paged chat snapshot before processing any chat.
+          // Otherwise a later page could absorb a message arriving while earlier
+          // pages are already being processed into its startup baseline.
+          chats = await listInitialMonitorChatSnapshot(client, chatScanState);
+          isInitialSnapshot = true;
+        } else {
+          const page = await listNextMonitorChatPage(client, chatScanState);
+          chats = page.chats;
+        }
       } catch (err) {
         log?.error?.(
           `[wechat:${account.accountId}] Failed to list chats: ${err}`,
@@ -965,6 +973,11 @@ async function processUnreadChat(
     enrichedBaseline,
   );
   let newMessages = selected.messages;
+  if (selected.generationReset) {
+    lastSeenId.delete(chatId);
+    equalCursorUnreadHandled.delete(chatId);
+    startupBaselines.delete(chatId);
+  }
   const advanceLastSeen = (handledMessages: Message[]) => {
     const cursor = markCursorMessagesHandled(chatId, handledMessages, equalCursorUnreadHandled);
     if (cursor !== undefined) {

@@ -4,6 +4,7 @@ import type { StartupBaseline } from "./monitor-cursor.js";
 export const MONITOR_CHAT_PAGE_LIMIT = 100;
 export const MONITOR_MESSAGE_PAGE_LIMIT = 200;
 export const DEFAULT_MESSAGE_PAGE_BUDGET = 50;
+export const DEFAULT_INITIAL_CHAT_PAGE_BUDGET = 100;
 
 export type ChatPageClient = {
   listChatsPage(
@@ -30,6 +31,27 @@ export type MonitorChatPage = {
   chats: Chat[];
   isInitialSnapshot: boolean;
 };
+
+export async function listInitialMonitorChatSnapshot(
+  client: ChatPageClient,
+  state: ChatScanState,
+  pageBudget = DEFAULT_INITIAL_CHAT_PAGE_BUDGET,
+): Promise<Chat[]> {
+  if (state.initialScanComplete) return [];
+  const chats: Chat[] = [];
+  let cursor: string | undefined;
+  for (let pages = 0; pages < pageBudget; pages += 1) {
+    const page = await client.listChatsPage(MONITOR_CHAT_PAGE_LIMIT, cursor);
+    chats.push(...page.items);
+    cursor = page.nextCursor;
+    if (!cursor) {
+      state.initialScanComplete = true;
+      state.cursor = undefined;
+      return chats;
+    }
+  }
+  throw new Error(`initial chat snapshot exceeded ${pageBudget} pages`);
+}
 
 export type MessageScanContinuation = {
   chat: Chat;
@@ -70,7 +92,10 @@ function hasReachedStableMessageBoundary(
 
   if (startupBaseline !== undefined && (firstPoll || prevLastSeen < startupBaseline.localId)) {
     if (startupBaseline.localId <= 0) return true;
-    return sorted.some((message) => message.localId <= startupBaseline.localId);
+    if (sorted.some((message) => message.localId === startupBaseline.localId)) return true;
+    // If pagination is exhausted, selection can distinguish an ID-generation reset
+    // from startup history using the unread suffix. Keep paging until then.
+    return false;
   }
 
   if (firstPoll) {

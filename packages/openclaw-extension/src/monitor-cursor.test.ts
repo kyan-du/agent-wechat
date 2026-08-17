@@ -352,6 +352,34 @@ test("post-initial first-seen chat can dispatch from an explicit zero baseline",
   assert.deepEqual(result.messages.map((m) => m.localId), [1]);
 });
 
+test("startup baseline detects local-id generation reset below the baseline", () => {
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 2 }),
+    [message(1), message(2)],
+    new Map(),
+    new Map(),
+    { localId: 100, messageKey: "old-generation" },
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.equal(result.seedLastSeen, 1);
+  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+});
+
+test("steady-state cursor detects local-id generation reset below the cursor", () => {
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 2, lastMsgLocalId: 2 }),
+    [message(1), message(2)],
+    new Map([["wxid_first", 100]]),
+    new Map(),
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1, 2]);
+});
+
 test("dispatch failure only advances through successful prefix segments", () => {
   const handled = selectMessagesHandledAfterDispatch(
     [message(1), message(2), message(3)],
