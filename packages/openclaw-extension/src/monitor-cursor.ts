@@ -7,24 +7,38 @@ export type CursorSelection = {
   seedLastSeen?: number;
 };
 
+export type HandledCursor = {
+  localId: number;
+  messageKey: string;
+};
+
+function cursorMessageKey(message: Message): string {
+  return `${message.serverId ?? ""}:${message.timestamp}:${message.type}:${message.sender ?? ""}:${message.content ?? ""}`;
+}
+
 export function markEqualCursorUnreadHandled(
   chatId: string,
-  localId: number | undefined,
-  equalCursorUnreadHandled: Map<string, number>,
+  message: Message | undefined,
+  equalCursorUnreadHandled: Map<string, HandledCursor>,
 ): void {
-  if (localId === undefined) return;
-  equalCursorUnreadHandled.set(chatId, localId);
+  if (message === undefined) return;
+  equalCursorUnreadHandled.set(chatId, {
+    localId: message.localId,
+    messageKey: cursorMessageKey(message),
+  });
 }
 
 export function markCursorMessagesHandled(
   chatId: string,
   messages: Message[],
-  equalCursorUnreadHandled: Map<string, number>,
+  equalCursorUnreadHandled: Map<string, HandledCursor>,
 ): number | undefined {
   if (messages.length === 0) return undefined;
-  const cursor = Math.max(...messages.map((message) => message.localId));
-  markEqualCursorUnreadHandled(chatId, cursor, equalCursorUnreadHandled);
-  return cursor;
+  const cursorMessage = messages.reduce((latest, message) =>
+    message.localId > latest.localId ? message : latest
+  );
+  markEqualCursorUnreadHandled(chatId, cursorMessage, equalCursorUnreadHandled);
+  return cursorMessage.localId;
 }
 
 export function selectCursorMessages(
@@ -32,7 +46,7 @@ export function selectCursorMessages(
   chat: Chat,
   messages: Message[],
   lastSeenId: Map<string, number>,
-  equalCursorUnreadHandled: Map<string, number>,
+  equalCursorUnreadHandled: Map<string, HandledCursor>,
 ): CursorSelection {
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
@@ -74,7 +88,11 @@ export function selectCursorMessages(
   const recoverable =
     equalCursorUnread.length === 1 &&
     chat.lastMsgLocalId === prevLastSeen &&
-    equalCursorUnreadHandled.get(chatId) !== prevLastSeen;
+    (() => {
+      const handled = equalCursorUnreadHandled.get(chatId);
+      return handled?.localId !== prevLastSeen ||
+        handled.messageKey !== cursorMessageKey(equalCursorUnread[0]);
+    })();
 
   return {
     firstPoll,

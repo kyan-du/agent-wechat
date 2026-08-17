@@ -5,7 +5,7 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
-import { markEqualCursorUnreadHandled, selectCursorMessages } from "./monitor-cursor.js";
+import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
   normalizeWeChatCommandBody,
@@ -110,7 +110,7 @@ export async function startWeChatMonitor(
 
   // Track last-seen message ID per chat
   const lastSeenId = new Map<string, number>();
-  const equalCursorUnreadHandled = new Map<string, number>();
+  const equalCursorUnreadHandled = new Map<string, HandledCursor>();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -817,7 +817,7 @@ async function processUnreadChat(
   client: WeChatClient,
   chat: Chat,
   lastSeenId: Map<string, number>,
-  equalCursorUnreadHandled: Map<string, number>,
+  equalCursorUnreadHandled: Map<string, HandledCursor>,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -889,13 +889,13 @@ async function processUnreadChat(
     equalCursorUnreadHandled,
   );
   let newMessages = selected.messages;
-  const advanceLastSeen = (cursor: number | undefined) => {
-    if (cursor === undefined) return;
-    lastSeenId.set(chatId, cursor);
-    markEqualCursorUnreadHandled(chatId, cursor, equalCursorUnreadHandled);
+  const advanceLastSeen = (handledMessages: Message[]) => {
+    const cursor = markCursorMessagesHandled(chatId, handledMessages, equalCursorUnreadHandled);
+    if (cursor !== undefined) lastSeenId.set(chatId, cursor);
   };
-  if (selected.seedLastSeen !== undefined) {
-    advanceLastSeen(selected.seedLastSeen);
+  const seedLastSeen = selected.seedLastSeen;
+  if (seedLastSeen !== undefined) {
+    advanceLastSeen(messages.filter((message) => message.localId <= seedLastSeen));
   }
   if (newMessages.length === 0) {
     // Don't update lastSeenId — if session.db reports a newer message
@@ -920,7 +920,7 @@ async function processUnreadChat(
     const observedCursor = recoveryCursor(selection);
 
     if (liveAccount.catchUpMode === "read-only") {
-      advanceLastSeen(observedCursor);
+      advanceLastSeen(messages.filter((message) => message.localId <= observedCursor));
       log?.info?.(
         `[wechat:${liveAccount.accountId}] Recovery read-only: advanced ${chatId} to ${observedCursor} without dispatching ${newMessages.length} msg(s)`,
       );
@@ -929,7 +929,7 @@ async function processUnreadChat(
 
     newMessages = selection.messages;
     if (newMessages.length === 0) {
-      advanceLastSeen(observedCursor);
+      advanceLastSeen(messages.filter((message) => message.localId <= observedCursor));
       log?.info?.(
         `[wechat:${liveAccount.accountId}] Recovery skipped ${selection.skipped} stale msg(s) in ${chatId}`,
       );
@@ -975,7 +975,7 @@ async function processUnreadChat(
         }
         log?.info?.(`[wechat:${liveAccount.accountId}] Buffered ${processed.length} msg(s) for group history in ${chatId}`);
         const maxId = Math.max(...newMessages.map((m) => m.localId));
-        advanceLastSeen(maxId);
+        advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
         return "skipped";
       }
 
@@ -1048,7 +1048,7 @@ async function processUnreadChat(
         `[wechat:${liveAccount.accountId}] Skipping stale group chatter in ${chatId}`,
       );
       const maxId = Math.max(...newMessages.map((m) => m.localId));
-      advanceLastSeen(maxId);
+      advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
       return "skipped";
     }
 
@@ -1085,11 +1085,11 @@ async function processUnreadChat(
       groupHistory.set(chatId, []);
     }
     const maxId = Math.max(...newMessages.map((m) => m.localId));
-    advanceLastSeen(maxId);
+    advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
     return allDispatched ? "dispatched" : "skipped";
   }
 
   const maxId = Math.max(...newMessages.map((m) => m.localId));
-  advanceLastSeen(maxId);
+  advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
   return "skipped";
 }
