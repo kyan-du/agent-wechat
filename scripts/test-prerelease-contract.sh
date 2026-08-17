@@ -67,7 +67,7 @@ mutate_and_reject .github/workflows/npm-prerelease.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("github.event_name == '\''push'\'' && github.ref_name || inputs.tag","always() && github.ref_name || inputs.tag"));' \
   'manual tag input bypass'
 mutate_and_reject .github/workflows/npm-prerelease.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("node scripts/verify-npm-release-authorization.mjs \"$RELEASE_TAG\" \"$RELEASE_SHA\"","echo authorized"));' \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("authorization_ref=\"refs/tags/npm-release-auth/$RELEASE_TAG\"","authorization_ref=\"refs/heads/main\""));' \
   'removed release authorization'
 mutate_and_reject .github/workflows/npm-prerelease.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("TRUSTED_NPM_VERSION: 11.5.1","TRUSTED_NPM_VERSION: 10.9.8"));' \

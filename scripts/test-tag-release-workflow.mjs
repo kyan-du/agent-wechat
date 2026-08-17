@@ -12,7 +12,9 @@ if (workflow.permissions?.contents !== 'read' || workflow.permissions?.['id-toke
 if (!text.includes("github.event_name == 'push' && github.ref_name || inputs.tag")) throw new Error('future event-specific tag selection missing');
 if (!text.includes('release_sha="$(git rev-parse HEAD^{commit})"')) throw new Error('checked-out release SHA resolution missing');
 if (!text.includes('test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$release_sha"')) throw new Error('peeled tag/head equality missing');
-if (!text.includes('node scripts/verify-npm-release-authorization.mjs "$RELEASE_TAG" "$RELEASE_SHA"')) throw new Error('independent release authorization missing');
+if (!text.includes('authorization_ref="refs/tags/npm-release-auth/$RELEASE_TAG"')) throw new Error('protected authorization ref missing');
+if (!text.includes('"$RELEASE_TAG" "$RELEASE_SHA" "$authorization_ref" "$NPM_AUTHORIZATION_SHA"')) throw new Error('independent release authorization missing');
+if (!text.includes('node scripts/test-npm-release-authorization.mjs')) throw new Error('authorization Git E2E matrix missing from validation');
 if (!text.includes('TRUSTED_NPM_VERSION: 11.5.1') || !text.includes('node-version: 22.14.0') || !text.includes('npm install --global "npm@$TRUSTED_NPM_VERSION"')) throw new Error('Trusted Publishing npm consumer is not pinned');
 if (!text.includes('node scripts/verify-npm-versions-absent.mjs "${RELEASE_TAG#v}"')) throw new Error('fail-closed registry preflight missing');
 if (!text.includes('node scripts/verify-npm-prerelease.mjs "$version"')) throw new Error('tag/package version guard missing');
