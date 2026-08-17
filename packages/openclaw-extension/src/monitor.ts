@@ -925,12 +925,14 @@ async function processUnreadChat(
   const startupBaseline = startupBaselines.get(chatId);
 
   let messages: Message[];
+  let generationResetConfirmed = false;
   try {
     const scan = await listMessagesForMonitorCursor(client, chatId, {
       chat,
       firstPoll,
       prevLastSeen,
       startupBaseline,
+      handledCursor: equalCursorUnreadHandled.get(chatId),
       continuation: pendingMessageScans.get(chatId),
     });
     if (!scan.complete) {
@@ -938,6 +940,7 @@ async function processUnreadChat(
         chat,
         cursor: scan.nextCursor,
         messages: scan.messages,
+        generationReset: scan.generationReset,
       });
       log?.info?.(
         `[wechat:${liveAccount.accountId}] ${chatId}: deferred after ${scan.pagesScanned} message page(s); continuing paged scan next tick`,
@@ -946,6 +949,7 @@ async function processUnreadChat(
     }
     pendingMessageScans.delete(chatId);
     messages = scan.messages;
+    generationResetConfirmed = scan.generationReset === true;
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to list messages for ${chatId}: ${err}`,
@@ -971,6 +975,7 @@ async function processUnreadChat(
     lastSeenId,
     equalCursorUnreadHandled,
     enrichedBaseline,
+    generationResetConfirmed,
   );
   let newMessages = selected.messages;
   if (selected.generationReset) {

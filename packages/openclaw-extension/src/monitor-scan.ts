@@ -1,5 +1,5 @@
 import type { Chat, CursorPage, Message } from "@kyan-du/agent-wechat-shared";
-import type { StartupBaseline } from "./monitor-cursor.js";
+import { cursorMessageKey, type HandledCursor, type StartupBaseline } from "./monitor-cursor.ts";
 
 export const MONITOR_CHAT_PAGE_LIMIT = 100;
 export const MONITOR_MESSAGE_PAGE_LIMIT = 200;
@@ -57,6 +57,7 @@ export type MessageScanContinuation = {
   chat: Chat;
   cursor?: string;
   messages: Message[];
+  generationReset?: boolean;
 };
 
 export type MonitorMessageScan = {
@@ -64,6 +65,7 @@ export type MonitorMessageScan = {
   complete: boolean;
   nextCursor?: string;
   pagesScanned: number;
+  generationReset?: boolean;
 };
 
 export async function listNextMonitorChatPage(
@@ -104,18 +106,55 @@ function hasReachedStableMessageBoundary(
     return true;
   }
 
-  const unread = chat.unreadCount ?? 0;
-  const possibleGenerationReset =
-    unread > 0 &&
-    typeof chat.lastMsgLocalId === "number" &&
-    chat.lastMsgLocalId <= prevLastSeen;
-  if (possibleGenerationReset) {
-    // A reset can regrow to the old cursor. Read the full unread suffix before
-    // identity comparison so an equal-ID replacement cannot hide older rows.
-    return messages.length >= unread;
-  }
   if (sorted.some((message) => message.localId <= prevLastSeen)) return true;
+  const unread = chat.unreadCount ?? 0;
   return unread > 0 && messages.length >= unread;
+}
+
+function detectsGenerationReset(
+  messages: Message[],
+  chat: Chat,
+  firstPoll: boolean,
+  prevLastSeen: number,
+  startupBaseline?: StartupBaseline,
+  handledCursor?: HandledCursor,
+): boolean {
+  if (messages.length === 0 || typeof chat.lastMsgLocalId !== "number") return false;
+  const boundary = startupBaseline !== undefined && (firstPoll || prevLastSeen < startupBaseline.localId)
+    ? startupBaseline
+    : handledCursor?.localId === prevLastSeen
+      ? handledCursor
+      : undefined;
+  const boundaryLocalId = boundary?.localId ?? prevLastSeen;
+  if (chat.lastMsgLocalId < boundaryLocalId) return true;
+  if (chat.lastMsgLocalId !== boundaryLocalId || boundary?.messageKey === undefined) return false;
+  const equalRow = messages.find((message) => message.localId === boundaryLocalId);
+  return equalRow !== undefined && cursorMessageKey(equalRow) !== boundary.messageKey;
+}
+
+function generationBoundaryIndex(messages: Message[]): number | undefined {
+  for (let index = 1; index < messages.length; index += 1) {
+    if (messages[index].localId >= messages[index - 1].localId) return index;
+  }
+  return undefined;
+}
+
+function shouldProbeGenerationReset(
+  messages: Message[],
+  chat: Chat,
+  firstPoll: boolean,
+  prevLastSeen: number,
+  startupBaseline?: StartupBaseline,
+  handledCursor?: HandledCursor,
+): boolean {
+  if (typeof chat.lastMsgLocalId !== "number") return false;
+  const boundary = startupBaseline !== undefined && (firstPoll || prevLastSeen < startupBaseline.localId)
+    ? startupBaseline
+    : handledCursor?.localId === prevLastSeen
+      ? handledCursor
+      : undefined;
+  if (boundary === undefined || chat.lastMsgLocalId > boundary.localId) return false;
+  return !messages.some((message) => message.localId === boundary.localId);
 }
 
 export async function listMessagesForMonitorCursor(
@@ -126,6 +165,7 @@ export async function listMessagesForMonitorCursor(
     firstPoll: boolean;
     prevLastSeen: number;
     startupBaseline?: StartupBaseline;
+    handledCursor?: HandledCursor;
     continuation?: MessageScanContinuation;
     pageBudget?: number;
   },
@@ -133,6 +173,7 @@ export async function listMessagesForMonitorCursor(
   const pageBudget = options.pageBudget ?? DEFAULT_MESSAGE_PAGE_BUDGET;
   const messages = [...(options.continuation?.messages ?? [])];
   let cursor = options.continuation?.cursor;
+  let generationReset = options.continuation?.generationReset ?? false;
   let pagesScanned = 0;
 
   while (pagesScanned < pageBudget) {
@@ -140,16 +181,46 @@ export async function listMessagesForMonitorCursor(
     pagesScanned += 1;
     messages.push(...page.items);
     cursor = page.nextCursor;
+    generationReset ||= detectsGenerationReset(
+      messages,
+      options.chat,
+      options.firstPoll,
+      options.prevLastSeen,
+      options.startupBaseline,
+      options.handledCursor,
+    );
 
+    if (generationReset) {
+      const boundaryIndex = generationBoundaryIndex(messages);
+      if (boundaryIndex !== undefined || !cursor) {
+        return {
+          messages: boundaryIndex === undefined ? messages : messages.slice(0, boundaryIndex),
+          complete: true,
+          nextCursor: undefined,
+          pagesScanned,
+          generationReset: true,
+        };
+      }
+      continue;
+    }
+
+    const probingReset = shouldProbeGenerationReset(
+      messages,
+      options.chat,
+      options.firstPoll,
+      options.prevLastSeen,
+      options.startupBaseline,
+      options.handledCursor,
+    );
     if (
       !cursor ||
-      hasReachedStableMessageBoundary(
+      (!probingReset && hasReachedStableMessageBoundary(
         messages,
         options.chat,
         options.firstPoll,
         options.prevLastSeen,
         options.startupBaseline,
-      )
+      ))
     ) {
       return {
         messages,
@@ -165,5 +236,6 @@ export async function listMessagesForMonitorCursor(
     complete: false,
     nextCursor: cursor,
     pagesScanned,
+    generationReset: generationReset || undefined,
   };
 }

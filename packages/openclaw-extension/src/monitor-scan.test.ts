@@ -6,7 +6,9 @@ import {
   listMessagesForMonitorCursor,
   listNextMonitorChatPage,
   type ChatScanState,
+  type MessageScanContinuation,
 } from "./monitor-scan.ts";
+import { cursorMessageKey, type HandledCursor } from "./monitor-cursor.ts";
 
 function chat(id: string, overrides: Partial<Chat> = {}): Chat {
   return {
@@ -129,11 +131,92 @@ test("steady-state equal-ID reset scan reads the complete unread generation", as
     chat: chat("wxid_test", { unreadCount: 100, lastMsgLocalId: 100 }),
     firstPoll: false,
     prevLastSeen: 100,
+    handledCursor: { localId: 100, messageKey: "old-generation" },
   });
 
   assert.equal(scan.complete, true);
   assert.equal(scan.messages.length, 100);
   assert.deepEqual(cursors, [undefined, "older"]);
+});
+
+test("equal-ID reset paging ignores an underreported unread counter", async () => {
+  const oldCursor = message(100);
+  const resetCursor = { ...message(100), serverId: 20_100, content: "new-100" };
+  const client = {
+    async listMessagesPage(
+      _chatId: string,
+      _limit?: number,
+      cursor?: string,
+    ): Promise<CursorPage<Message>> {
+      if (cursor === "older-generation") {
+        return { schemaVersion: 1, items: [message(500)] };
+      }
+      if (cursor === "older-reset") {
+        return {
+          schemaVersion: 1,
+          items: Array.from({ length: 60 }, (_, index) => message(60 - index)),
+          nextCursor: "older-generation",
+        };
+      }
+      return {
+        schemaVersion: 1,
+        items: [resetCursor, ...Array.from({ length: 39 }, (_, index) => message(99 - index))],
+        nextCursor: "older-reset",
+      };
+    },
+  };
+  const handledCursor: HandledCursor = {
+    localId: 100,
+    messageKey: cursorMessageKey(oldCursor),
+  };
+
+  const scan = await listMessagesForMonitorCursor(client, "wxid_test", {
+    chat: chat("wxid_test", { unreadCount: 1, lastMsgLocalId: 100 }),
+    firstPoll: false,
+    prevLastSeen: 100,
+    handledCursor,
+  });
+
+  assert.equal(scan.complete, true);
+  assert.equal(scan.generationReset, true);
+  assert.deepEqual(
+    [...scan.messages].sort((a, b) => a.localId - b.localId).map((item) => item.localId),
+    Array.from({ length: 100 }, (_, i) => i + 1),
+  );
+});
+
+test("reset continuation survives unread dropping to zero", async () => {
+  const firstPage = [{ ...message(100), serverId: 20_100, content: "new-100" }];
+  const continuation: MessageScanContinuation = {
+    chat: chat("wxid_test", { unreadCount: 1, lastMsgLocalId: 100 }),
+    cursor: "older-reset",
+    messages: firstPage,
+    generationReset: true,
+  };
+  const client = {
+    async listMessagesPage(
+      _chatId: string,
+      _limit?: number,
+      cursor?: string,
+    ): Promise<CursorPage<Message>> {
+      assert.equal(cursor, "older-reset");
+      return {
+        schemaVersion: 1,
+        items: Array.from({ length: 99 }, (_, index) => message(99 - index)),
+      };
+    },
+  };
+
+  const scan = await listMessagesForMonitorCursor(client, "wxid_test", {
+    chat: chat("wxid_test", { unreadCount: 0, lastMsgLocalId: 100 }),
+    firstPoll: false,
+    prevLastSeen: 100,
+    continuation,
+  });
+
+  assert.equal(scan.complete, true);
+  assert.equal(scan.generationReset, true);
+  assert.equal(scan.messages.length, 100);
 });
 
 test("message scan can be durably continued without dropping the first page", async () => {

@@ -54,6 +54,7 @@ export function selectCursorMessages(
   lastSeenId: Map<string, number>,
   equalCursorUnreadHandled: Map<string, HandledCursor>,
   startupBaseline?: StartupBaseline,
+  generationResetConfirmed = false,
 ): CursorSelection {
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
@@ -78,13 +79,11 @@ export function selectCursorMessages(
           cursorMessageKey(baselineRow) !== startupBaseline.messageKey
         )
       );
-    if (generationReset) {
-      const unread = Math.min(chat.unreadCount ?? 0, sorted.length);
+    if (generationReset || generationResetConfirmed) {
       return {
         firstPoll,
         prevLastSeen,
-        messages: unread > 0 ? sorted.slice(-unread) : [],
-        seedLastSeen: unread < sorted.length ? sorted.at(-(unread + 1))?.localId : undefined,
+        messages: sorted,
         generationReset: true,
       };
     }
@@ -151,11 +150,11 @@ export function selectCursorMessages(
     sorted.every((message) => message.localId < prevLastSeen) &&
     typeof chat.lastMsgLocalId === "number" &&
     chat.lastMsgLocalId < prevLastSeen;
-  if (lowerIdGenerationReset || equalIdGenerationReset) {
+  if (lowerIdGenerationReset || equalIdGenerationReset || generationResetConfirmed) {
     return {
       firstPoll,
       prevLastSeen,
-      messages: sorted.slice(-Math.min(unread, sorted.length)),
+      messages: sorted,
       generationReset: true,
     };
   }

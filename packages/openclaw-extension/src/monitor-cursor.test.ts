@@ -364,8 +364,8 @@ test("startup baseline detects local-id generation reset below the baseline", ()
   );
 
   assert.equal(result.generationReset, true);
-  assert.equal(result.seedLastSeen, 1);
-  assert.deepEqual(result.messages.map((m) => m.localId), [2]);
+  assert.equal(result.seedLastSeen, undefined);
+  assert.deepEqual(result.messages.map((m) => m.localId), [1, 2]);
 });
 
 test("startup baseline detects a reset generation that regrows to the same local id", () => {
@@ -442,6 +442,46 @@ test("steady-state cursor detects a reset generation that regrows to the same lo
   assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
 });
 
+test("confirmed steady-state reset ignores an underreported unread counter", () => {
+  const oldCursor = message(100);
+  const resetMessages = Array.from({ length: 100 }, (_, index) => ({
+    ...message(index + 1),
+    serverId: 30_000 + index + 1,
+    content: `underreported-reset-${index + 1}`,
+  }));
+  const handled = new Map<string, HandledCursor>([[
+    "wxid_first",
+    { localId: 100, messageKey: cursorMessageKey(oldCursor) },
+  ]]);
+
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    handled,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
+test("confirmed steady-state reset survives a zero unread transition", () => {
+  const resetMessages = Array.from({ length: 100 }, (_, index) => message(index + 1));
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 100 }),
+    resetMessages,
+    new Map([["wxid_first", 100]]),
+    new Map(),
+    undefined,
+    true,
+  );
+
+  assert.equal(result.generationReset, true);
+  assert.deepEqual(result.messages.map((m) => m.localId), Array.from({ length: 100 }, (_, i) => i + 1));
+});
+
 test("matching same-id steady-state cursor does not replay the unread suffix", () => {
   const cursorMessage = message(100);
   const handled = new Map<string, HandledCursor>([[
@@ -491,4 +531,22 @@ test("failed first segment leaves every segment retryable", () => {
   );
 
   assert.deepEqual(handled, []);
+});
+
+test("reset dispatch failure keeps the failed suffix retryable", () => {
+  const resetMessages = Array.from({ length: 100 }, (_, index) => message(index + 1));
+  const lastSeen = new Map<string, number>();
+  const handledCursors = new Map<string, HandledCursor>();
+  const handledPrefix = selectMessagesHandledAfterDispatch(resetMessages, [40]);
+  advanceToHandledMessages("wxid_first", lastSeen, handledCursors, handledPrefix);
+
+  assert.deepEqual(handledPrefix.map((m) => m.localId), Array.from({ length: 40 }, (_, i) => i + 1));
+  const retry = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 0, lastMsgLocalId: 100 }),
+    resetMessages,
+    lastSeen,
+    handledCursors,
+  );
+  assert.deepEqual(retry.messages.map((m) => m.localId), Array.from({ length: 60 }, (_, i) => i + 41));
 });
