@@ -1,6 +1,7 @@
 use super::all_ia_states;
 use super::selectors::{is_send_button_name, query_selector};
 use super::types::{A11yNode, Bounds, IdentifyArgs};
+use base64::Engine;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -106,7 +107,7 @@ pub fn identify_diagnostics(
 
     StateIdentificationDiagnostics {
         screenshot_present: !screenshot.is_empty(),
-        screenshot_bytes: screenshot.len(),
+        screenshot_bytes: decoded_screenshot_bytes(screenshot),
         tree: summarize_tree(a11y_tree),
         state_outcomes,
         chat_rules: chat_rule_diagnostics(a11y_tree),
@@ -116,6 +117,16 @@ pub fn identify_diagnostics(
 pub fn diagnostics_json(a11y_tree: &A11yNode, screenshot: &str) -> String {
     serde_json::to_string(&identify_diagnostics(a11y_tree, screenshot))
         .unwrap_or_else(|_| "{\"error\":\"failed_to_serialize_identify_diagnostics\"}".to_string())
+}
+
+fn decoded_screenshot_bytes(screenshot: &str) -> usize {
+    if screenshot.is_empty() {
+        return 0;
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(screenshot)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 fn summarize_tree(a11y_tree: &A11yNode) -> A11yTreeSummary {
@@ -317,12 +328,12 @@ mod tests {
     fn explains_unknown_chat_tree_without_sensitive_names() {
         let tree = load_fixture("unknown_chat_without_chats_name");
         let states = identify_states(&tree, "");
-        let diagnostics = identify_diagnostics(&tree, "abc123");
+        let diagnostics = identify_diagnostics(&tree, "AQID");
         let json = serde_json::to_string(&diagnostics).expect("diagnostics serialize");
 
         assert!(states.main_window.is_none());
         assert!(diagnostics.screenshot_present);
-        assert_eq!(diagnostics.screenshot_bytes, 6);
+        assert_eq!(diagnostics.screenshot_bytes, 3);
         assert!(diagnostics
             .chat_rules
             .selectors

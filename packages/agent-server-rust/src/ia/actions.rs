@@ -44,7 +44,7 @@ pub fn close_window() -> Action {
 
 /// Saved-account login on the official Linux client (EN / ZH).
 pub const SAVED_ACCOUNT_LOGIN_SELECTOR: &str =
-    r#"push-button[name=/^(Log In|Open WeChat|登录|打开微信)$/]"#;
+    r#"push-button[name=/^(Log In|Open WeChat|Enter WeChat|Enter Weixin|登录|打开微信)$/]"#;
 
 /// Adjacent switch-account control (EN / ZH). Auto-resume never clicks this.
 pub const SWITCH_ACCOUNT_SELECTOR: &str =
@@ -53,7 +53,7 @@ pub const SWITCH_ACCOUNT_SELECTOR: &str =
 /// Frame-scoped login click so a ghost "Log In" outside WeChat is ignored.
 pub const SAVED_ACCOUNT_LOGIN_IN_FRAME_SELECTOR: &str = concat!(
     r#"frame[name=/^(WeChat|Weixin)$/] "#,
-    r#"push-button[name=/^(Log In|Open WeChat|登录|打开微信)$/]"#,
+    r#"push-button[name=/^(Log In|Open WeChat|Enter WeChat|Enter Weixin|登录|打开微信)$/]"#,
 );
 
 pub fn is_supported_wechat_frame(node: &super::types::A11yNode) -> bool {
