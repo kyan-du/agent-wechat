@@ -5,7 +5,7 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
-import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.js";
+import { applyStartupLiveBoundary, markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.js";
 import { sendLogicalMediaTask, type MediaPart } from "./outbound.js";
 import {
   normalizeWeChatCommandBody,
@@ -111,6 +111,7 @@ export async function startWeChatMonitor(
   // Track last-seen message ID per chat
   const lastSeenId = new Map<string, number>();
   const equalCursorUnreadHandled = new Map<string, HandledCursor>();
+  const monitorStartedAtMs = Date.now();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -230,6 +231,7 @@ export async function startWeChatMonitor(
             reconnectCatchup ? true : undefined,
             groupHistory,
             GROUP_HISTORY_LIMIT,
+            monitorStartedAtMs,
             {
               isReconnect: reconnectCatchup,
               catchupDispatched,
@@ -270,6 +272,7 @@ export async function startWeChatMonitor(
           true,
           groupHistory,
           GROUP_HISTORY_LIMIT,
+          monitorStartedAtMs,
           {
             isReconnect: reconnectCatchup,
             catchupDispatched,
@@ -824,6 +827,7 @@ async function processUnreadChat(
   skipOpen?: boolean,
   groupHistory?: Map<string, ProcessedMessage[]>,
   groupHistoryLimit?: number,
+  monitorStartedAtMs?: number,
   catchup?: CatchupOpts,
 ): Promise<"dispatched" | "skipped" | "deferred"> {
   const core = getWeChatRuntime();
@@ -897,6 +901,19 @@ async function processUnreadChat(
   if (seedLastSeen !== undefined) {
     advanceLastSeen(messages.filter((message) => message.localId <= seedLastSeen));
   }
+  const startupBoundary = applyStartupLiveBoundary(
+    selected,
+    monitorStartedAtMs ?? Date.now(),
+  );
+  if (startupBoundary.isStartupLive) {
+    if (startupBoundary.backlogMessages.length > 0) {
+      advanceLastSeen(startupBoundary.backlogMessages);
+    }
+    newMessages = startupBoundary.messages;
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] ${chatId}: first-poll unread suffix includes ${newMessages.length} post-start msg(s); bypassing startup recovery`,
+    );
+  }
   if (newMessages.length === 0) {
     // Don't update lastSeenId — if session.db reports a newer message
     // (via lastMsgLocalId) that hasn't appeared in message_N.db yet,
@@ -908,7 +925,9 @@ async function processUnreadChat(
     maxMessages: liveAccount.catchUpMaxMessages,
     maxAgeMs: liveAccount.catchUpMaxAgeMs,
   };
-  const isRecovery = firstPoll || (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits));
+  const isRecovery =
+    !startupBoundary.isStartupLive &&
+    (firstPoll || (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits)));
   if (isRecovery) {
     const selection = selectCatchUpMessages(
       newMessages,

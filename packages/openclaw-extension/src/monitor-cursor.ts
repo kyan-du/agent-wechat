@@ -7,6 +7,12 @@ export type CursorSelection = {
   seedLastSeen?: number;
 };
 
+export type StartupLiveBoundary = {
+  isStartupLive: boolean;
+  messages: Message[];
+  backlogMessages: Message[];
+};
+
 export type HandledCursor = {
   localId: number;
   messageKey: string;
@@ -98,5 +104,38 @@ export function selectCursorMessages(
     firstPoll,
     prevLastSeen,
     messages: recoverable ? equalCursorUnread : [],
+  };
+}
+
+export function applyStartupLiveBoundary(
+  selection: CursorSelection,
+  monitorStartedAtMs: number,
+): StartupLiveBoundary {
+  if (!selection.firstPoll || selection.messages.length === 0) {
+    return {
+      isStartupLive: false,
+      messages: selection.messages,
+      backlogMessages: [],
+    };
+  }
+
+  const sorted = [...selection.messages].sort((a, b) => a.localId - b.localId);
+  const firstLiveIndex = sorted.findIndex((message) => {
+    const timestamp = Date.parse(message.timestamp);
+    return Number.isFinite(timestamp) && timestamp >= monitorStartedAtMs;
+  });
+
+  if (firstLiveIndex < 0) {
+    return {
+      isStartupLive: false,
+      messages: sorted,
+      backlogMessages: [],
+    };
+  }
+
+  return {
+    isStartupLive: true,
+    messages: sorted.slice(firstLiveIndex),
+    backlogMessages: sorted.slice(0, firstLiveIndex),
   };
 }

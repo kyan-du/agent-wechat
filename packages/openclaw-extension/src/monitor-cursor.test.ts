@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
-import { markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.ts";
+import { applyStartupLiveBoundary, markCursorMessagesHandled, selectCursorMessages, type HandledCursor } from "./monitor-cursor.ts";
 
 function chat(overrides: Partial<Chat>): Chat {
   return {
@@ -14,14 +14,14 @@ function chat(overrides: Partial<Chat>): Chat {
   };
 }
 
-function message(localId: number): Message {
+function message(localId: number, timestamp = "2026-08-16T00:00:00.000Z"): Message {
   return {
     localId,
     serverId: localId,
     chatId: "wxid_first",
     type: 1,
     content: `m${localId}`,
-    timestamp: "2026-08-16T00:00:00.000Z",
+    timestamp,
   };
 }
 
@@ -252,4 +252,75 @@ test("first poll still seeds read history before the unread suffix", () => {
   );
   assert.equal(result.seedLastSeen, 2);
   assert.deepEqual(result.messages.map((m) => m.localId), [3]);
+});
+
+test("first unread DM after monitor startup bypasses recovery read-only", () => {
+  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 4 }),
+    [
+      message(1, "2026-08-17T07:00:00.000Z"),
+      message(2, "2026-08-17T07:05:00.000Z"),
+      message(3, "2026-08-17T07:10:00.000Z"),
+      message(4, "2026-08-17T07:20:34.000Z"),
+    ],
+    new Map(),
+    new Map(),
+  );
+
+  assert.equal(result.firstPoll, true);
+  assert.equal(result.prevLastSeen, 0);
+  assert.equal(result.seedLastSeen, 3);
+  assert.deepEqual(result.messages.map((m) => m.localId), [4]);
+
+  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
+  assert.equal(boundary.isStartupLive, true);
+  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
+  assert.deepEqual(boundary.backlogMessages, []);
+});
+
+test("historical unread backlog on first poll remains recovery", () => {
+  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 1, lastMsgLocalId: 4 }),
+    [
+      message(1, "2026-08-17T07:00:00.000Z"),
+      message(2, "2026-08-17T07:05:00.000Z"),
+      message(3, "2026-08-17T07:10:00.000Z"),
+      message(4, "2026-08-17T07:17:00.000Z"),
+    ],
+    new Map(),
+    new Map(),
+  );
+
+  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
+  assert.equal(boundary.isStartupLive, false);
+  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
+  assert.deepEqual(boundary.backlogMessages, []);
+});
+
+test("mixed first-poll unread suffix advances historical prefix and keeps live tail", () => {
+  const monitorStartedAtMs = Date.parse("2026-08-17T07:18:00.000Z");
+  const result = selectCursorMessages(
+    "wxid_first",
+    chat({ unreadCount: 2, lastMsgLocalId: 4 }),
+    [
+      message(1, "2026-08-17T07:00:00.000Z"),
+      message(2, "2026-08-17T07:05:00.000Z"),
+      message(3, "2026-08-17T07:17:00.000Z"),
+      message(4, "2026-08-17T07:20:34.000Z"),
+    ],
+    new Map(),
+    new Map(),
+  );
+
+  assert.equal(result.seedLastSeen, 2);
+  assert.deepEqual(result.messages.map((m) => m.localId), [3, 4]);
+
+  const boundary = applyStartupLiveBoundary(result, monitorStartedAtMs);
+  assert.equal(boundary.isStartupLive, true);
+  assert.deepEqual(boundary.backlogMessages.map((m) => m.localId), [3]);
+  assert.deepEqual(boundary.messages.map((m) => m.localId), [4]);
 });
