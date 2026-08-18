@@ -2,8 +2,9 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { root, strictJson } from "./agent-release-lib.mjs";
+import { root, sha256Bytes, strictJson } from "./agent-release-lib.mjs";
 import { reconcilePublication } from "./release-reconciliation.mjs";
+import { queryGithubRelease } from "./github-release-state.mjs";
 import { classifyNpmView } from "./verify-npm-versions-absent.mjs";
 import { verifyReleaseManifest } from "./verify-agent-release.mjs";
 
@@ -11,7 +12,9 @@ function arg(name) { const index = process.argv.indexOf(name); return index < 0 
 const manifestPath = arg("--manifest");
 const outputPath = arg("--output");
 if (!manifestPath || !outputPath) throw new Error("usage: reconcile-npm-release.mjs --manifest <path> --output <path> [--require-complete] [--require-dist-tags]");
-const manifest = verifyReleaseManifest(strictJson(readFileSync(resolve(root, manifestPath), "utf8"), "release manifest"));
+const manifestRaw = readFileSync(resolve(root, manifestPath));
+const manifest = verifyReleaseManifest(strictJson(manifestRaw.toString("utf8"), "release manifest"));
+manifest.manifestSha256 = sha256Bytes(manifestRaw);
 const remotePackages = [];
 const currentDistTags = {};
 for (const item of manifest.packages) {
@@ -33,7 +36,8 @@ for (const item of manifest.packages) {
   const value = JSON.parse(tag.stdout);
   currentDistTags[item.name] = typeof value === "string" ? value : null;
 }
-const receipt = reconcilePublication(manifest, remotePackages, currentDistTags);
+const githubRelease = queryGithubRelease(manifest);
+const receipt = reconcilePublication(manifest, remotePackages, currentDistTags, githubRelease);
 if (process.argv.includes("--require-complete") && (receipt.packages.some((item) => item.state !== "verified") || receipt.state !== "RECONCILED")) throw new Error(`registry set is not complete: ${receipt.state}`);
 if (process.argv.includes("--require-dist-tags") && Object.values(currentDistTags).some((value) => value !== manifest.version)) throw new Error(`registry ${manifest.distTag} mappings are not uniformly ${manifest.version}`);
 writeFileSync(resolve(root, outputPath), `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });

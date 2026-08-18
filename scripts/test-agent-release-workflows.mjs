@@ -25,7 +25,9 @@ const liveJobs = Object.fromEntries(Object.entries(workflow.jobs).filter(([name]
 if (/\bnpm publish\b|\bnpm dist-tag\b|\bgh release create\b|\bgit (?:tag|push)\b/.test(YAML.stringify(liveJobs))) throw new Error("reachable validation contains release side effect");
 const candidateText = YAML.stringify(candidate), deployText = YAML.stringify(deploy);
 for (const proof of ["prepare-agent-release.mjs", "verify-agent-release.mjs", "cmp ", "diff -qr", "artifact-id", "artifact-digest", "npm-production-${VERSION}-${RELEASE_SHA}"]) if (!text.includes(proof)) throw new Error(`candidate intent proof missing: ${proof}`);
-for (const operation of ["npm publish", "npm dist-tag add", "latest", "gh release create", "consume-release-authorization.mjs", "verify-release-operation.mjs", "verify-agent-release.mjs", "--skip-consumption-lookup"]) if (!deployText.includes(operation)) throw new Error(`production blueprint missing ${operation}`);
+for (const operation of ["npm publish", "npm dist-tag add", "latest", "ensure-github-release.mjs", "consume-release-authorization.mjs", "verify-release-operation.mjs", "verify-agent-release.mjs", "--skip-consumption-lookup", "vars.NPM_AUTHORIZATION_SHA", "vars.NPM_AUTHORIZATION_TAG_OID"]) if (!deployText.includes(operation)) throw new Error(`production blueprint missing ${operation}`);
+const authorizationStep = deploy.steps.find((step) => String(step.name).includes("authenticate authorization"));
+for (const name of ["NPM_AUTHORIZATION_SHA", "NPM_AUTHORIZATION_TAG_OID"]) if (!authorizationStep?.env?.[name] || !String(authorizationStep.run).includes(`\"$${name}\" | grep -Eq '^[0-9a-f]{40}$'`)) throw new Error(`effective production authorization context missing ${name}`);
 if (/--prerelease|\bnext\b|next\.|npm-prerelease|inputs\.channel|verify-stable-promotion/.test(text)) throw new Error("prerelease/promotion path remains in production publisher");
 if (!text.includes("'^[0-9]+\\.[0-9]+\\.[0-9]+$'")) throw new Error("formal stable version guard missing");
 

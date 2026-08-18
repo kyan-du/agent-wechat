@@ -197,7 +197,11 @@ jobs:
           RELEASE_RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
           VERSION: ${{ inputs.version }}
           AUTHORIZATION_ID: ${{ inputs.authorization_id }}
+          NPM_AUTHORIZATION_SHA: ${{ vars.NPM_AUTHORIZATION_SHA }}
+          NPM_AUTHORIZATION_TAG_OID: ${{ vars.NPM_AUTHORIZATION_TAG_OID }}
         run: |
+          printf '%s' "$NPM_AUTHORIZATION_SHA" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$NPM_AUTHORIZATION_TAG_OID" | grep -Eq '^[0-9a-f]{40}$'
           authorization_ref="refs/tags/npm-release-auth/v$VERSION/$AUTHORIZATION_ID"
           git fetch origin "$authorization_ref:$authorization_ref" --no-tags
           node scripts/verify-npm-release-authorization.mjs .release-candidate/agent-release-manifest.json "${{ inputs.release_sha }}" "$authorization_ref" "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" "$AUTHORIZATION_ID" --skip-consumption-lookup
@@ -238,9 +242,9 @@ jobs:
           npm dist-tag add "@kyan-du/agent-wechat-openclaw@$VERSION" latest
           npm dist-tag add "@kyan-du/agent-wechat-wechaty-puppet@$VERSION" latest
           node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --require-dist-tags --output reconciliation-final.json
-      - name: Create final GitHub Release after registry reconciliation
+      - name: Create or verify exact final GitHub Release after registry reconciliation
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ inputs.version }}" --verify-tag --generate-notes --title "v${{ inputs.version }}"
+        run: node scripts/ensure-github-release.mjs --manifest .release-candidate/agent-release-manifest.json
       - name: Clean-install exact public registry versions
         run: node scripts/smoke-published-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json
