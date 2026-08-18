@@ -91,25 +91,29 @@ If one npm package or image succeeds while another fails, stop immediately. Do n
 
 Rollback does not grant production approval. Repeat exact-head validation and P2 canary/rollback evidence. Main-account or production use remains blocked until all P0-D fixture-limited observations, P1-C legal/redistribution gates, and owner approval are complete.
 
-## Tag-triggered npm prerelease automation
+## Agent-operated npm release design
 
-The tag trigger is intentionally absent while `release/npm-release-authorization.json` has `enabled=false`. A tag cannot start this workflow until a separately reviewed authorization receipt commit—created after the already-existing release commit—enables the exact tag trigger, names the exact release tag/commit/tree, and sets every owner/legal/environment/publisher/tag-rule/registry-reconciliation gate true. The receipt commit is fetched through a protected annotated tag `npm-release-auth/vX.Y.Z-next.N`; exact receipt commit, receipt tag-object, and release tag-object OIDs are supplied by the protected environment, not stored inside the receipt. The workflow keeps the release tree checked out while separately verifying that immutable one-hop tag→commit object, its ancestry, a regular mode-100644 receipt blob, strict duplicate/unknown-key-free schema, and exact npm registry/`next`/three-package-version intent. After those gates are independently verified, an authorized tag may trigger `.github/workflows/npm-prerelease.yml`. The workflow checks that:
+The PR #49 tag-trigger proposal has been retired in favor of the workflow-created-tag design in [AGENT-OPERATED-RELEASE.md](./AGENT-OPERATED-RELEASE.md). `.github/workflows/npm-prerelease.yml` now remains only a read-only legacy exact-tag validator; it has no authorization fetch, registry write, tag write, OIDC grant, or GitHub Release operation. The future architecture uses explicit version + full release SHA + manifest digest + authorization identity dispatch and creates the annotated tag only after protected receipt and Environment checks.
+
+The v2 receipt reuses and extends #49's independently reviewed exact gates: protected annotated authorization ref, exact receipt commit and tag-object OIDs, release commit/tree, regular mode-`100644` strict JSON blob, package/registry/dist-tag intent, nonce/expiry/replay protection, manifest/tarball integrity, and fail-closed npm reconciliation. The implementation remains inactive in `.github/workflows/npm-agent-release.yml` and `.github/workflows/npm-agent-stable.yml`.
+
+The validator checks that:
 
 - the peeled tag resolves to checked-out `HEAD`, and that exact resolved commit is contained in `origin/main` and matches the authorization receipt;
 - `X.Y.Z-next.N` exactly matches all three public package versions;
 - install, typecheck, package tests, build, pack smoke, publication-boundary audit, and release audit pass with no generated diff;
 - none of the three exact package versions already exists on npm.
 
-Only then does it publish all three packages under `next` with npm provenance and create a GitHub prerelease. It never publishes `latest`. Do not create the real tag until owner/legal release gates and exact-head approvals are complete. The workflow pins Node 22.14.0 and npm 11.5.1 for Trusted Publishing.
+The legacy validator never publishes. The inactive Agent workflow blueprints document staged tarball publication, integrity reconciliation, delayed `next`/`latest` mapping, GitHub Release ordering, partial recovery, and registry clean-install, but their deployment jobs are statically unreachable until a separate activation PR.
 
-A safe validation without npm or GitHub Release writes is available from Actions → **Publish tagged npm prerelease** → **Run workflow**. Supply an existing tag and leave `dry_run=true`. Manual dispatch never publishes; the input is deliberately required to make that boundary visible.
+A safe legacy validation without npm or GitHub Release writes is available from Actions → **Legacy tagged prerelease validation (inert)** → **Run workflow**. Supply an existing tag and leave `dry_run=true`.
 
 Repository administration required before the first real tag:
 
-1. Create/protect the `npm-prerelease` GitHub Environment and require owner/release reviewers.
-2. Prefer npm Trusted Publishing for each of the three package names, bound to repository `kyan-du/agent-wechat` and workflow `.github/workflows/npm-prerelease.yml`. The workflow grants `id-token: write`; no long-lived token is needed after Trusted Publishing is configured.
+1. Create/protect the `npm-prerelease` and `npm-production` GitHub Environments and require non-Agent owner/release reviewers.
+2. Configure npm Trusted Publishing for each package only after activation, bound to the exact approved Agent workflow. The current workflows grant no reachable OIDC permission; no long-lived token fallback is allowed.
 3. npm requires a one-time owner bootstrap if a package does not yet exist. If Trusted Publishing cannot be used, add an environment-scoped `NPM_TOKEN` only as a temporary fallback and retain required reviewers. Never add it as a repository file or broad workflow secret.
-4. Protect release tags matching `v*-next.*` and limit tag creation to maintainers. A pushed tag is the publication command and cannot be treated as a harmless annotation.
+4. Protect prerelease/stable release tags, authorization tags, and consumption tags against move, overwrite, deletion, and reuse. Normal release tags are created only by the approved workflow; a locally pushed tag never authorizes publication.
 5. Reconcile current npm state before enabling: all three `0.12.0-next.0` versions already exist and both `next` and `latest` currently point to them. Record the intended corrected mappings and independently verify them; this workflow will reject duplicate exact versions and never moves `latest`.
 
 The workflow is intentionally npm-only. GHCR remains a separate exact-version workflow so a container redistribution decision and image digest can be approved independently.

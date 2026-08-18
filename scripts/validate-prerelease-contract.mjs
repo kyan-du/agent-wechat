@@ -75,19 +75,22 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
   try { workflow = parseYaml(text); } catch (error) { fail(`${name}: invalid workflow YAML: ${error.message}`); }
   const trigger = workflow.on ?? workflow.true ?? {};
   for (const [event, config] of Object.entries(trigger)) {
-    if (event === "push" && config && typeof config === "object" && ("tags" in config || "tags-ignore" in config) && name !== "npm-prerelease.yml") forbidden.push(`${name}: tag trigger`);
+    if (event === "push" && config && typeof config === "object" && ("tags" in config || "tags-ignore" in config)) forbidden.push(`${name}: tag trigger`);
   }
-  const checkPermissions = (permissions, where) => {
+  const checkPermissions = (permissions, where, job) => {
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
-    for (const scope of ["packages", "contents"]) {
-      const approvedWrite = name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages";
+    for (const scope of ["packages", "contents", "id-token"]) {
+      const inertBlueprint = ["npm-agent-release.yml", "npm-agent-stable.yml"].includes(name) && where.startsWith("job deploy-") && job?.if === "${{ false }}";
+      const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
+        || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
+        || inertBlueprint;
       if (permissions[scope] === "write" && !approvedWrite) forbidden.push(`${name}: ${where} ${scope} write permission`);
     }
   };
   checkPermissions(workflow.permissions, "workflow");
   for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
-    checkPermissions(job?.permissions, `job ${jobName}`);
+    checkPermissions(job?.permissions, `job ${jobName}`, job);
     for (const step of job?.steps ?? []) {
       const uses = String(step?.uses ?? "");
       const command = String(step?.run ?? "");
@@ -102,8 +105,8 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
         [/\bdocker\s+(?:push|buildx\s+build[^\n]*--push)\b/i, "image push"],
       ];
       for (const [pattern, label] of commands) {
-        const approvedPublish = (name === "npm-prerelease.yml" && ["npm publish", "GitHub Release creation"].includes(label))
-          || (name === "ghcr-prerelease.yml" && label === "image push");
+        const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
+          || (["npm-agent-release.yml", "npm-agent-stable.yml"].includes(name) && jobName.startsWith("deploy-") && job?.if === "${{ false }}");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
@@ -117,26 +120,29 @@ const publishWorkflow = parseYaml(publishWorkflowText);
 const publishTriggers = publishWorkflow.on ?? publishWorkflow.true ?? {};
 if ("push" in publishTriggers || !("workflow_dispatch" in publishTriggers)) fail("npm prerelease workflow must remain manual dry-run only until independent authorization");
 if (publishTriggers.workflow_dispatch?.inputs?.dry_run?.default !== true) fail("manual npm prerelease dispatch must default to dry-run");
-if (publishWorkflow.env?.RELEASE_TAG !== "${{ github.event_name == 'push' && github.ref_name || inputs.tag }}") fail("npm prerelease workflow must resolve the tag from the triggering event");
+if (publishWorkflow.env?.RELEASE_TAG !== "${{ inputs.tag }}") fail("legacy npm prerelease validator must use explicit tag input");
 if (publishWorkflow.permissions?.contents !== "read" || publishWorkflow.permissions?.["id-token"] !== "none") fail("inert npm prerelease workflow permissions drift");
-if (!/npm publish \.\/packages\/cli --tag next --access public/.test(publishWorkflowText)
-  || !/npm publish \.\/packages\/openclaw-extension --tag next --access public/.test(publishWorkflowText)
-  || !/npm publish \.\/packages\/wechaty-puppet --tag next --access public/.test(publishWorkflowText)
-  || !/pnpm test:npm-packages/.test(publishWorkflowText)
+if (!/pnpm test:npm-packages/.test(publishWorkflowText)
   || !/release_sha="\$\(git rev-parse HEAD\^\{commit\}\)"/.test(publishWorkflowText)
-  || !/authorization_ref="refs\/tags\/npm-release-auth\/\$RELEASE_TAG"/.test(publishWorkflowText)
-  || !/"\$NPM_AUTHORIZATION_SHA" "\$NPM_AUTHORIZATION_TAG_OID"/.test(publishWorkflowText)
-  || !/"\$NPM_RELEASE_TAG_OID"/.test(publishWorkflowText)
-  || !/node scripts\/verify-npm-versions-absent\.mjs/.test(publishWorkflowText)
   || !/node scripts\/test-npm-release-authorization\.mjs/.test(publishWorkflowText)
   || !/TRUSTED_NPM_VERSION: 11\.5\.1/.test(publishWorkflowText)
   || !/node-version: 22\.14\.0/.test(publishWorkflowText)
-  || !/gh release create/.test(publishWorkflowText)
-  || (publishWorkflowText.match(/if: \$\{\{ github\.event_name == 'push' \}\}/g) ?? []).length !== 4) fail("npm prerelease workflow must tag-gate authorization, registry preflight, publication, and GitHub prerelease creation");
+  || /npm publish|npm dist-tag|gh release create|git push|NPM_AUTHORIZATION_SHA/.test(publishWorkflowText)) fail("legacy npm prerelease workflow must remain exact-tag validation only");
 if (forbidden.length) fail(`workflow publication capability detected:\n${forbidden.join("\n")}`);
 
+const agentReleaseContract = readJson("release/agent-release-contract.json");
+if (agentReleaseContract.deploymentEnabled !== false) fail("Agent-operated release must remain inactive until a separately reviewed activation");
+for (const name of ["npm-agent-release.yml", "npm-agent-stable.yml"]) {
+  const text = readFileSync(join(workflowDir, name), "utf8");
+  const workflow = parseYaml(text);
+  const triggers = workflow.on ?? workflow.true ?? {};
+  if (JSON.stringify(Object.keys(triggers)) !== JSON.stringify(["workflow_dispatch"])) fail(`${name}: only explicit dispatch is allowed`);
+  if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: inactive permissions drift`);
+  const deploy = Object.entries(workflow.jobs ?? {}).find(([jobName]) => jobName.startsWith("deploy-"))?.[1];
+  if (!triggers.workflow_dispatch?.inputs?.dry_run?.default || deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
+}
 const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");
-if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md"))) fail("P1-B1 runbook is missing");
+if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md")) || !existsSync(join(root, "docs", "release", "AGENT-OPERATED-RELEASE.md"))) fail("release runbook is missing");
 
 console.log(`prerelease contract valid: next only; ${contract.publicPackages.length} public packages; approved workflows are capability-scoped`);

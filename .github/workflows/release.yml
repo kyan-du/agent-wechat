@@ -17,7 +17,18 @@ on:
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
       - 'scripts/smoke-npm-packages.mjs'
+      - 'scripts/agent-release*.mjs'
+      - 'scripts/prepare-agent-release.mjs'
+      - 'scripts/prepare-release-pr.mjs'
+      - 'scripts/release-authorization*.mjs'
+      - 'scripts/release-reconciliation*.mjs'
+      - 'scripts/verify-agent-release.mjs'
+      - 'scripts/verify-stable-promotion.mjs'
+      - 'scripts/test-agent-release-workflows.mjs'
       - '.github/workflows/release.yml'
+      - '.github/workflows/npm-agent-release.yml'
+      - '.github/workflows/npm-agent-stable.yml'
+      - 'docs/release/AGENT-OPERATED-RELEASE.md'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -35,7 +46,18 @@ on:
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
       - 'scripts/smoke-npm-packages.mjs'
+      - 'scripts/agent-release*.mjs'
+      - 'scripts/prepare-agent-release.mjs'
+      - 'scripts/prepare-release-pr.mjs'
+      - 'scripts/release-authorization*.mjs'
+      - 'scripts/release-reconciliation*.mjs'
+      - 'scripts/verify-agent-release.mjs'
+      - 'scripts/verify-stable-promotion.mjs'
+      - 'scripts/test-agent-release-workflows.mjs'
       - '.github/workflows/release.yml'
+      - '.github/workflows/npm-agent-release.yml'
+      - '.github/workflows/npm-agent-stable.yml'
+      - 'docs/release/AGENT-OPERATED-RELEASE.md'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -74,6 +96,12 @@ jobs:
 
       - name: Prove canonical prerelease manifest
         run: pnpm test:prerelease-manifest
+
+      - name: Prove inactive Agent release architecture
+        run: |
+          pnpm test:release-plan
+          pnpm test:release-workflows
+          node scripts/test-npm-release-authorization.mjs
 
       - name: Validate clean release inputs and real pack reports
         env:

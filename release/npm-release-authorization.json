@@ -1,16 +1,44 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "enabled": false,
-  "tag": null,
-  "releaseCommit": null,
-  "releaseTree": null,
+  "repository": "kyan-du/agent-wechat",
+  "channel": null,
+  "authorizationId": null,
+  "nonceSha256": null,
+  "ownerConfirmationRefSha256": null,
+  "issuedAt": null,
+  "expiresAt": null,
+  "release": {
+    "tag": null,
+    "commit": null,
+    "tree": null,
+    "manifestSha256": null
+  },
   "intent": {
     "registry": "https://registry.npmjs.org",
-    "distTag": "next",
+    "distTag": null,
     "packages": [
-      { "name": "@kyan-du/agent-wechat-cli", "version": null },
-      { "name": "@kyan-du/agent-wechat-openclaw", "version": null },
-      { "name": "@kyan-du/agent-wechat-wechaty-puppet", "version": null }
+      {
+        "name": "@kyan-du/agent-wechat-cli",
+        "version": null,
+        "tarball": null,
+        "sha256": null,
+        "integrity": null
+      },
+      {
+        "name": "@kyan-du/agent-wechat-openclaw",
+        "version": null,
+        "tarball": null,
+        "sha256": null,
+        "integrity": null
+      },
+      {
+        "name": "@kyan-du/agent-wechat-wechaty-puppet",
+        "version": null,
+        "tarball": null,
+        "sha256": null,
+        "integrity": null
+      }
     ]
   },
   "approvals": {
@@ -20,5 +48,9 @@
     "trustedPublishers": false,
     "protectedTagRules": false,
     "registryStateReconciled": false
+  },
+  "consumption": {
+    "state": "unused",
+    "tag": null
   }
 }
