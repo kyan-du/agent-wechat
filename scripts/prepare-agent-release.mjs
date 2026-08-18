@@ -60,12 +60,12 @@ try {
   if (versions.size !== 1) throw new Error("public packages must use one lockstep version");
   const version = packages[0].version;
 
-  const consumer = join(stage, ".release-consumer");
+  const consumer = join(stage, "release-consumer");
   mkdirSync(consumer);
   run("npm", ["init", "-y"], consumer, true);
   const stagedTarballs = packages.map((item) => {
-    const destination = join(stage, ".release-artifacts", item.tarball);
-    mkdirSync(join(stage, ".release-artifacts"), { recursive: true });
+    const destination = join(stage, "release-artifacts", item.tarball);
+    mkdirSync(join(stage, "release-artifacts"), { recursive: true });
     copyFileSync(join(artifactsPath, item.tarball), destination);
     return destination;
   });
