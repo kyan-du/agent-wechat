@@ -34,7 +34,7 @@
     "test:npm-packages": "node scripts/smoke-npm-packages.mjs",
     "test:ghcr-release": "node scripts/validate-ghcr-release.mjs && node scripts/test-ghcr-release.mjs",
     "test:release-plan": "node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs scripts/reconcile-npm-release.test.mjs scripts/select-npm-release-artifacts.test.mjs scripts/github-release-state.test.mjs",
-    "test:release-workflows": "node scripts/test-agent-release-workflows.mjs && node scripts/test-release-crash-matrix.mjs && node scripts/test-stable-candidate-harness.mjs",
+    "test:release-workflows": "node scripts/test-agent-release-workflows.mjs && node scripts/test-workflow-tombstone-routing.mjs && node scripts/test-release-crash-matrix.mjs && node scripts/test-stable-candidate-harness.mjs",
     "prepare:release-pr": "node scripts/prepare-release-pr.mjs",
     "prepare:release-candidate": "node scripts/prepare-agent-release.mjs",
     "verify:release-candidate": "node scripts/verify-agent-release.mjs"

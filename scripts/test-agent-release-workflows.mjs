@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import YAML from "yaml";
 
 const publisherPath = ".github/workflows/npm-release.yml";
@@ -31,8 +31,11 @@ for (const name of ["NPM_AUTHORIZATION_SHA", "NPM_AUTHORIZATION_TAG_OID"]) if (!
 if (/--prerelease|\bnext\b|next\.|npm-prerelease|inputs\.channel|verify-stable-promotion/.test(text)) throw new Error("prerelease/promotion path remains in production publisher");
 if (!text.includes("'^[0-9]+\\.[0-9]+\\.[0-9]+$'")) throw new Error("formal stable version guard missing");
 
-const npmWorkflows = [".github/workflows/npm-release.yml"];
-if (npmWorkflows.length !== 1) throw new Error("exactly one npm workflow is required");
+const npmWorkflows = readdirSync(".github/workflows").filter((name) => /^npm-.*\.ya?ml$/.test(name)).sort();
+if (JSON.stringify(npmWorkflows) !== JSON.stringify(["npm-release.yml"])) throw new Error(`unexpected npm workflows: ${npmWorkflows.join(", ")}`);
+const releaseValidation = readFileSync(".github/workflows/release-validation.yml", "utf8");
+const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+for (const [path, source] of [["release-validation.yml", releaseValidation], ["ci.yml", ci]]) if (!source.includes(".github/workflows/npm-*.yml")) throw new Error(`${path}: npm workflow tombstone routing missing`);
 
 const runbook = readFileSync("docs/release/AGENT-OPERATED-RELEASE.md", "utf8");
 for (const statement of ["stable-only", "npm-production", "latest", "no npm prerelease", "atomic", "provenance"]) if (!runbook.includes(statement)) throw new Error(`stable-only runbook missing: ${statement}`);
