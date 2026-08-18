@@ -12,7 +12,7 @@ const dir = mkdtempSync(join(tmpdir(), "select-release-artifacts-"));
 const version = "1.2.3";
 const names = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"];
 const packages = names.map((name, index) => ({ name, version, tarball: `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`, sha256: `sha256:${String(index + 1).repeat(64)}`, integrity: `sha512-${index}`, size: 1 }));
-const manifest = { schemaVersion: 1, validationOnly: true, repository: "kyan-du/agent-wechat", publisherWorkflow: ".github/workflows/npm-agent-release.yml", version, tag: `v${version}`, commit: "1".repeat(40), tree: "2".repeat(40), registry: "https://registry.npmjs.org", distTag: "latest", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
+const manifest = { schemaVersion: 1, validationOnly: true, repository: "kyan-du/agent-wechat", publisherWorkflow: ".github/workflows/npm-release.yml", version, tag: `v${version}`, commit: "1".repeat(40), tree: "2".repeat(40), registry: "https://registry.npmjs.org", distTag: "latest", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
 const exists = (item) => ({ name: item.name, kind: "exists", version: item.version, integrity: item.integrity, provenance: { state: "verified", repository: manifest.repository, workflow: manifest.publisherWorkflow, commit: manifest.commit } });
 const absent = (item) => ({ name: item.name, kind: "absent" });
 

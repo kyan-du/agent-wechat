@@ -7,7 +7,7 @@ Phase 1 is validation-only. Do not create a tag, publish, move `latest`, create 
 ## Immutable contract
 
 - Public packages: CLI, OpenClaw extension and Wechaty Puppet; one lockstep stable version.
-- Publisher: `.github/workflows/npm-agent-release.yml` bound to `npm-production`.
+- Publisher: `.github/workflows/npm-release.yml` bound to `npm-production`.
 - Identity: exact `X.Y.Z`, `vX.Y.Z`, full commit/tree, manifest sha256 and three tarball sha256/SRI values.
 - npm: `latest` only. `next` and `-next.N` are rejected by the formal publisher.
 - GitHub: final non-prerelease Release only.
