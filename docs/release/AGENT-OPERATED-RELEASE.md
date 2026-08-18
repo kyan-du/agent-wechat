@@ -11,7 +11,7 @@ The normal owner interaction is:
 1. `Prepare prerelease` authorizes only a Release PR and read-only evidence generation.
 2. `Confirm release <version> @ <full commit>` must also identify the repository, `next`, all three package versions and integrity values, authorization ID, one-time nonce, and expiry. This is the irreversible-operation authorization; vague, stale, branch-only, expired, replayed, or drifted confirmation is invalid.
 
-The external owner-chat integration does not exist in this repository. It must convert an authenticated owner confirmation into the documented opaque interface without retaining chat text: random `authorizationId`, `sha256(nonce)`, `sha256(owner confirmation reference)`, issued/expiry timestamps, and the exact v2 receipt. The nonce itself enters only the protected deployment at dispatch. This repository neither fabricates that integration nor stores the nonce.
+The external owner-chat integration does not exist in this repository. It must convert an authenticated owner confirmation into the documented opaque interface without retaining chat text: random `authorizationId`, operation (`release` or `reconcile`), exact reconciliation receipt digest for resume, `sha256(nonce)`, `sha256(owner confirmation reference)`, issued/expiry timestamps, and the exact v2 receipt. The nonce itself enters only the protected deployment at dispatch. This repository neither fabricates that integration nor stores the nonce.
 
 ## State machine
 

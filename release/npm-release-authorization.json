@@ -4,6 +4,8 @@
   "repository": "kyan-du/agent-wechat",
   "channel": null,
   "authorizationId": null,
+  "operation": null,
+  "reconciliationSha256": null,
   "nonceSha256": null,
   "ownerConfirmationRefSha256": null,
   "issuedAt": null,

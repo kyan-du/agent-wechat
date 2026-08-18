@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { contract, exactKeys, requireDigest, requireOid, sha256Bytes, validateReleaseIdentity } from "./agent-release-lib.mjs";
 import { verifyReleaseManifest } from "./verify-agent-release.mjs";
 
-const topKeys = ["schemaVersion", "enabled", "repository", "channel", "authorizationId", "nonceSha256", "ownerConfirmationRefSha256", "issuedAt", "expiresAt", "release", "intent", "approvals", "consumption"];
+const topKeys = ["schemaVersion", "enabled", "repository", "channel", "authorizationId", "operation", "reconciliationSha256", "nonceSha256", "ownerConfirmationRefSha256", "issuedAt", "expiresAt", "release", "intent", "approvals", "consumption"];
 const approvalKeys = contract.authorization.requiredApprovals;
 
 function safeEqual(left, right) {
@@ -17,6 +17,11 @@ export function verifyAuthorizationReceipt(receipt, manifest, options = {}) {
   if (receipt.repository !== contract.repository || receipt.repository !== manifest.repository) throw new Error("authorization repository drift");
   if (receipt.channel !== manifest.channel) throw new Error("authorization channel drift");
   if (!/^[0-9a-f]{32}$/.test(receipt.authorizationId ?? "")) throw new Error("authorizationId must be an opaque 128-bit lowercase hex identity");
+  if (!new Set(["release", "reconcile"]).has(receipt.operation)) throw new Error("authorization operation must be release or reconcile");
+  if (receipt.operation === "reconcile") requireDigest(receipt.reconciliationSha256, "reconciliation receipt digest");
+  else if (receipt.reconciliationSha256 !== null) throw new Error("fresh release must not carry reconciliation identity");
+  if (options.operation && receipt.operation !== options.operation) throw new Error("authorization operation drift");
+  if (options.reconciliationSha256 && receipt.reconciliationSha256 !== options.reconciliationSha256) throw new Error("authorization reconciliation receipt drift");
   requireDigest(receipt.nonceSha256, "nonce digest");
   requireDigest(receipt.ownerConfirmationRefSha256, "owner confirmation reference digest");
   if (!options.nonce) throw new Error("authorization nonce is required at dispatch and must not be stored in the receipt");
@@ -56,8 +61,8 @@ export function verifyAuthorizationReceipt(receipt, manifest, options = {}) {
   if (receipt.consumption.state !== "unused" || receipt.consumption.tag !== `npm-release-consumed/${receipt.release.tag}/${receipt.authorizationId}`) {
     throw new Error("authorization receipt is replayed or has invalid consumption identity");
   }
-  if (options.consumptionRefExists === true && options.allowConsumed !== true) throw new Error("authorization receipt has already been consumed");
-  if (options.consumptionRefExists !== true && options.allowConsumed === true) throw new Error("resume requires the exact prior consumption marker");
+  if (options.consumptionRefExists === true && receipt.operation !== "reconcile") throw new Error("authorization receipt has already been consumed");
+  if (options.consumptionRefExists !== true && receipt.operation === "reconcile") throw new Error("reconcile requires the exact prior consumption marker");
 
   verifyReleaseManifest(manifest, { expectedChannel: receipt.channel, expectedVersion: manifest.version, expectedCommit: receipt.release.commit });
   return receipt;

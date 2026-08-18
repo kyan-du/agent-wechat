@@ -42,6 +42,7 @@ verifyAuthorizationReceipt(receipt, manifest, {
   now: process.env.RELEASE_AUTHORIZATION_NOW,
   manifestSha256,
   consumptionRefExists,
-  allowConsumed: process.env.RELEASE_OPERATION === "reconcile",
+  operation: process.env.RELEASE_OPERATION,
+  reconciliationSha256: process.env.RELEASE_RECONCILIATION_SHA256,
 });
 console.log(`release authorized for ${manifest.tag} at ${releaseCommit} by ${authorizationId}`);

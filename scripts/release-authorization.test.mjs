@@ -24,7 +24,8 @@ const manifestSha256 = `sha256:${"5".repeat(64)}`;
 function receipt() {
   return {
     schemaVersion: 2, enabled: true, repository: manifest.repository, channel: manifest.channel,
-    authorizationId: "a".repeat(32), nonceSha256: sha256Bytes(Buffer.from(nonce)),
+    authorizationId: "a".repeat(32), operation: "release", reconciliationSha256: null,
+    nonceSha256: sha256Bytes(Buffer.from(nonce)),
     ownerConfirmationRefSha256: `sha256:${"6".repeat(64)}`,
     issuedAt: "2026-08-18T00:00:00.000Z", expiresAt: "2026-08-18T00:15:00.000Z",
     release: { tag: manifest.tag, commit, tree, manifestSha256 },
@@ -36,8 +37,14 @@ function receipt() {
 const options = { nonce, now: "2026-08-18T00:05:00.000Z", manifestSha256, consumptionRefExists: false };
 
 test("exact unused authorization passes", () => assert.equal(verifyAuthorizationReceipt(receipt(), manifest, options).enabled, true));
-test("approved resume requires the exact consumed marker", () => assert.equal(verifyAuthorizationReceipt(receipt(), manifest, { ...options, consumptionRefExists: true, allowConsumed: true }).enabled, true));
-test("resume without prior consumption marker fails closed", () => assert.throws(() => verifyAuthorizationReceipt(receipt(), manifest, { ...options, allowConsumed: true }), /requires the exact prior consumption marker/));
+test("approved reconcile binds receipt and exact consumed marker", () => {
+  const value = receipt(); value.operation = "reconcile"; value.reconciliationSha256 = `sha256:${"7".repeat(64)}`;
+  assert.equal(verifyAuthorizationReceipt(value, manifest, { ...options, operation: "reconcile", reconciliationSha256: value.reconciliationSha256, consumptionRefExists: true }).enabled, true);
+});
+test("reconcile without prior consumption marker fails closed", () => {
+  const value = receipt(); value.operation = "reconcile"; value.reconciliationSha256 = `sha256:${"7".repeat(64)}`;
+  assert.throws(() => verifyAuthorizationReceipt(value, manifest, { ...options, operation: "reconcile" }), /requires the exact prior consumption marker/);
+});
 for (const [name, mutate, error] of [
   ["wrong nonce", (_r, o) => { o.nonce = "wrong"; }, /nonce mismatch/],
   ["expired", (_r, o) => { o.now = "2026-08-18T00:16:00.000Z"; }, /not currently valid/],

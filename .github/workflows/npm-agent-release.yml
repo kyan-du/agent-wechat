@@ -133,6 +133,7 @@ jobs:
           RELEASE_SHA: ${{ inputs.release_sha }}
           VERSION: ${{ inputs.version }}
           RELEASE_OPERATION: ${{ inputs.operation }}
+          RELEASE_RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
         run: |
           set -euo pipefail
           authorization_ref="refs/tags/npm-release-auth/v$VERSION/$AUTHORIZATION_ID"
