@@ -1,33 +1,45 @@
-name: Publish npm prerelease
+name: Publish tagged npm prerelease
 
-# First-time package bootstrap must be performed once by the npm owner because
-# npm Trusted Publishing can only be configured after each package exists.
-# After bootstrap, this workflow publishes only explicit `next` prereleases.
+# A signed/authorized vX.Y.Z-next.N tag is the release intent. The job verifies
+# that the tag, all public package manifests, and origin/main identify the same
+# immutable release before any registry write.
 on:
+  # Intentionally manual-only while legal/environment/publisher/tag-rule gates
+  # remain blocked. Re-enabling tag push requires a separately reviewed change.
   workflow_dispatch:
     inputs:
-      expected_version:
-        description: Exact next prerelease version, for example 0.12.0-next.0
+      tag:
+        description: Existing vX.Y.Z-next.N tag to validate
         required: true
         type: string
+      dry_run:
+        description: Validate and pack only; never publish or create a Release
+        required: true
+        default: true
+        type: boolean
 
 concurrency:
-  group: npm-prerelease
+  group: npm-prerelease-${{ github.ref_name }}-${{ inputs.tag || '' }}
   cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
+  id-token: none
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+  TRUSTED_NPM_VERSION: 11.5.1
 
 jobs:
   publish:
-    name: Publish exact npm next prerelease
+    name: Validate and publish exact npm next prerelease
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: npm-prerelease
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -35,9 +47,46 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           cache: pnpm
           registry-url: https://registry.npmjs.org
+
+      - name: Pin Trusted Publishing npm client
+        run: |
+          npm install --global "npm@$TRUSTED_NPM_VERSION"
+          test "$(node --version)" = "v22.14.0"
+          test "$(npm --version)" = "$TRUSTED_NPM_VERSION"
+
+      - name: Authorize immutable tag on main
+        run: |
+          set -euo pipefail
+          git fetch origin main --no-tags
+          version="${RELEASE_TAG#v}"
+          test "v$version" = "$RELEASE_TAG"
+          printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-next\.[0-9]+$'
+          release_sha="$(git rev-parse HEAD^{commit})"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$release_sha"
+          git merge-base --is-ancestor "$release_sha" origin/main
+          echo "RELEASE_SHA=$release_sha" >> "$GITHUB_ENV"
+          node scripts/verify-npm-prerelease.mjs "$version"
+
+      - name: Require independently reviewed release authorization
+        if: ${{ github.event_name == 'push' }}
+        env:
+          NPM_AUTHORIZATION_SHA: ${{ vars.NPM_AUTHORIZATION_SHA }}
+          NPM_AUTHORIZATION_TAG_OID: ${{ vars.NPM_AUTHORIZATION_TAG_OID }}
+          NPM_RELEASE_TAG_OID: ${{ vars.NPM_RELEASE_TAG_OID }}
+        run: |
+          set -euo pipefail
+          test -n "$NPM_AUTHORIZATION_SHA"
+          test -n "$NPM_AUTHORIZATION_TAG_OID"
+          test -n "$NPM_RELEASE_TAG_OID"
+          authorization_ref="refs/tags/npm-release-auth/$RELEASE_TAG"
+          git fetch origin "$authorization_ref:$authorization_ref" --no-tags
+          node scripts/verify-npm-release-authorization.mjs \
+            "$RELEASE_TAG" "$RELEASE_SHA" "$authorization_ref" \
+            "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" \
+            "$NPM_RELEASE_TAG_OID"
 
       - name: Install exact dependencies
         run: pnpm install --frozen-lockfile
@@ -51,22 +100,29 @@ jobs:
           pnpm --filter @kyan-du/agent-wechat-cli test
           pnpm --filter @kyan-du/agent-wechat-openclaw test
           pnpm --filter @kyan-du/agent-wechat-wechaty-puppet test
+          pnpm build
           pnpm test:npm-packages
+          node scripts/test-npm-release-authorization.mjs
           node scripts/validate-release-boundary.mjs
           node scripts/release-audit.mjs --write
           git diff --exit-code -- docs/release-audit/npm-materials.json
-
-      - name: Verify exact package set and prerelease version
-        env:
-          EXPECTED_VERSION: ${{ inputs.expected_version }}
-        run: |
-          node scripts/verify-npm-prerelease.mjs "$EXPECTED_VERSION"
           git diff --exit-code
 
+      - name: Refuse an already-published version
+        if: ${{ github.event_name == 'push' }}
+        run: node scripts/verify-npm-versions-absent.mjs "${RELEASE_TAG#v}"
+
       - name: Publish three exact packages to next with provenance
+        if: ${{ github.event_name == 'push' }}
         env:
-          NPM_CONFIG_PROVENANCE: "true"
+          NPM_CONFIG_PROVENANCE: 'true'
         run: |
-          npm publish ./packages/cli --tag next --access public
-          npm publish ./packages/openclaw-extension --tag next --access public
-          npm publish ./packages/wechaty-puppet --tag next --access public
+          npm publish ./packages/cli --tag next --access public --provenance
+          npm publish ./packages/openclaw-extension --tag next --access public --provenance
+          npm publish ./packages/wechaty-puppet --tag next --access public --provenance
+
+      - name: Create immutable GitHub prerelease
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --prerelease --generate-notes --title "$RELEASE_TAG"

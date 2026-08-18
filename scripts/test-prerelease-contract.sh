@@ -57,15 +57,30 @@ mutate_and_reject .github/workflows/release.yml \
 mutate_and_reject .github/workflows/release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("- name: Prove validation-only contract\n        run: ./scripts/test-prerelease-contract.sh","- uses: softprops/action-gh-release@v2"));' \
   'GitHub Release capability'
-mutate_and_reject .github/workflows/release.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("  workflow_dispatch:","  workflow_dispatch:\n  push:\n    tags: [v*]"));' \
-  'tag-triggered workflow'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("on:\n  # Intentionally manual-only", "on:\n  push:\n    tags: [v*]\n  # Intentionally manual-only"));' \
+  'tag publication enabled before authorization'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ github.event_name == '\''push'\'' }}","if: ${{ always() }}"));' \
+  'manual publication bypass'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("github.event_name == '\''push'\'' && github.ref_name || inputs.tag","always() && github.ref_name || inputs.tag"));' \
+  'manual tag input bypass'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("authorization_ref=\"refs/tags/npm-release-auth/$RELEASE_TAG\"","authorization_ref=\"refs/heads/main\""));' \
+  'removed release authorization'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("TRUSTED_NPM_VERSION: 11.5.1","TRUSTED_NPM_VERSION: 10.9.8"));' \
+  'unsupported Trusted Publishing npm'
+mutate_and_reject .github/workflows/npm-prerelease.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("node scripts/verify-npm-versions-absent.mjs \"${RELEASE_TAG#v}\"","if false; then echo absent; fi"));' \
+  'fail-open npm registry probe'
 mutate_and_reject package.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.scripts.release="pnpm changeset publish";fs.writeFileSync(p,JSON.stringify(j));' \
   'root publish script'
 
-if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|gh release create|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml >/dev/null; then
-  echo "workflow source contains forbidden publication capability outside the reviewed GHCR workflow" >&2
+if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-prerelease.yml >/dev/null; then
+  echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1
 fi
 node scripts/validate-ghcr-release.mjs

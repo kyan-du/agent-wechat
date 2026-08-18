@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "tag": null,
+  "releaseCommit": null,
+  "releaseTree": null,
+  "intent": {
+    "registry": "https://registry.npmjs.org",
+    "distTag": "next",
+    "packages": [
+      { "name": "@kyan-du/agent-wechat-cli", "version": null },
+      { "name": "@kyan-du/agent-wechat-openclaw", "version": null },
+      { "name": "@kyan-du/agent-wechat-wechaty-puppet", "version": null }
+    ]
+  },
+  "approvals": {
+    "owner": false,
+    "legalRedistribution": false,
+    "protectedEnvironment": false,
+    "trustedPublishers": false,
+    "protectedTagRules": false,
+    "registryStateReconciled": false
+  }
+}
