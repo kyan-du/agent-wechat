@@ -2,9 +2,9 @@
 import assert from "node:assert/strict";
 import { reconcilePublication, verifyOperationReceipt } from "./release-reconciliation.mjs";
 
-const version = "1.2.3-next.4";
+const version = "1.2.3";
 const packages = ["cli", "openclaw", "puppet"].map((name, index) => ({ name: `@scope/${name}`, version, integrity: `sha512-${index}` }));
-const manifest = { publisherWorkflow: ".github/workflows/npm-agent-release.yml", channel: "prerelease", version, commit: "1".repeat(40), tree: "2".repeat(40), distTag: "next", packages };
+const manifest = { publisherWorkflow: ".github/workflows/npm-agent-release.yml", version, commit: "1".repeat(40), tree: "2".repeat(40), distTag: "latest", packages };
 const exists = (item) => ({ name: item.name, kind: "exists", version, integrity: item.integrity, provenance: { state: "verified", repository: "kyan-du/agent-wechat", workflow: manifest.publisherWorkflow, commit: manifest.commit } });
 const absent = (item) => ({ name: item.name, kind: "absent" });
 const tags = (count) => Object.fromEntries(packages.map((item, index) => [item.name, index < count ? version : "old"]));

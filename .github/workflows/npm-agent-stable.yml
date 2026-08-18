@@ -1,77 +1,28 @@
-name: Stable promotion contract validation (inactive)
+name: Retired duplicate npm workflow guard
 
-# This workflow has no registry-write blueprint. npm allows one GitHub Actions
-# Trusted Publisher identity per package, so real stable publication must use
-# .github/workflows/npm-agent-release.yml with channel=stable.
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Exact stable X.Y.Z version to validate
-        required: true
-        type: string
-      release_sha:
-        description: Full immutable stable release commit SHA
-        required: true
-        type: string
-      source_prerelease_manifest_sha256:
-        description: Last canary-passed prerelease manifest sha256
-        required: true
-        type: string
-      canary_receipt_sha256:
-        description: Immutable canary result receipt sha256
-        required: true
-        type: string
       dry_run:
-        description: Validation only; never publishes
+        description: Guard validation only
         required: true
         default: true
         type: boolean
-
-concurrency:
-  group: npm-stable-validation-${{ inputs.version }}-${{ inputs.release_sha }}
-  cancel-in-progress: false
 
 permissions:
   contents: read
   id-token: none
 
 jobs:
-  validate-stable:
-    name: Validate stable promotion contract without publishing
+  retired:
+    name: Prove the second publisher is retired
     runs-on: ubuntu-latest
-    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          cache: pnpm
-      - name: Fail closed before activation
-        env:
-          VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          SOURCE_MANIFEST_SHA256: ${{ inputs.source_prerelease_manifest_sha256 }}
-          CANARY_RECEIPT_SHA256: ${{ inputs.canary_receipt_sha256 }}
-          DRY_RUN: ${{ inputs.dry_run }}
+      - name: Fail closed
         run: |
-          set -euo pipefail
-          test "$DRY_RUN" = true
-          test "$GITHUB_SHA" = "$RELEASE_SHA"
-          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          for digest in "$SOURCE_MANIFEST_SHA256" "$CANARY_RECEIPT_SHA256"; do
-            printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
-          done
-          git fetch origin main --no-tags
-          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false)throw Error("unexpected activation state");if(c.publisherWorkflow!==".github/workflows/npm-agent-release.yml")throw Error("single publisher identity drift")'
-          node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm test:prerelease-contract && pnpm typecheck
-      - name: Explain the stable publisher boundary
-        run: echo 'Stable validation is read-only; channel=stable registry write belongs only to the single inactive publisher workflow and future npm-production approval.'
+          test '${{ inputs.dry_run }}' = true
+          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false||c.publisherWorkflow!==".github/workflows/npm-agent-release.yml"||c.environment!=="npm-production")throw Error("production publisher identity drift")'
+          echo 'The duplicate release workflow is retired; only the exact production workflow may publish.'

@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { reconcilePublication, reconciliationDigest, verifyOperationReceipt } from "./release-reconciliation.mjs";
 
-const packages = ["cli", "openclaw", "puppet"].map((suffix, index) => ({ name: `@scope/${suffix}`, version: "1.2.3-next.4", integrity: `sha512-${index}`, tarball: `${suffix}.tgz` }));
-const manifest = { publisherWorkflow: ".github/workflows/npm-agent-release.yml", channel: "prerelease", version: "1.2.3-next.4", commit: "1".repeat(40), tree: "2".repeat(40), distTag: "next", packages };
+const packages = ["cli", "openclaw", "puppet"].map((suffix, index) => ({ name: `@scope/${suffix}`, version: "1.2.3", integrity: `sha512-${index}`, tarball: `${suffix}.tgz` }));
+const manifest = { publisherWorkflow: ".github/workflows/npm-agent-release.yml", version: "1.2.3", commit: "1".repeat(40), tree: "2".repeat(40), distTag: "latest", packages };
 const exists = (item) => ({ name: item.name, kind: "exists", version: item.version, integrity: item.integrity, provenance: { state: "verified", repository: "kyan-du/agent-wechat", workflow: manifest.publisherWorkflow, commit: manifest.commit } });
 const absent = (item) => ({ name: item.name, kind: "absent" });
-const tags = (count) => Object.fromEntries(packages.map((item, index) => [item.name, index < count ? manifest.version : "1.2.3-next.3"]));
+const tags = (count) => Object.fromEntries(packages.map((item, index) => [item.name, index < count ? manifest.version : "1.2.2"]));
 
 test("fresh release requires all packages absent", () => {
   const receipt = reconcilePublication(manifest, packages.map(absent), tags(0));

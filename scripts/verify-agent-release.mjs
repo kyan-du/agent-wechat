@@ -6,11 +6,10 @@ import { tmpdir } from "node:os";
 import { contract, exactKeys, requireDigest, requireOid, root, sha256Bytes, sha512Integrity, strictJson, validateReleaseIdentity } from "./agent-release-lib.mjs";
 
 export function verifyReleaseManifest(manifest, { artifactDir, expectedChannel, expectedVersion, expectedCommit, expectedManifestSha256 } = {}) {
-  exactKeys(manifest, ["schemaVersion", "validationOnly", "repository", "publisherWorkflow", "channel", "version", "tag", "commit", "tree", "registry", "distTag", "lockfile", "changesets", "packages"], "release manifest");
+  exactKeys(manifest, ["schemaVersion", "validationOnly", "repository", "publisherWorkflow", "version", "tag", "commit", "tree", "registry", "distTag", "lockfile", "changesets", "packages"], "release manifest");
   if (manifest.schemaVersion !== 1 || manifest.validationOnly !== true) throw new Error("release manifest must be schema 1 validation evidence");
   if (manifest.repository !== contract.repository || manifest.registry !== contract.registry || manifest.publisherWorkflow !== contract.publisherWorkflow) throw new Error("release repository/registry/publisher drift");
   validateReleaseIdentity(manifest);
-  if (expectedChannel && manifest.channel !== expectedChannel) throw new Error("release channel drift");
   if (expectedVersion && manifest.version !== expectedVersion) throw new Error("release version drift");
   requireOid(manifest.commit, "release commit");
   requireOid(manifest.tree, "release tree");
@@ -60,7 +59,6 @@ if (process.argv[1]?.endsWith("verify-agent-release.mjs")) {
   if (expectedManifestSha256 && sha256Bytes(raw) !== expectedManifestSha256) throw new Error("release manifest digest mismatch");
   const manifest = verifyReleaseManifest(strictJson(raw.toString("utf8"), "release manifest"), {
     artifactDir,
-    expectedChannel: arg("--channel"),
     expectedVersion: arg("--version"),
     expectedCommit: arg("--commit"),
     expectedManifestSha256,
@@ -73,5 +71,5 @@ if (process.argv[1]?.endsWith("verify-agent-release.mjs")) {
   } finally {
     rmSync(consumer, { recursive: true, force: true });
   }
-  console.log(`verified ${manifest.channel} release artifact set ${manifest.version}`);
+  console.log(`verified formal release artifact set ${manifest.version}`);
 }

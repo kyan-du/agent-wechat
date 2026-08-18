@@ -1,118 +1,88 @@
-# Agent-operated npm release state machine
+# Agent-operated formal npm release
 
-This is Phase 1: implemented but inactive. Merging it cannot publish npm packages, create or push a release tag, mutate a dist-tag, create a GitHub Release, push GHCR, obtain an OIDC token, or change production. `release/agent-release-contract.json` keeps `deploymentEnabled=false`; reachable jobs use `contents: read` and `id-token: none`; the sole write-capable blueprint has literal `if: ${{ false }}`. Bootstrap and activation require a separate exact-head reviewed owner-authorized PR.
+This is a **stable-only** Phase 1 architecture. There is no npm prerelease product flow: no `-next.N`, no `next` dist-tag, no GitHub prerelease, no prerelease Environment, and no canary-to-stable promotion. Future prerelease work requires a new owner-approved design.
 
-## One Trusted Publisher
+Merging this PR cannot publish npm, create a release tag, move `latest`, create a GitHub Release, obtain OIDC, or deploy. `deploymentEnabled=false`; reachable jobs use read-only permissions; the only write blueprint has literal `if: false`.
 
-npm permits one GitHub Actions Trusted Publisher configuration per package. All three public packages must therefore bind one npm-trusted publisher workflow identity: `.github/workflows/npm-agent-release.yml`. That workflow owns both channel inputs:
+## One production publisher
 
-- `channel=prerelease`: `X.Y.Z-next.N`, `next`, GitHub prerelease, `npm-prerelease` Environment.
-- `channel=stable`: `X.Y.Z`, `latest`, final GitHub Release, `npm-production` Environment and canary provenance.
+Each public package has exactly one Trusted Publisher identity:
 
-Sharing the npm-trusted workflow does not merge authorization or approval. Each channel has a new exact owner receipt, fixed version grammar/dist-tag/Release type, and a channel-selected Environment. Stable permanently requires a non-Agent `npm-production` approval. `.github/workflows/npm-agent-stable.yml` is read-only contract validation and cannot be registered as a second publisher.
+- repository: `kyan-du/agent-wechat`
+- workflow: `.github/workflows/npm-agent-release.yml`
+- Environment: `npm-production`
+- version/tag: `X.Y.Z` / `vX.Y.Z`
+- npm dist-tag: `latest`
+- GitHub Release: final, never prerelease
 
-Before activation, npm owner/admin must verify that one Trusted Publisher workflow can be used with both GitHub Environments under npm's Environment binding rules. If not, activation remains blocked; no long-lived token fallback is allowed.
+The Agent never holds npm credentials or a long-lived token. The future production deployment permanently requires a non-Agent Environment approval plus a new exact owner authorization.
 
-## Roles and authorization
+## Deterministic production candidate
 
-The Agent may inspect `main`, prepare a Release PR, coordinate exact-head review/CI, prepare exact evidence, dispatch an approved workflow, and verify remote state. The Agent never decides to publish and never holds npm credentials, Telegram tokens, owner confirmation text, or a locally usable publish secret.
+A clean Release PR exits any old Changesets prerelease state and generates one lockstep stable version for the three public packages. The candidate job:
 
-Normal owner interaction is:
+1. checks out the exact full SHA;
+2. generates manifest and real tarballs twice from `git archive`;
+3. compares all bytes;
+4. verifies exact stable version, commit and supplied manifest sha256;
+5. uploads only the sealed manifest and three `.tgz` files.
 
-1. `Prepare prerelease`: Release PR and read-only evidence only.
-2. `Confirm release <version> @ <full commit>`: exact repository/channel/version/tag/commit/tree/manifest/dist-tag/package/tarball/integrity, operation, authorization ID, nonce and expiry.
+Artifact name binds complete intent: stable version, full commit, and manifest digest. Upload exposes artifact ID/digest/run/attempt; deploy downloads from that exact producer run and re-hashes without rebuilding.
 
-Partial recovery and stable promotion require new explicit confirmation; an old receipt is never reused. The external owner-chat integration must emit only an opaque authorization ID, operation, reconciliation digest when applicable, nonce digest, confirmation-reference digest and timestamps. It must not persist private chat text or nonce plaintext.
+The manifest binds publisher workflow, repository, stable version/tag, commit/tree, registry/`latest`, lockfile, Changesets and each tarball filename/size/sha256/SRI.
+
+## Exact owner authorization
+
+Strict v3 authorization reuses PR #49's protected annotated receipt, exact tag-object/commit ancestry, regular mode-`100644` blob, strict JSON and fail-closed registry rules. It binds:
+
+- repository and exact `X.Y.Z` / `vX.Y.Z`;
+- full commit/tree and manifest digest;
+- npm registry and `latest`;
+- exact package/version/tarball/sha256/SRI;
+- operation (`release` or `reconcile`) and reconciliation digest;
+- authorization ID, nonce digest, confirmation-reference digest and expiry;
+- production Environment, Trusted Publisher, protected tags and registry reconciliation approvals;
+- deterministic consumption identity.
+
+Fresh release requires all three exact versions absent. Partial state requires a new reconcile authorization. Receipt, artifact, registry or operation drift invalidates authorization.
+
+## Atomic consume and recovery
+
+A normal protected Git tag and Actions concurrency group are not a global one-time lock. Activation requires an authenticated external CAS that atomically consumes the authorization and creates exact consumption/release refs before npm write. `consume-release-authorization.mjs` intentionally fails until this exists.
+
+Publishing is non-atomic and phase-specific:
+
+1. **Packages:** publish only missing sealed tarballs under a temporary non-user tag. Existing versions require exact SRI and npm provenance for repository/workflow/source commit/tarball. The provenance verifier remains fail-closed until implemented.
+2. **Latest:** only after all package evidence matches, repair only incorrect `latest` mappings.
+3. **GitHub Release:** create or verify the exact final Release only after `latest` reconciles.
+4. **Post-install:** clean-install exact registry versions and smoke without replaying writes.
+
+Zero missing packages is a valid recovery state. Integrity/provenance/Release identity drift enters owner incident review; an existing formal version is never overwritten or republished.
 
 ## State machine
 
-| State | Evidence | Safe next action |
-| --- | --- | --- |
-| `PREPARED` | Release PR, exact commit/tree, sealed manifest/tarballs | exact review/CI then authorization |
-| `AUTHORIZED` | unused receipt; all exact package versions absent | atomic consume then publish |
-| `PUBLISHING` | Environment-approved run and sealed bytes | partial, reconciled, or failed |
-| `PARTIAL_PUBLICATION` | some exact SRI/provenance verified, some absent | separately authorized missing-only resume |
-| `RECONCILED` | all package bytes verified; phase names dist-tags, Release, or post-install | repair that phase only |
-| `PUBLISHED` | package SRI/provenance, target dist-tags, exact Release, post-install | canary |
-| `CANARY_PASSED` | immutable manifest and canary receipt bytes | stable authorization |
-| `PROMOTED` | stable `latest`, final Release, post-install | terminal |
-| `FAILED` | integrity/provenance/identity ambiguity | next prerelease or owner incident decision |
+`PREPARED → AUTHORIZED → PUBLISHING → PARTIAL_PUBLICATION/RECONCILED → PUBLISHED` or `FAILED`.
 
-## Deterministic Release candidate
-
-Use a clean isolated branch and Changesets:
-
-```bash
-git fetch origin main
-git switch -c release/next-<candidate> origin/main
-pnpm prepare:release-pr -- --channel prerelease
-pnpm install --frozen-lockfile
-pnpm test:release-plan
-pnpm test:release-workflows
-pnpm typecheck
-```
-
-The candidate job checks out the full immutable SHA, generates the manifest and real `.tgz` files twice from `git archive`, compares both complete outputs byte-for-byte, verifies the exact supplied manifest digest/commit/channel/version, then uploads only:
-
-- `agent-release-manifest.json`
-- the three exact tarballs
-
-as `npm-release-<full-sha>`. Deployment downloads and re-hashes that exact artifact; it never rebuilds or runs `npm pack`. The manifest binds the single publisher workflow, repository/channel/version/tag, commit/tree, registry/dist-tag, lockfile, changesets, and every tarball filename/size/sha256/SRI.
-
-## Exact authorization and atomic consumption
-
-The v2 receipt reuses PR #49's strict JSON, protected one-hop annotated receipt tag, exact tag-object/commit ancestry, regular mode-`100644` blob, main containment, and fail-closed intent gates. It adds channel, operation, manifest/tarball integrity, opaque ID, nonce digest, confirmation-reference digest, expiry, reconciliation digest and deterministic consumption identity.
-
-A normal protected Git tag and per-input Actions concurrency group are not a global one-time lock. Two runs can race an absence probe. The activation design therefore requires an authenticated external atomic compare-and-create boundary that:
-
-1. authenticates the exact receipt before replay lookup;
-2. atomically consumes the authorization ID and creates the protected consumption/release refs, or proves the exact prior result;
-3. returns failure to every competing run before registry write.
-
-`scripts/consume-release-authorization.mjs` is intentionally fail-closed until that CAS service exists. A normal `git push`, even with `--atomic`, is not accepted as the one-time consumption implementation.
-
-## Publication and phase recovery
-
-Before any release marker, tag, or registry write, the workflow reconciles remote state and checks it against the authorized operation:
-
-- `operation=release` requires all three exact versions absent.
-- `operation=reconcile` requires the exact separately authorized reconciliation artifact digest and partial/reconciled state.
-- Existing bytes count as verified only when version, SRI, repository, publisher workflow, source commit and npm provenance/attestation all match. `scripts/verify-npm-provenance.mjs` intentionally blocks activation until a real Sigstore/npm attestation verifier is implemented.
-
-The publisher then uploads missing sealed tarballs under a non-user staging tag. Zero missing items is a valid resume: publishing is skipped. After each phase it re-queries public npm and records a receipt.
-
-Recovery is phase-specific:
-
-1. **Packages:** publish only missing items; never republish an existing exact version.
-2. **Dist-tags:** after all package SRI/provenance match, repair only package mappings not equal to `next` or `latest`.
-3. **GitHub Release:** after all target mappings match, create or verify the exact prerelease/final Release idempotently.
-4. **Post-install:** registry exact-version clean-install/import/CLI smoke; no earlier write is repeated.
-
-Fresh `operation=release` is rejected for every partial package state. Any SRI/provenance/GitHub Release identity drift fails closed. The crash matrix covers before/after each package, each dist-tag, release/consumption tag boundary, and GitHub Release creation.
-
-## Stable promotion
-
-Stable validation binds actual immutable bytes, not digest-shaped strings. `release/stable-promotion.json` identifies the prerelease manifest and canary receipt paths and hashes. `scripts/verify-stable-promotion.mjs`:
-
-- re-hashes and structurally verifies the prerelease manifest;
-- re-hashes strict canary JSON and requires `CANARY_PASSED` with exact repository, single publisher workflow, version, commit, tree and manifest digest;
-- verifies both Git commit trees;
-- uses a code-owned fixed path allowlist plus package version/changelog metadata. The receipt cannot expand policy.
-
-Any source difference requires another prerelease review/canary and cannot be called promotion.
+- `PREPARED`: reviewed Release PR and sealed bytes.
+- `AUTHORIZED`: fresh exact versions absent and one-time receipt valid.
+- `PARTIAL_PUBLICATION`: some exact bytes exist; new reconcile authorization required.
+- `RECONCILED`: package, `latest`, Release or post-install phase has one bounded next action.
+- `PUBLISHED`: package integrity/provenance, three `latest` mappings, final Release and registry smoke verified.
+- `FAILED`: ambiguity or drift; owner incident decision.
 
 ## Phase 2 blockers
 
 None are completed by this PR:
 
-- **Owner/product:** candidate choice, exact irreversible authorization, canary decision and stable promotion.
-- **Legal/product:** exact npm content approval; GHCR/WeChat redistribution remains separate.
-- **npm owner:** package ownership/bootstrap and one Trusted Publisher per package bound to `.github/workflows/npm-agent-release.yml`; verify dual-Environment compatibility.
-- **Repository admin:** protected `npm-prerelease`/`npm-production` Environments with non-Agent stable reviewer; release/auth/consumption rulesets.
-- **Atomic consume integration:** authenticated global CAS before registry writes.
-- **Provenance integration:** retrieve and cryptographically verify npm attestation against repository/workflow/commit/tarball.
-- **Registry state:** independently reconcile existing `0.12.0-next.0` and historical `next`/`latest` mappings.
-- **Owner-confirmation integration:** authenticated private confirmation to opaque receipt/nonce transport without secret/chat leakage.
-- **Activation PR:** enable only after all blockers have evidence, exact-head CI and independent formal review.
+- owner exact irreversible authorization;
+- legal/product approval of exact npm contents;
+- npm package ownership and Trusted Publisher binding to the one workflow + `npm-production`;
+- protected `npm-production` Environment with non-Agent reviewer;
+- protected release/auth/consumption tag rules;
+- authenticated owner-confirmation transport without chat/secret leakage;
+- global atomic consume/CAS integration;
+- npm/Sigstore provenance verifier;
+- reconciliation of historical `0.12.0-next.0`, `next`, and `latest` state; a new absent stable `X.Y.Z` is required;
+- separate activation PR with exact-head CI and independent formal review.
 
-The first real prerelease still requires GitHub Environment approval. Stable approval is permanent. GHCR remains independent and is never dispatched by npm success.
+GHCR and WeChat redistribution remain independent legal/product gates and are never triggered by npm success.

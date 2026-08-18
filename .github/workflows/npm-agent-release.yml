@@ -1,18 +1,10 @@
-name: Agent-operated npm release (inactive)
+name: Agent-operated npm production release (inactive)
 
-# npm permits one GitHub Actions Trusted Publisher identity per package. Both
-# channels therefore share this exact workflow filename while retaining separate
-# Environment, authorization, version, dist-tag, canary, and Release semantics.
 on:
   workflow_dispatch:
     inputs:
-      channel:
-        description: Exact release channel
-        required: true
-        type: choice
-        options: [prerelease, stable]
       version:
-        description: Exact X.Y.Z-next.N or X.Y.Z version
+        description: Exact formal X.Y.Z version
         required: true
         type: string
       release_sha:
@@ -36,14 +28,6 @@ on:
         description: Required exact PARTIAL_PUBLICATION receipt digest for reconcile
         required: false
         type: string
-      source_prerelease_manifest_sha256:
-        description: Stable only - last canary-passed prerelease manifest sha256
-        required: false
-        type: string
-      canary_receipt_sha256:
-        description: Stable only - immutable canary result receipt sha256
-        required: false
-        type: string
       dry_run:
         description: Validation only; deployment activation is not part of this PR
         required: true
@@ -51,7 +35,7 @@ on:
         type: boolean
 
 concurrency:
-  group: npm-agent-release-${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.authorization_id }}
+  group: npm-production-${{ inputs.version }}-${{ inputs.manifest_sha256 }}-${{ inputs.authorization_id }}
   cancel-in-progress: false
 
 permissions:
@@ -60,9 +44,11 @@ permissions:
 
 jobs:
   validate:
-    name: Validate explicit immutable ${{ inputs.channel }} intent
+    name: Validate explicit immutable production intent
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    outputs:
+      artifact_name: ${{ steps.intent.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -74,24 +60,22 @@ jobs:
         with:
           node-version: 22.14.0
           cache: pnpm
-      - name: Pin the Trusted Publishing npm consumer
-        run: npm install --global npm@11.5.1
-      - name: Reject mutable, ambiguous, or activated input
+      - run: npm install --global npm@11.5.1
+      - id: intent
+        name: Reject mutable, prerelease, or activated input
         env:
-          CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
           AUTHORIZATION_ID: ${{ inputs.authorization_id }}
           OPERATION: ${{ inputs.operation }}
           RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
-          SOURCE_MANIFEST_SHA256: ${{ inputs.source_prerelease_manifest_sha256 }}
-          CANARY_RECEIPT_SHA256: ${{ inputs.canary_receipt_sha256 }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           test "$DRY_RUN" = true
           test "$GITHUB_SHA" = "$RELEASE_SHA"
+          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
           printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$MANIFEST_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
           printf '%s' "$AUTHORIZATION_ID" | grep -Eq '^[0-9a-f]{32}$'
@@ -101,44 +85,36 @@ jobs:
             test "$OPERATION" = release
             test -z "$RECONCILIATION_SHA256"
           fi
-          case "$CHANNEL" in
-            prerelease)
-              printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+-next\.[0-9]+$'
-              test -z "$SOURCE_MANIFEST_SHA256"
-              test -z "$CANARY_RECEIPT_SHA256"
-              ;;
-            stable)
-              printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-              printf '%s' "$SOURCE_MANIFEST_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
-              printf '%s' "$CANARY_RECEIPT_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
-              ;;
-            *) exit 1 ;;
-          esac
           git fetch origin main --no-tags
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false)throw Error("unexpected activation state")'
-          node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs
-      - name: Install, validate, build, pack, and clean-install exact source
+          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false||c.environment!=="npm-production"||c.distTag!=="latest")throw Error("unexpected activation state")'
+          artifact_name="npm-production-${VERSION}-${RELEASE_SHA}-${MANIFEST_SHA256#sha256:}"
+          printf 'artifact_name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
+      - name: Install, test, build, and prove inactive contracts
         env:
           CI: true
         run: |
           pnpm install --frozen-lockfile
           pnpm test:prerelease-contract
+          pnpm test:release-plan
+          pnpm test:release-workflows
           pnpm typecheck
           pnpm -r --if-present test
           pnpm turbo run build --filter='!@kyan-du/agent-wechat-docs'
           node scripts/test-npm-release-authorization.mjs
           node scripts/validate-release-boundary.mjs
-      - name: Explain inert deployment boundary
-        run: echo 'No tag, npm write, dist-tag mutation, GitHub Release, or OIDC token is reachable while deploymentEnabled=false.'
 
   candidate:
-    name: Seal deterministic reviewed candidate
+    name: Seal deterministic production candidate
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
       contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -153,38 +129,41 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Generate twice and compare the complete candidate byte-for-byte
         env:
-          CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p .release-candidate/first .release-candidate/second
-          node scripts/prepare-agent-release.mjs --channel "$CHANNEL" --output .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs
-          node scripts/prepare-agent-release.mjs --channel "$CHANNEL" --output .release-candidate/second/agent-release-manifest.json --artifacts .release-candidate/second/tarballs
+          node scripts/prepare-agent-release.mjs --output .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs
+          node scripts/prepare-agent-release.mjs --output .release-candidate/second/agent-release-manifest.json --artifacts .release-candidate/second/tarballs
           cmp .release-candidate/first/agent-release-manifest.json .release-candidate/second/agent-release-manifest.json
           diff -qr .release-candidate/first/tarballs .release-candidate/second/tarballs
-          node scripts/verify-agent-release.mjs --manifest .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs --channel "$CHANNEL" --version "$VERSION" --commit "$RELEASE_SHA" --manifest-sha256 "$MANIFEST_SHA256"
+          node scripts/verify-agent-release.mjs --manifest .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs --version "$VERSION" --commit "$RELEASE_SHA" --manifest-sha256 "$MANIFEST_SHA256"
           rm -rf .release-candidate/second
           mv .release-candidate/first/agent-release-manifest.json .release-candidate/
           mv .release-candidate/first/tarballs .release-candidate/
           rmdir .release-candidate/first
-      - uses: actions/upload-artifact@v4
+      - id: upload
+        uses: actions/upload-artifact@v4
         with:
-          name: npm-release-${{ inputs.release_sha }}
+          name: ${{ needs.validate.outputs.artifact_name }}
           path: |
             .release-candidate/agent-release-manifest.json
             .release-candidate/tarballs/*.tgz
           if-no-files-found: error
           retention-days: 7
+      - name: Bind artifact producer identity
+        run: |
+          test -n '${{ steps.upload.outputs.artifact-id }}'
+          echo 'artifact-id=${{ steps.upload.outputs.artifact-id }} digest=${{ steps.upload.outputs.artifact-digest }} run=${{ github.run_id }} attempt=${{ github.run_attempt }}'
 
   deploy:
-    name: Unreachable ${{ inputs.channel }} deployment blueprint
-    needs: candidate
+    name: Unreachable production deployment blueprint
+    needs: [validate, candidate]
     if: ${{ false }} # Activation requires a separate exact-head reviewed PR.
     runs-on: ubuntu-latest
-    environment:
-      name: ${{ inputs.channel == 'stable' && 'npm-production' || 'npm-prerelease' }}
+    environment: npm-production
     permissions:
       contents: write
       id-token: write
@@ -196,18 +175,21 @@ jobs:
           persist-credentials: true
       - uses: actions/download-artifact@v4
         with:
-          name: npm-release-${{ inputs.release_sha }}
+          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
           path: .release-candidate
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Bind downloaded artifact to producer digest
+        run: |
+          test -n '${{ needs.candidate.outputs.artifact_id }}'
+          test -n '${{ needs.candidate.outputs.artifact_digest }}'
       - uses: actions/setup-node@v4
         with:
           node-version: 22.14.0
           registry-url: https://registry.npmjs.org
       - run: npm install --global npm@11.5.1
-      - name: Re-hash the sealed candidate without rebuilding
-        run: node scripts/verify-agent-release.mjs --manifest .release-candidate/agent-release-manifest.json --artifacts .release-candidate/tarballs --channel "${{ inputs.channel }}" --version "${{ inputs.version }}" --commit "${{ inputs.release_sha }}" --manifest-sha256 "${{ inputs.manifest_sha256 }}"
-      - name: Reverify stable canary provenance
-        if: ${{ inputs.channel == 'stable' }}
-        run: node scripts/verify-stable-promotion.mjs release/stable-promotion.json
+      - name: Re-hash sealed production candidate without rebuilding
+        run: node scripts/verify-agent-release.mjs --manifest .release-candidate/agent-release-manifest.json --artifacts .release-candidate/tarballs --version "${{ inputs.version }}" --commit "${{ inputs.release_sha }}" --manifest-sha256 "${{ inputs.manifest_sha256 }}"
       - name: Fetch and authenticate authorization before replay lookup
         env:
           RELEASE_AUTHORIZATION_NONCE: ${{ secrets.RELEASE_AUTHORIZATION_NONCE }}
@@ -219,7 +201,7 @@ jobs:
           authorization_ref="refs/tags/npm-release-auth/v$VERSION/$AUTHORIZATION_ID"
           git fetch origin "$authorization_ref:$authorization_ref" --no-tags
           node scripts/verify-npm-release-authorization.mjs .release-candidate/agent-release-manifest.json "${{ inputs.release_sha }}" "$authorization_ref" "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" "$AUTHORIZATION_ID" --skip-consumption-lookup
-      - name: Authenticate operation against exact registry state before any release write
+      - name: Authenticate operation against exact registry state before writes
         env:
           RELEASE_OPERATION: ${{ inputs.operation }}
           RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
@@ -230,62 +212,33 @@ jobs:
           if [ "$RELEASE_OPERATION" = reconcile ]; then operation_args+=(--reconciliation-sha256 "$RECONCILIATION_SHA256"); fi
           node scripts/verify-release-operation.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}"
           node scripts/select-npm-release-artifacts.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}" --output publish-list.txt
-      - name: Atomically consume authorization and create immutable annotated release tag
+      - name: Atomically consume authorization and create annotated tag
         env:
-          RELEASE_AUTHORIZATION_NONCE: ${{ secrets.RELEASE_AUTHORIZATION_NONCE }}
           AUTHORIZATION_ID: ${{ inputs.authorization_id }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           VERSION: ${{ inputs.version }}
-          RELEASE_OPERATION: ${{ inputs.operation }}
-          RELEASE_RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
         run: |
-          set -euo pipefail
-          authorization_ref="refs/tags/npm-release-auth/v$VERSION/$AUTHORIZATION_ID"
-          git fetch origin "$authorization_ref:$authorization_ref" --no-tags
-          node scripts/verify-npm-release-authorization.mjs \
-            .release-candidate/agent-release-manifest.json "$RELEASE_SHA" "$authorization_ref" \
-            "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" "$AUTHORIZATION_ID"
           consumption="npm-release-consumed/v$VERSION/$AUTHORIZATION_ID"
-          if [ "$RELEASE_OPERATION" = release ]; then
-            git tag -a "$consumption" "$RELEASE_SHA" -m "Consume npm release authorization $AUTHORIZATION_ID"
-            git tag -a "v$VERSION" "$RELEASE_SHA" -m "Release v$VERSION"
-            # The activation PR must replace this placeholder with a server-side
-            # compare-and-create service covering both refs. A normal git push,
-            # even --atomic, is not a global one-time CAS across concurrent runs.
-            node scripts/consume-release-authorization.mjs --atomic-cas-required --consumption "$consumption" --release-tag "v$VERSION" --target "$RELEASE_SHA"
-          else
-            git show-ref --verify "refs/tags/$consumption"
-            git show-ref --verify "refs/tags/v$VERSION"
-          fi
-      - name: Publish only missing exact reviewed tarballs under staging tags
+          node scripts/consume-release-authorization.mjs --atomic-cas-required --consumption "$consumption" --release-tag "v$VERSION" --target "$RELEASE_SHA"
+      - name: Publish only missing sealed tarballs with provenance
         env:
           NPM_CONFIG_PROVENANCE: 'true'
         run: |
-          set -euo pipefail
           while IFS= read -r tarball; do
             test -n "$tarball" || continue
             npm publish ".release-candidate/tarballs/$tarball" --tag "agent-stage-${{ inputs.version }}" --access public --provenance
           done < publish-list.txt
-      - name: Verify all registry integrity before exposing a channel
+      - name: Verify package integrity and provenance before latest
         run: node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --output reconciliation-complete.json
-      - name: Advance all three channel mappings only after complete reconciliation
+      - name: Advance only incorrect latest mappings
         env:
-          CHANNEL: ${{ inputs.channel }}
           VERSION: ${{ inputs.version }}
         run: |
-          set -euo pipefail
-          case "$CHANNEL" in prerelease) dist_tag=next ;; stable) dist_tag=latest ;; *) exit 1 ;; esac
-          npm dist-tag add "@kyan-du/agent-wechat-cli@$VERSION" "$dist_tag"
-          npm dist-tag add "@kyan-du/agent-wechat-openclaw@$VERSION" "$dist_tag"
-          npm dist-tag add "@kyan-du/agent-wechat-wechaty-puppet@$VERSION" "$dist_tag"
+          npm dist-tag add "@kyan-du/agent-wechat-cli@$VERSION" latest
+          npm dist-tag add "@kyan-du/agent-wechat-openclaw@$VERSION" latest
+          npm dist-tag add "@kyan-du/agent-wechat-wechaty-puppet@$VERSION" latest
           node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --require-dist-tags --output reconciliation-final.json
-      - name: Create GitHub prerelease after registry reconciliation
-        if: ${{ inputs.channel == 'prerelease' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "v${{ inputs.version }}" --verify-tag --prerelease --generate-notes --title "v${{ inputs.version }}"
       - name: Create final GitHub Release after registry reconciliation
-        if: ${{ inputs.channel == 'stable' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "v${{ inputs.version }}" --verify-tag --generate-notes --title "v${{ inputs.version }}"

@@ -5,7 +5,7 @@ import { verifyAuthorizationReceipt } from "./release-authorization.mjs";
 
 const commit = "1".repeat(40);
 const tree = "2".repeat(40);
-const version = "1.2.3-next.4";
+const version = "1.2.3";
 const packages = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"].map((name) => ({
   name,
   version,
@@ -15,22 +15,22 @@ const packages = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw",
   size: 1,
 }));
 const manifest = {
-  schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", channel: "prerelease", version,
-  tag: `v${version}`, commit, tree, registry: "https://registry.npmjs.org", distTag: "next",
+  schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", version,
+  tag: `v${version}`, commit, tree, registry: "https://registry.npmjs.org", distTag: "latest",
   lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages,
 };
 const nonce = "owner-supplied-one-time-nonce";
 const manifestSha256 = `sha256:${"5".repeat(64)}`;
 function receipt() {
   return {
-    schemaVersion: 2, enabled: true, repository: manifest.repository, channel: manifest.channel,
+    schemaVersion: 3, enabled: true, repository: manifest.repository,
     authorizationId: "a".repeat(32), operation: "release", reconciliationSha256: null,
     nonceSha256: sha256Bytes(Buffer.from(nonce)),
     ownerConfirmationRefSha256: `sha256:${"6".repeat(64)}`,
     issuedAt: "2026-08-18T00:00:00.000Z", expiresAt: "2026-08-18T00:15:00.000Z",
     release: { tag: manifest.tag, commit, tree, manifestSha256 },
     intent: { registry: manifest.registry, distTag: manifest.distTag, packages: packages.map(({ name, version: v, tarball, sha256, integrity }) => ({ name, version: v, tarball, sha256, integrity })) },
-    approvals: { owner: true, legalRedistribution: true, protectedEnvironment: true, trustedPublishers: true, protectedTagRules: true, registryStateReconciled: true },
+    approvals: { owner: true, legalRedistribution: true, productionEnvironment: true, trustedPublishers: true, protectedTagRules: true, registryStateReconciled: true },
     consumption: { state: "unused", tag: `npm-release-consumed/${manifest.tag}/${"a".repeat(32)}` },
   };
 }
@@ -54,7 +54,7 @@ for (const [name, mutate, error] of [
   ["tree drift", (r) => { r.release.tree = "9".repeat(40); }, /release identity drift/],
   ["manifest drift", (r) => { r.release.manifestSha256 = `sha256:${"9".repeat(64)}`; }, /manifest digest drift/],
   ["artifact drift", (r) => { r.intent.packages[1].integrity = "sha512-BBBB"; }, /package integrity drift/],
-  ["dist-tag drift", (r) => { r.intent.distTag = "latest"; }, /dist-tag must be next/],
+  ["dist-tag drift", (r) => { r.intent.distTag = "next"; }, /must be latest/],
   ["missing approval", (r) => { r.approvals.owner = false; }, /not approved: owner/],
   ["unknown field", (r) => { r.secret = "must fail"; }, /exact schema/],
   ["consumption identity drift", (r) => { r.consumption.tag = "npm-release-consumed/wrong"; }, /invalid consumption identity/],

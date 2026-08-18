@@ -44,18 +44,11 @@ export function requireDigest(value, label) {
   return value;
 }
 
-export function channelContract(channel) {
-  const selected = contract.channels[channel];
-  if (!selected) throw new Error(`unsupported release channel: ${channel}`);
-  return selected;
-}
-
-export function validateReleaseIdentity({ channel, version, tag, distTag }) {
-  const selected = channelContract(channel);
-  if (!(new RegExp(selected.versionPattern)).test(version ?? "")) throw new Error(`${channel} version is invalid: ${version}`);
-  if (tag !== `v${version}` || !(new RegExp(selected.tagPattern)).test(tag)) throw new Error(`${channel} tag/version mismatch`);
-  if (distTag !== selected.distTag) throw new Error(`${channel} dist-tag must be ${selected.distTag}`);
-  return selected;
+export function validateReleaseIdentity({ version, tag, distTag }) {
+  if (!(new RegExp(contract.versionPattern)).test(version ?? "")) throw new Error(`stable version is invalid: ${version}`);
+  if (tag !== `v${version}` || !(new RegExp(contract.tagPattern)).test(tag)) throw new Error("stable tag/version mismatch");
+  if (distTag !== contract.distTag) throw new Error(`stable dist-tag must be ${contract.distTag}`);
+  return contract;
 }
 
 export function git(args, cwd = root) {

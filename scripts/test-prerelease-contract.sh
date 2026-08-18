@@ -82,8 +82,11 @@ mutate_and_reject .github/workflows/npm-agent-release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Activation", "if: ${{ always() }} # Activation"));' \
   'inactive single-publisher deployment activation'
 mutate_and_reject .github/workflows/npm-agent-stable.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: echo '\''Stable validation", "run: npm publish package.tgz --tag latest && echo '\''Stable validation"));' \
-  'second stable publisher capability'
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: |\n          test", "run: |\n          npm publish package.tgz --tag latest\n          test"));' \
+  'retired duplicate publisher capability'
+mutate_and_reject release/agent-release-contract.json \
+  'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.distTag="next";fs.writeFileSync(p,JSON.stringify(j));' \
+  'formal publisher changed to next'
 
 node scripts/test-agent-release-workflows.mjs
 node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs

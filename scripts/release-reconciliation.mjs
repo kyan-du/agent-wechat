@@ -34,7 +34,7 @@ export function reconcilePublication(manifest, remotePackages, currentDistTags =
   if (drift.length || githubRelease.state === "drift") {
     state = "FAILED";
     phase = "blocked";
-    nextAction = manifest.channel === "prerelease" ? "ABANDON_VERSION_AND_PREPARE_NEXT" : "INCIDENT_AND_OWNER_REVIEW";
+    nextAction = "INCIDENT_AND_OWNER_REVIEW";
   } else if (verified.length !== packages.length) {
     state = verified.length ? "PARTIAL_PUBLICATION" : "AUTHORIZED";
     phase = "packages";
@@ -56,7 +56,7 @@ export function reconcilePublication(manifest, remotePackages, currentDistTags =
     schemaVersion: 2,
     state,
     phase,
-    release: { channel: manifest.channel, version: manifest.version, commit: manifest.commit, tree: manifest.tree },
+    release: { version: manifest.version, commit: manifest.commit, tree: manifest.tree },
     packages,
     distTags,
     githubRelease,
@@ -71,8 +71,8 @@ export function reconciliationDigest(receipt) {
 export function verifyOperationReceipt(receipt, manifest, { operation, expectedDigest } = {}) {
   exactKeys(receipt, ["schemaVersion", "state", "phase", "release", "packages", "distTags", "githubRelease", "nextAction"], "reconciliation receipt");
   if (receipt.schemaVersion !== 2 || !publicationStates.includes(receipt.state)) throw new Error("invalid reconciliation state");
-  exactKeys(receipt.release, ["channel", "version", "commit", "tree"], "reconciliation release");
-  for (const key of ["channel", "version", "commit", "tree"]) if (receipt.release[key] !== manifest[key]) throw new Error(`reconciliation ${key} drift`);
+  exactKeys(receipt.release, ["version", "commit", "tree"], "reconciliation release");
+  for (const key of ["version", "commit", "tree"]) if (receipt.release[key] !== manifest[key]) throw new Error(`reconciliation ${key} drift`);
   if (expectedDigest) {
     requireDigest(expectedDigest, "expected reconciliation digest");
     if (reconciliationDigest(receipt) !== expectedDigest) throw new Error("reconciliation receipt digest drift");

@@ -7,7 +7,7 @@ import { sha256Bytes, sha512Integrity, validateReleaseIdentity } from "./agent-r
 import { verifyReleaseManifest } from "./verify-agent-release.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-release-test-"));
-const version = "1.2.3-next.4";
+const version = "1.2.3";
 const names = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"];
 function fixture() {
   const packages = names.map((name, index) => {
@@ -17,19 +17,18 @@ function fixture() {
     return { name, version, tarball, sha256: sha256Bytes(bytes), integrity: sha512Integrity(bytes), size: bytes.length };
   });
   return {
-    schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", channel: "prerelease", version,
-    tag: `v${version}`, commit: "1".repeat(40), tree: "2".repeat(40), registry: "https://registry.npmjs.org", distTag: "next",
+    schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", version,
+    tag: `v${version}`, commit: "1".repeat(40), tree: "2".repeat(40), registry: "https://registry.npmjs.org", distTag: "latest",
     lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"3".repeat(64)}` },
     changesets: [{ path: ".changeset/a.md", sha256: `sha256:${"4".repeat(64)}` }], packages,
   };
 }
 
 test.after(() => rmSync(dir, { recursive: true, force: true }));
-test("prerelease and stable identities are channel separated", () => {
-  assert.equal(validateReleaseIdentity({ channel: "prerelease", version, tag: `v${version}`, distTag: "next" }).environment, "npm-prerelease");
-  assert.equal(validateReleaseIdentity({ channel: "stable", version: "1.2.3", tag: "v1.2.3", distTag: "latest" }).environment, "npm-production");
-  assert.throws(() => validateReleaseIdentity({ channel: "stable", version, tag: `v${version}`, distTag: "latest" }), /stable version is invalid/);
-  assert.throws(() => validateReleaseIdentity({ channel: "prerelease", version, tag: `v${version}`, distTag: "latest" }), /must be next/);
+test("only formal stable identity is accepted", () => {
+  assert.equal(validateReleaseIdentity({ version, tag: `v${version}`, distTag: "latest" }).environment, "npm-production");
+  assert.throws(() => validateReleaseIdentity({ version: "1.2.3-next.4", tag: "v1.2.3-next.4", distTag: "next" }), /stable version is invalid/);
+  assert.throws(() => validateReleaseIdentity({ version, tag: `v${version}`, distTag: "next" }), /must be latest/);
 });
 test("canonical manifest passes structural verification", () => assert.equal(verifyReleaseManifest(fixture()).version, version));
 test("unknown manifest keys fail closed", () => { const value = fixture(); value.extra = true; assert.throws(() => verifyReleaseManifest(value), /exact schema/); });

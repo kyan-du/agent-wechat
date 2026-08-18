@@ -3,17 +3,16 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { channelContract, contract, git, root, sha256Bytes, sha512Integrity } from "./agent-release-lib.mjs";
+import { contract, git, root, sha256Bytes, sha512Integrity } from "./agent-release-lib.mjs";
 
 function arg(name) {
   const index = process.argv.indexOf(name);
   return index < 0 ? undefined : process.argv[index + 1];
 }
-const channel = arg("--channel");
+if (arg("--channel")) throw new Error("release channels are unsupported; only a formal stable release exists");
 const output = arg("--output");
 const artifactDir = arg("--artifacts");
-if (!channel || !output || !artifactDir) throw new Error("usage: prepare-agent-release.mjs --channel <prerelease|stable> --output <manifest.json> --artifacts <directory>");
-const selected = channelContract(channel);
+if (!output || !artifactDir) throw new Error("usage: prepare-agent-release.mjs --output <manifest.json> --artifacts <directory>");
 if (git(["status", "--porcelain", "--untracked-files=no"])) throw new Error("tracked checkout must be clean");
 const commit = git(["rev-parse", "HEAD^{commit}"]);
 const tree = git(["rev-parse", "HEAD^{tree}"]);
@@ -39,7 +38,7 @@ try {
     const packageDir = join(stage, item.path);
     const packageManifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
     if (packageManifest.name !== item.name) throw new Error(`package identity drift: ${item.path}`);
-    if (!(new RegExp(selected.versionPattern)).test(packageManifest.version)) throw new Error(`${item.name} has invalid ${channel} version ${packageManifest.version}`);
+    if (!(new RegExp(contract.versionPattern)).test(packageManifest.version)) throw new Error(`${item.name} has invalid stable version ${packageManifest.version}`);
     const report = JSON.parse(run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", artifactsPath], packageDir, true))[0];
     const tarballPath = join(artifactsPath, report.filename);
     const bytes = readFileSync(tarballPath);
@@ -83,13 +82,12 @@ try {
     validationOnly: true,
     repository: contract.repository,
     publisherWorkflow: contract.publisherWorkflow,
-    channel,
     version,
     tag: `v${version}`,
     commit,
     tree,
     registry: contract.registry,
-    distTag: selected.distTag,
+    distTag: contract.distTag,
     lockfile: { path: "pnpm-lock.yaml", sha256: sha256Bytes(readFileSync(join(stage, "pnpm-lock.yaml"))) },
     changesets,
     packages,

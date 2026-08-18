@@ -147,4 +147,6 @@ const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");
 if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md")) || !existsSync(join(root, "docs", "release", "AGENT-OPERATED-RELEASE.md"))) fail("release runbook is missing");
 
-console.log(`prerelease contract valid: next only; ${contract.publicPackages.length} public packages; approved workflows are capability-scoped`);
+if (agentReleaseContract.environment !== "npm-production" || agentReleaseContract.distTag !== "latest" || agentReleaseContract.githubPrerelease !== false) fail("formal production release identity drift");
+if (/next|prerelease/i.test(JSON.stringify({ environment: agentReleaseContract.environment, versionPattern: agentReleaseContract.versionPattern, distTag: agentReleaseContract.distTag }))) fail("Agent release contract retained prerelease identity");
+console.log(`release contracts valid: legacy next remains inert; formal publisher is stable-only for ${contract.publicPackages.length} public packages`);

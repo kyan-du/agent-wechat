@@ -1,8 +1,7 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "enabled": false,
   "repository": "kyan-du/agent-wechat",
-  "channel": null,
   "authorizationId": null,
   "operation": null,
   "reconciliationSha256": null,
@@ -18,7 +17,7 @@
   },
   "intent": {
     "registry": "https://registry.npmjs.org",
-    "distTag": null,
+    "distTag": "latest",
     "packages": [
       {
         "name": "@kyan-du/agent-wechat-cli",
@@ -46,7 +45,7 @@
   "approvals": {
     "owner": false,
     "legalRedistribution": false,
-    "protectedEnvironment": false,
+    "productionEnvironment": false,
     "trustedPublishers": false,
     "protectedTagRules": false,
     "registryStateReconciled": false
