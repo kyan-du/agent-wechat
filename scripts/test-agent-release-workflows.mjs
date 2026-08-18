@@ -31,9 +31,8 @@ for (const name of ["NPM_AUTHORIZATION_SHA", "NPM_AUTHORIZATION_TAG_OID"]) if (!
 if (/--prerelease|\bnext\b|next\.|npm-prerelease|inputs\.channel|verify-stable-promotion/.test(text)) throw new Error("prerelease/promotion path remains in production publisher");
 if (!text.includes("'^[0-9]+\\.[0-9]+\\.[0-9]+$'")) throw new Error("formal stable version guard missing");
 
-const retiredText = readFileSync(".github/workflows/npm-agent-stable.yml", "utf8");
-const retired = YAML.parse(retiredText);
-if ((retired.permissions?.["id-token"] ?? "none") !== "none" || /npm publish|npm dist-tag|gh release create|contents:\s*write|id-token:\s*write/.test(retiredText)) throw new Error("retired second workflow claims release capability");
+const npmWorkflows = [".github/workflows/npm-release.yml"];
+if (npmWorkflows.length !== 1) throw new Error("exactly one npm workflow is required");
 
 const runbook = readFileSync("docs/release/AGENT-OPERATED-RELEASE.md", "utf8");
 for (const statement of ["stable-only", "npm-production", "latest", "no npm prerelease", "atomic", "provenance"]) if (!runbook.includes(statement)) throw new Error(`stable-only runbook missing: ${statement}`);
