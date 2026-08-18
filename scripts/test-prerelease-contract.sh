@@ -48,13 +48,13 @@ mutate_and_reject .changeset/risk-anti-detection.md \
 mutate_and_reject .changeset/risk-anti-detection.md \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\" minor"));' \
   'malformed changeset YAML'
-mutate_and_reject .github/workflows/release.yml \
+mutate_and_reject .github/workflows/release-validation.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: ./scripts/test-prerelease-contract.sh","run: npm publish --tag next"));' \
   'npm publish capability'
-mutate_and_reject .github/workflows/release.yml \
+mutate_and_reject .github/workflows/release-validation.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("- name: Prove validation-only contract\n        run: ./scripts/test-prerelease-contract.sh","- uses: docker/build-push-action@v6\n        with:\n          push: true"));' \
   'image push capability'
-mutate_and_reject .github/workflows/release.yml \
+mutate_and_reject .github/workflows/release-validation.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("- name: Prove validation-only contract\n        run: ./scripts/test-prerelease-contract.sh","- uses: softprops/action-gh-release@v2"));' \
   'GitHub Release capability'
 mutate_and_reject package.json \

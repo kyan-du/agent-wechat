@@ -112,7 +112,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     }
   }
 }
-const releaseWorkflow = parseYaml(readFileSync(join(workflowDir, "release.yml"), "utf8"));
+const releaseWorkflow = parseYaml(readFileSync(join(workflowDir, "release-validation.yml"), "utf8"));
 const releaseTriggers = releaseWorkflow.on ?? releaseWorkflow.true ?? {};
 for (const event of ["pull_request", "push", "workflow_dispatch"]) if (!(event in releaseTriggers)) fail(`release validation workflow must exercise ${event}`);
 if (forbidden.length) fail(`workflow publication capability detected:\n${forbidden.join("\n")}`);
@@ -135,6 +135,6 @@ if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md")) || !existsSyn
 
 if (agentReleaseContract.environment !== "npm-production" || agentReleaseContract.distTag !== "latest" || agentReleaseContract.githubPrerelease !== false) fail("formal production release identity drift");
 if (/next|prerelease/i.test(JSON.stringify({ environment: agentReleaseContract.environment, versionPattern: agentReleaseContract.versionPattern, distTag: agentReleaseContract.distTag }))) fail("Agent release contract retained prerelease identity");
-const npmWorkflows = readdirSync(workflowDir).filter((name) => /^npm-.*\.ya?ml$/.test(name));
-if (JSON.stringify(npmWorkflows) !== JSON.stringify(["npm-release.yml"])) fail(`unexpected npm workflows: ${npmWorkflows.join(", ")}`);
+const releaseWorkflows = readdirSync(workflowDir).filter((name) => /release/i.test(name)).sort();
+if (JSON.stringify(releaseWorkflows) !== JSON.stringify(["ghcr-prerelease.yml", "npm-release.yml", "release-validation.yml"])) fail(`unexpected release workflows: ${releaseWorkflows.join(", ")}`);
 console.log(`release contracts valid: one stable-only npm publisher for ${contract.publicPackages.length} public packages`);

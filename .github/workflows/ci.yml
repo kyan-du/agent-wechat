@@ -59,7 +59,7 @@ jobs:
               - 'scripts/test-packed-cli-health.mjs'
               - 'release/**'
               - 'docs/release/**'
-              - '.github/workflows/release.yml'
+              - '.github/workflows/release-validation.yml'
               - 'docs/release-audit/**'
               - 'docker/**'
             rust:
