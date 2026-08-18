@@ -86,9 +86,9 @@ jobs:
         run: echo 'Stable latest/Release/OIDC is unreachable; activation requires npm-production required-reviewer approval and exact canary provenance.'
 
   deploy-stable:
-    name: Unreachable stable promotion blueprint
+    name: Unreachable stable blueprint (single Trusted Publisher blocker)
     needs: validate-stable
-    if: ${{ false }} # Stable activation and non-Agent approval are separate owner/admin actions.
+    if: ${{ false }} # Also blocked: npm allows only one GitHub Actions Trusted Publisher per package.
     runs-on: ubuntu-latest
     environment: npm-production
     permissions:

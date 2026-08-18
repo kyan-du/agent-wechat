@@ -79,7 +79,7 @@ mutate_and_reject .github/workflows/npm-agent-release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("id-token: none","id-token: write"));' \
   'inactive OIDC permission expansion'
 mutate_and_reject .github/workflows/npm-agent-stable.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Stable activation", "if: ${{ always() }} # Stable activation"));' \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Also blocked", "if: ${{ always() }} # Also blocked"));' \
   'inactive stable deployment activation'
 
 node scripts/test-agent-release-workflows.mjs

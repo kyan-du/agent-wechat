@@ -111,7 +111,7 @@ A safe legacy validation without npm or GitHub Release writes is available from 
 Repository administration required before the first real tag:
 
 1. Create/protect the `npm-prerelease` and `npm-production` GitHub Environments and require non-Agent owner/release reviewers.
-2. Configure npm Trusted Publishing for each package only after activation, bound to the exact approved Agent workflow. The current workflows grant no reachable OIDC permission; no long-lived token fallback is allowed.
+2. Resolve npm's one-Trusted-Publisher-per-package limitation before activation. The prerelease and stable blueprint files cannot both be registered for the same package; choose and review one exact npm publisher workflow that preserves separate `npm-prerelease`/`npm-production` authorization and Environment gates. The current workflows grant no reachable OIDC permission and stable publishing is intentionally blocked; no long-lived token fallback is allowed.
 3. npm requires a one-time owner bootstrap if a package does not yet exist. If Trusted Publishing cannot be used, add an environment-scoped `NPM_TOKEN` only as a temporary fallback and retain required reviewers. Never add it as a repository file or broad workflow secret.
 4. Protect prerelease/stable release tags, authorization tags, and consumption tags against move, overwrite, deletion, and reuse. Normal release tags are created only by the approved workflow; a locally pushed tag never authorizes publication.
 5. Reconcile current npm state before enabling: all three `0.12.0-next.0` versions already exist and both `next` and `latest` currently point to them. Record the intended corrected mappings and independently verify them; this workflow will reject duplicate exact versions and never moves `latest`.

@@ -16,6 +16,7 @@
       "tagPattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-next\\.[0-9]+$",
       "distTag": "next",
       "environment": "npm-prerelease",
+      "workflow": ".github/workflows/npm-agent-release.yml",
       "githubPrerelease": true
     },
     "stable": {
@@ -23,6 +24,7 @@
       "tagPattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
       "distTag": "latest",
       "environment": "npm-production",
+      "workflow": ".github/workflows/npm-agent-stable.yml",
       "githubPrerelease": false
     }
   },

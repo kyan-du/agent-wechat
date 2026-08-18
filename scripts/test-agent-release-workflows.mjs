@@ -5,6 +5,7 @@ import YAML from "yaml";
 const contract = JSON.parse(readFileSync("release/agent-release-contract.json", "utf8"));
 if (contract.deploymentEnabled !== false) throw new Error("agent release deployment must remain inactive");
 if (contract.channels.prerelease.environment !== "npm-prerelease" || contract.channels.stable.environment !== "npm-production") throw new Error("release environments are not separated");
+if (contract.channels.prerelease.workflow === contract.channels.stable.workflow) throw new Error("inactive channel blueprints must remain independently reviewable before publisher unification");
 if (contract.channels.prerelease.distTag !== "next" || contract.channels.stable.distTag !== "latest") throw new Error("release channel dist-tags drifted");
 for (const [path, channel] of [[".github/workflows/npm-agent-release.yml", "prerelease"], [".github/workflows/npm-agent-stable.yml", "stable"]]) {
   const text = readFileSync(path, "utf8");
@@ -29,6 +30,8 @@ for (const [path, channel] of [[".github/workflows/npm-agent-release.yml", "prer
 }
 const stable = readFileSync(".github/workflows/npm-agent-stable.yml", "utf8");
 for (const field of ["source_prerelease_manifest_sha256", "canary_receipt_sha256", "npm-production"]) if (!stable.includes(field)) throw new Error(`stable separation missing: ${field}`);
+const runbook = readFileSync("docs/release/AGENT-OPERATED-RELEASE.md", "utf8");
+for (const statement of ["only one GitHub Actions Trusted Publisher configuration per package", "cannot simultaneously trust both", "stable publication remains unreachable"]) if (!runbook.includes(statement)) throw new Error(`single Trusted Publisher blocker is not explicit: ${statement}`);
 const prerelease = readFileSync(".github/workflows/npm-agent-release.yml", "utf8");
 if (!prerelease.includes("channel:") || !prerelease.includes("options: [prerelease]")) throw new Error("prerelease channel dispatch identity missing");
 console.log("inactive Agent release workflow contracts passed");
