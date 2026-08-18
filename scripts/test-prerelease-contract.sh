@@ -75,10 +75,10 @@ mutate_and_reject package.json \
 mutate_and_reject release/agent-release-contract.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.deploymentEnabled=true;fs.writeFileSync(p,JSON.stringify(j));' \
   'Agent release activation in implementation PR'
-mutate_and_reject .github/workflows/npm-agent-release.yml \
+mutate_and_reject .github/workflows/npm-release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("id-token: none","id-token: write"));' \
   'inactive OIDC permission expansion'
-mutate_and_reject .github/workflows/npm-agent-release.yml \
+mutate_and_reject .github/workflows/npm-release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Activation", "if: ${{ always() }} # Activation"));' \
   'inactive single-publisher deployment activation'
 mutate_and_reject .github/workflows/npm-agent-stable.yml \
@@ -90,12 +90,12 @@ mutate_and_reject release/agent-release-contract.json \
 
 node scripts/test-agent-release-workflows.mjs
 node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs
-if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-prerelease.yml --exclude=npm-agent-release.yml --exclude=npm-agent-stable.yml >/dev/null; then
+if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-prerelease.yml --exclude=npm-release.yml --exclude=npm-agent-stable.yml >/dev/null; then
   echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1
 fi
 node scripts/validate-ghcr-release.mjs
-if grep -RIn 'npm publish' .github/workflows --exclude=npm-prerelease.yml --exclude=npm-agent-release.yml --exclude=npm-agent-stable.yml >/dev/null; then
+if grep -RIn 'npm publish' .github/workflows --exclude=npm-prerelease.yml --exclude=npm-release.yml --exclude=npm-agent-stable.yml >/dev/null; then
   echo "npm publication capability exists outside the reviewed prerelease workflow" >&2
   exit 1
 fi

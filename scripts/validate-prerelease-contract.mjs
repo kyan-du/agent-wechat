@@ -81,7 +81,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
-      const inertBlueprint = name === "npm-agent-release.yml" && where === "job deploy" && job?.if === "${{ false }}";
+      const inertBlueprint = name === "npm-release.yml" && where === "job deploy" && job?.if === "${{ false }}";
       const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint;
@@ -106,7 +106,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       ];
       for (const [pattern, label] of commands) {
         const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
-          || (name === "npm-agent-release.yml" && jobName === "deploy" && job?.if === "${{ false }}");
+          || (name === "npm-release.yml" && jobName === "deploy" && job?.if === "${{ false }}");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
@@ -132,7 +132,7 @@ if (forbidden.length) fail(`workflow publication capability detected:\n${forbidd
 
 const agentReleaseContract = readJson("release/agent-release-contract.json");
 if (agentReleaseContract.deploymentEnabled !== false) fail("Agent-operated release must remain inactive until a separately reviewed activation");
-for (const name of ["npm-agent-release.yml", "npm-agent-stable.yml"]) {
+for (const name of ["npm-release.yml", "npm-agent-stable.yml"]) {
   const text = readFileSync(join(workflowDir, name), "utf8");
   const workflow = parseYaml(text);
   const triggers = workflow.on ?? workflow.true ?? {};
@@ -140,7 +140,7 @@ for (const name of ["npm-agent-release.yml", "npm-agent-stable.yml"]) {
   if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: inactive permissions drift`);
   const deploy = workflow.jobs?.deploy;
   if (!triggers.workflow_dispatch?.inputs?.dry_run?.default) fail(`${name}: inactive dispatch boundary drift`);
-  if (name === "npm-agent-release.yml" && deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
+  if (name === "npm-release.yml" && deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
   if (name === "npm-agent-stable.yml" && deploy) fail(`${name}: stable validation must not claim a second publisher`);
 }
 const rootManifest = readJson("package.json");

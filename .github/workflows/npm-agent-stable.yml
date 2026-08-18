@@ -24,5 +24,5 @@ jobs:
       - name: Fail closed
         run: |
           test '${{ inputs.dry_run }}' = true
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false||c.publisherWorkflow!==".github/workflows/npm-agent-release.yml"||c.environment!=="npm-production")throw Error("production publisher identity drift")'
+          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false||c.publisherWorkflow!==".github/workflows/npm-release.yml"||c.environment!=="npm-production")throw Error("production publisher identity drift")'
           echo 'The duplicate release workflow is retired; only the exact production workflow may publish.'

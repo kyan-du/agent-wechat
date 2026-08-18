@@ -3,7 +3,7 @@
   "repository": "kyan-du/agent-wechat",
   "registry": "https://registry.npmjs.org",
   "deploymentEnabled": false,
-  "publisherWorkflow": ".github/workflows/npm-agent-release.yml",
+  "publisherWorkflow": ".github/workflows/npm-release.yml",
   "environment": "npm-production",
   "versionPattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
   "tagPattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",

@@ -23,7 +23,7 @@ function setup() {
   const releaseCommit = commit(dir, "release");
   const releaseTree = git(dir, ["rev-parse", `${releaseCommit}^{tree}`]);
   const packages = packageNames.map((name) => ({ name, version, tarball: `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`, sha256: `sha256:${"3".repeat(64)}`, integrity: "sha512-AAAA", size: 1 }));
-  const manifest = { schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", version, tag: tagName, commit: releaseCommit, tree: releaseTree, registry: "https://registry.npmjs.org", distTag: "latest", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
+  const manifest = { schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-release.yml", repository: "kyan-du/agent-wechat", version, tag: tagName, commit: releaseCommit, tree: releaseTree, registry: "https://registry.npmjs.org", distTag: "latest", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
   const manifestPath = join(dir, "manifest.json"); writeFileSync(manifestPath, JSON.stringify(manifest));
   git(dir, ["update-ref", "refs/remotes/origin/main", releaseCommit]);
   git(dir, ["checkout", "-b", "authorization"]); mkdirSync(join(dir, "release"));

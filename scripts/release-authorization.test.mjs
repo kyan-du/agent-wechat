@@ -15,7 +15,7 @@ const packages = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw",
   size: 1,
 }));
 const manifest = {
-  schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", version,
+  schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-release.yml", repository: "kyan-du/agent-wechat", version,
   tag: `v${version}`, commit, tree, registry: "https://registry.npmjs.org", distTag: "latest",
   lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages,
 };

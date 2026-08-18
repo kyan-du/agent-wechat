@@ -3,7 +3,7 @@ import test from "node:test";
 import { reconcilePublication, reconciliationDigest, verifyOperationReceipt } from "./release-reconciliation.mjs";
 
 const packages = ["cli", "openclaw", "puppet"].map((suffix, index) => ({ name: `@scope/${suffix}`, version: "1.2.3", integrity: `sha512-${index}`, tarball: `${suffix}.tgz` }));
-const manifest = { publisherWorkflow: ".github/workflows/npm-agent-release.yml", version: "1.2.3", commit: "1".repeat(40), tree: "2".repeat(40), distTag: "latest", packages };
+const manifest = { publisherWorkflow: ".github/workflows/npm-release.yml", version: "1.2.3", commit: "1".repeat(40), tree: "2".repeat(40), distTag: "latest", packages };
 const exists = (item) => ({ name: item.name, kind: "exists", version: item.version, integrity: item.integrity, provenance: { state: "verified", repository: "kyan-du/agent-wechat", workflow: manifest.publisherWorkflow, commit: manifest.commit } });
 const absent = (item) => ({ name: item.name, kind: "absent" });
 const tags = (count) => Object.fromEntries(packages.map((item, index) => [item.name, index < count ? manifest.version : "1.2.2"]));

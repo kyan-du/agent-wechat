@@ -9,7 +9,7 @@ Merging this PR cannot publish npm, create a release tag, move `latest`, create 
 Each public package has exactly one Trusted Publisher identity:
 
 - repository: `kyan-du/agent-wechat`
-- workflow: `.github/workflows/npm-agent-release.yml`
+- workflow: `.github/workflows/npm-release.yml`
 - Environment: `npm-production`
 - version/tag: `X.Y.Z` / `vX.Y.Z`
 - npm dist-tag: `latest`

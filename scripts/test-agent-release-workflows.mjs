@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import YAML from "yaml";
 
-const publisherPath = ".github/workflows/npm-agent-release.yml";
+const publisherPath = ".github/workflows/npm-release.yml";
 const contract = JSON.parse(readFileSync("release/agent-release-contract.json", "utf8"));
 if (contract.deploymentEnabled !== false) throw new Error("formal release deployment must remain inactive");
 if (contract.publisherWorkflow !== publisherPath || contract.environment !== "npm-production") throw new Error("single production publisher identity drift");

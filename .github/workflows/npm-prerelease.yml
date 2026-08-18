@@ -2,7 +2,7 @@ name: Legacy tagged prerelease validation (inert)
 
 # PR #49's exact-tag validator remains available as read-only evidence while the
 # explicit Agent-operated workflow is reviewed. Tag push and all publication
-# capabilities are retired; .github/workflows/npm-agent-release.yml is the only
+# capabilities are retired; .github/workflows/npm-release.yml is the only
 # proposed future deployment architecture.
 on:
   workflow_dispatch:
