@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { requireDigest, root, sha256Bytes, strictJson } from "./agent-release-lib.mjs";
 import { verifyOperationReceipt } from "./release-reconciliation.mjs";
@@ -15,8 +15,5 @@ if (operation === "reconcile") {
   requireDigest(expectedDigest, "authorized reconciliation digest");
   if (sha256Bytes(receiptRaw) !== expectedDigest) throw new Error("reconciliation artifact bytes do not match the authorized digest");
 } else if (expectedDigest) throw new Error("fresh release must not carry a reconciliation digest");
-const { missing } = verifyOperationReceipt(receipt, manifest, { operation });
-const filenames = missing.map((name) => manifest.packages.find((item) => item.name === name)?.tarball);
-if (filenames.some((value) => !value)) throw new Error("reconciliation references an unknown package");
-writeFileSync(resolve(root, arg("--output")), filenames.length ? `${filenames.join("\n")}\n` : "", { flag: "wx" });
-console.log(`selected ${filenames.length} missing exact artifact(s); zero safely skips npm publish`);
+const recovery = verifyOperationReceipt(receipt, manifest, { operation });
+console.log(JSON.stringify({ operation, phase: receipt.phase, ...recovery }));

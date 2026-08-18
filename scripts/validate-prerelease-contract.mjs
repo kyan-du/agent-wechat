@@ -81,7 +81,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
-      const inertBlueprint = ["npm-agent-release.yml", "npm-agent-stable.yml"].includes(name) && where.startsWith("job deploy-") && job?.if === "${{ false }}";
+      const inertBlueprint = name === "npm-agent-release.yml" && where === "job deploy" && job?.if === "${{ false }}";
       const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint;
@@ -106,7 +106,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       ];
       for (const [pattern, label] of commands) {
         const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
-          || (["npm-agent-release.yml", "npm-agent-stable.yml"].includes(name) && jobName.startsWith("deploy-") && job?.if === "${{ false }}");
+          || (name === "npm-agent-release.yml" && jobName === "deploy" && job?.if === "${{ false }}");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
@@ -138,8 +138,10 @@ for (const name of ["npm-agent-release.yml", "npm-agent-stable.yml"]) {
   const triggers = workflow.on ?? workflow.true ?? {};
   if (JSON.stringify(Object.keys(triggers)) !== JSON.stringify(["workflow_dispatch"])) fail(`${name}: only explicit dispatch is allowed`);
   if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: inactive permissions drift`);
-  const deploy = Object.entries(workflow.jobs ?? {}).find(([jobName]) => jobName.startsWith("deploy-"))?.[1];
-  if (!triggers.workflow_dispatch?.inputs?.dry_run?.default || deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
+  const deploy = workflow.jobs?.deploy;
+  if (!triggers.workflow_dispatch?.inputs?.dry_run?.default) fail(`${name}: inactive dispatch boundary drift`);
+  if (name === "npm-agent-release.yml" && deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
+  if (name === "npm-agent-stable.yml" && deploy) fail(`${name}: stable validation must not claim a second publisher`);
 }
 const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");

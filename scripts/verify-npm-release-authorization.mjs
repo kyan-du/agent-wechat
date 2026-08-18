@@ -7,6 +7,7 @@ import { verifyAuthorizationReceipt } from "./release-authorization.mjs";
 import { verifyReleaseManifest } from "./verify-agent-release.mjs";
 
 const [manifestPathArg, releaseCommit, receiptRef, expectedReceiptCommit, expectedReceiptTagOid, authorizationId] = process.argv.slice(2);
+const skipConsumptionLookup = process.argv.includes("--skip-consumption-lookup");
 if (![manifestPathArg, releaseCommit, receiptRef, expectedReceiptCommit, expectedReceiptTagOid, authorizationId].every(Boolean)) {
   throw new Error("usage: verify-npm-release-authorization.mjs <manifest> <release-commit> <receipt-ref> <receipt-commit> <receipt-tag-oid> <authorization-id>");
 }
@@ -36,7 +37,7 @@ const manifestSha256 = sha256Bytes(manifestRaw);
 const manifest = verifyReleaseManifest(strictJson(manifestRaw.toString("utf8"), "release manifest"), { expectedCommit: releaseCommit });
 if (run(["rev-parse", `${releaseCommit}^{tree}`]) !== manifest.tree) throw new Error("release commit tree does not match the reviewed manifest");
 const consumptionRef = `refs/tags/${receipt.consumption.tag}`;
-const consumptionRefExists = spawnSync("git", ["ls-remote", "--exit-code", "origin", consumptionRef], { stdio: "ignore" }).status === 0;
+const consumptionRefExists = skipConsumptionLookup ? false : spawnSync("git", ["ls-remote", "--exit-code", "origin", consumptionRef], { stdio: "ignore" }).status === 0;
 verifyAuthorizationReceipt(receipt, manifest, {
   nonce: process.env.RELEASE_AUTHORIZATION_NONCE,
   now: process.env.RELEASE_AUTHORIZATION_NOW,
@@ -44,5 +45,6 @@ verifyAuthorizationReceipt(receipt, manifest, {
   consumptionRefExists,
   operation: process.env.RELEASE_OPERATION,
   reconciliationSha256: process.env.RELEASE_RECONCILIATION_SHA256,
+  skipConsumptionState: skipConsumptionLookup,
 });
 console.log(`release authorized for ${manifest.tag} at ${releaseCommit} by ${authorizationId}`);

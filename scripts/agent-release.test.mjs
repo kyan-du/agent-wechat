@@ -17,7 +17,7 @@ function fixture() {
     return { name, version, tarball, sha256: sha256Bytes(bytes), integrity: sha512Integrity(bytes), size: bytes.length };
   });
   return {
-    schemaVersion: 1, validationOnly: true, repository: "kyan-du/agent-wechat", channel: "prerelease", version,
+    schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", channel: "prerelease", version,
     tag: `v${version}`, commit: "1".repeat(40), tree: "2".repeat(40), registry: "https://registry.npmjs.org", distTag: "next",
     lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"3".repeat(64)}` },
     changesets: [{ path: ".changeset/a.md", sha256: `sha256:${"4".repeat(64)}` }], packages,

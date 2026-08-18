@@ -78,9 +78,12 @@ mutate_and_reject release/agent-release-contract.json \
 mutate_and_reject .github/workflows/npm-agent-release.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("id-token: none","id-token: write"));' \
   'inactive OIDC permission expansion'
+mutate_and_reject .github/workflows/npm-agent-release.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Activation", "if: ${{ always() }} # Activation"));' \
+  'inactive single-publisher deployment activation'
 mutate_and_reject .github/workflows/npm-agent-stable.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Also blocked", "if: ${{ always() }} # Also blocked"));' \
-  'inactive stable deployment activation'
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: echo '\''Stable validation", "run: npm publish package.tgz --tag latest && echo '\''Stable validation"));' \
+  'second stable publisher capability'
 
 node scripts/test-agent-release-workflows.mjs
 node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs

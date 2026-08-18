@@ -1,22 +1,17 @@
-name: Agent-operated npm stable validation (inactive)
+name: Stable promotion contract validation (inactive)
 
+# This workflow has no registry-write blueprint. npm allows one GitHub Actions
+# Trusted Publisher identity per package, so real stable publication must use
+# .github/workflows/npm-agent-release.yml with channel=stable.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact stable X.Y.Z version
+        description: Exact stable X.Y.Z version to validate
         required: true
         type: string
       release_sha:
         description: Full immutable stable release commit SHA
-        required: true
-        type: string
-      manifest_sha256:
-        description: Reviewed stable manifest sha256
-        required: true
-        type: string
-      authorization_id:
-        description: Opaque one-time owner authorization identity
         required: true
         type: string
       source_prerelease_manifest_sha256:
@@ -28,13 +23,13 @@ on:
         required: true
         type: string
       dry_run:
-        description: Validation only; npm-production activation requires another PR
+        description: Validation only; never publishes
         required: true
         default: true
         type: boolean
 
 concurrency:
-  group: npm-stable-${{ inputs.version }}-${{ inputs.authorization_id }}
+  group: npm-stable-validation-${{ inputs.version }}-${{ inputs.release_sha }}
   cancel-in-progress: false
 
 permissions:
@@ -43,10 +38,9 @@ permissions:
 
 jobs:
   validate-stable:
-    name: Validate stable promotion without publishing
+    name: Validate stable promotion contract without publishing
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    # Activation must add environment: npm-production with non-Agent required reviewers.
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,82 +56,22 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.release_sha }}
-          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
           SOURCE_MANIFEST_SHA256: ${{ inputs.source_prerelease_manifest_sha256 }}
           CANARY_RECEIPT_SHA256: ${{ inputs.canary_receipt_sha256 }}
-          AUTHORIZATION_ID: ${{ inputs.authorization_id }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
           test "$DRY_RUN" = true
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          for digest in "$MANIFEST_SHA256" "$SOURCE_MANIFEST_SHA256" "$CANARY_RECEIPT_SHA256"; do
+          for digest in "$SOURCE_MANIFEST_SHA256" "$CANARY_RECEIPT_SHA256"; do
             printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
           done
-          printf '%s' "$AUTHORIZATION_ID" | grep -Eq '^[0-9a-f]{32}$'
           git fetch origin main --no-tags
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false)throw Error("unexpected activation state")'
+          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false)throw Error("unexpected activation state");if(c.publisherWorkflow!==".github/workflows/npm-agent-release.yml")throw Error("single publisher identity drift")'
           node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:prerelease-contract && pnpm typecheck
-      - name: Explain separate stable approval boundary
-        run: echo 'Stable latest/Release/OIDC is unreachable; activation requires npm-production required-reviewer approval and exact canary provenance.'
-
-  deploy-stable:
-    name: Unreachable stable blueprint (single Trusted Publisher blocker)
-    needs: validate-stable
-    if: ${{ false }} # Also blocked: npm allows only one GitHub Actions Trusted Publisher per package.
-    runs-on: ubuntu-latest
-    environment: npm-production
-    permissions:
-      contents: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.release_sha }}
-          fetch-depth: 0
-          persist-credentials: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: npm-release-${{ inputs.release_sha }}
-          path: .release-candidate
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          registry-url: https://registry.npmjs.org
-      - run: npm install --global npm@11.5.1
-      - name: Reverify canary-bound promotion and consume exact authorization
-        env:
-          RELEASE_AUTHORIZATION_NONCE: ${{ secrets.RELEASE_AUTHORIZATION_NONCE }}
-        run: |
-          node scripts/verify-stable-promotion.mjs release/stable-promotion.json
-          authorization_ref="refs/tags/npm-release-auth/v${{ inputs.version }}/${{ inputs.authorization_id }}"
-          git fetch origin "$authorization_ref:$authorization_ref" --no-tags
-          node scripts/verify-npm-release-authorization.mjs \
-            .release-candidate/agent-release-manifest.json "${{ inputs.release_sha }}" "$authorization_ref" \
-            "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" "${{ inputs.authorization_id }}"
-          consumption="npm-release-consumed/v${{ inputs.version }}/${{ inputs.authorization_id }}"
-          git tag -a "$consumption" "${{ inputs.release_sha }}" -m "Consume stable release authorization"
-          git tag -a "v${{ inputs.version }}" "${{ inputs.release_sha }}" -m "Release v${{ inputs.version }}"
-          git push origin "refs/tags/$consumption" "refs/tags/v${{ inputs.version }}"
-      - name: Publish missing reviewed artifacts and require exact integrity
-        run: |
-          node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --output reconciliation-before.json
-          node scripts/select-npm-release-artifacts.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json --output publish-list.txt
-          while IFS= read -r tarball; do npm publish ".release-candidate/tarballs/$tarball" --tag "agent-stage-${{ inputs.version }}" --access public --provenance; done < publish-list.txt
-          node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --output reconciliation-complete.json
-      - name: Promote latest only after all three packages reconcile
-        run: |
-          npm dist-tag add "@kyan-du/agent-wechat-cli@${{ inputs.version }}" latest
-          npm dist-tag add "@kyan-du/agent-wechat-openclaw@${{ inputs.version }}" latest
-          npm dist-tag add "@kyan-du/agent-wechat-wechaty-puppet@${{ inputs.version }}" latest
-          node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --require-dist-tags --output reconciliation-final.json
-      - name: Create final GitHub Release and verify registry install
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "v${{ inputs.version }}" --verify-tag --generate-notes --title "v${{ inputs.version }}"
-          node scripts/smoke-published-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json
+      - name: Explain the stable publisher boundary
+        run: echo 'Stable validation is read-only; channel=stable registry write belongs only to the single inactive publisher workflow and future npm-production approval.'

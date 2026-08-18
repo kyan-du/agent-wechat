@@ -23,7 +23,7 @@ function setup() {
   const releaseCommit = commit(dir, "release");
   const releaseTree = git(dir, ["rev-parse", `${releaseCommit}^{tree}`]);
   const packages = packageNames.map((name) => ({ name, version, tarball: `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`, sha256: `sha256:${"3".repeat(64)}`, integrity: "sha512-AAAA", size: 1 }));
-  const manifest = { schemaVersion: 1, validationOnly: true, repository: "kyan-du/agent-wechat", channel: "prerelease", version, tag: tagName, commit: releaseCommit, tree: releaseTree, registry: "https://registry.npmjs.org", distTag: "next", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
+  const manifest = { schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", channel: "prerelease", version, tag: tagName, commit: releaseCommit, tree: releaseTree, registry: "https://registry.npmjs.org", distTag: "next", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
   const manifestPath = join(dir, "manifest.json"); writeFileSync(manifestPath, JSON.stringify(manifest));
   git(dir, ["update-ref", "refs/remotes/origin/main", releaseCommit]);
   git(dir, ["checkout", "-b", "authorization"]); mkdirSync(join(dir, "release"));
@@ -47,6 +47,7 @@ reject("non-main receipt", (state) => { git(state.dir, ["update-ref", "refs/remo
 reject("ambiguous branch", (state) => { git(state.dir, ["branch", state.receiptName]); });
 reject("release commit replay", (state) => { state.releaseCommit = `${state.releaseCommit}^`; });
 reject("consumed authorization", (state) => { tag(state.dir, state.receipt.consumption.tag, state.receiptCommit, "consumed"); });
+reject("competing consumption writer", (state) => { tag(state.dir, state.receipt.consumption.tag, state.releaseCommit, "competing consume"); });
 reject("manifest drift", (state) => { state.manifest.version = "1.2.3-next.5"; writeFileSync(state.manifestPath, JSON.stringify(state.manifest)); });
 reject("non-JSON receipt", (state) => { writeFileSync(join(state.dir, "release/npm-release-authorization.json"), "enabled: true\n"); state.receiptCommit = commit(state.dir, "yaml"); state.receiptTagOid = tag(state.dir, state.receiptName, state.receiptCommit, "yaml"); git(state.dir, ["update-ref", "refs/remotes/origin/main", state.receiptCommit]); });
 console.log("npm authorization v2 Git E2E matrix passed");

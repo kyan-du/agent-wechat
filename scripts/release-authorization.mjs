@@ -61,8 +61,10 @@ export function verifyAuthorizationReceipt(receipt, manifest, options = {}) {
   if (receipt.consumption.state !== "unused" || receipt.consumption.tag !== `npm-release-consumed/${receipt.release.tag}/${receipt.authorizationId}`) {
     throw new Error("authorization receipt is replayed or has invalid consumption identity");
   }
-  if (options.consumptionRefExists === true && receipt.operation !== "reconcile") throw new Error("authorization receipt has already been consumed");
-  if (options.consumptionRefExists !== true && receipt.operation === "reconcile") throw new Error("reconcile requires the exact prior consumption marker");
+  if (options.skipConsumptionState !== true) {
+    if (options.consumptionRefExists === true && receipt.operation !== "reconcile") throw new Error("authorization receipt has already been consumed");
+    if (options.consumptionRefExists !== true && receipt.operation === "reconcile") throw new Error("reconcile requires the exact prior consumption marker");
+  }
 
   verifyReleaseManifest(manifest, { expectedChannel: receipt.channel, expectedVersion: manifest.version, expectedCommit: receipt.release.commit });
   return receipt;

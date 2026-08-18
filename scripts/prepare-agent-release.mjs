@@ -82,6 +82,7 @@ try {
     schemaVersion: 1,
     validationOnly: true,
     repository: contract.repository,
+    publisherWorkflow: contract.publisherWorkflow,
     channel,
     version,
     tag: `v${version}`,

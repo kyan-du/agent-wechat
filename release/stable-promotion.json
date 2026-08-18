@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "enabled": false,
   "stableVersion": null,
   "stableCommit": null,
@@ -8,14 +8,9 @@
     "version": null,
     "commit": null,
     "tree": null,
+    "manifestPath": null,
     "manifestSha256": null,
-    "canaryReceiptSha256": null,
-    "canaryPassedAt": null
-  },
-  "allowedDiffPaths": [
-    ".changeset/pre.json",
-    "release/agent-release-manifest.json",
-    "release/npm-release-authorization.json",
-    "release/stable-promotion.json"
-  ]
+    "canaryReceiptPath": null,
+    "canaryReceiptSha256": null
+  }
 }

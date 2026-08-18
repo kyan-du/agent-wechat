@@ -24,15 +24,17 @@ for (const item of manifest.packages) {
     let remote;
     try { remote = JSON.parse(result.stdout); } catch { throw new Error(`${spec}: malformed registry metadata`); }
     if (!remote || remote.version !== item.version || typeof remote["dist.integrity"] !== "string") throw new Error(`${spec}: incomplete registry metadata`);
-    remotePackages.push({ name: item.name, kind: "exists", version: remote.version, integrity: remote["dist.integrity"] });
+    const provenance = spawnSync(process.execPath, ["scripts/verify-npm-provenance.mjs", "--package", item.name, "--version", item.version, "--repository", manifest.repository, "--workflow", manifest.publisherWorkflow, "--commit", manifest.commit, "--json"], { encoding: "utf8" });
+    if (provenance.status !== 0) throw new Error(`${spec}: npm provenance verification failed closed`);
+    remotePackages.push({ name: item.name, kind: "exists", version: remote.version, integrity: remote["dist.integrity"], provenance: JSON.parse(provenance.stdout) });
   }
   const tag = spawnSync("npm", ["view", item.name, `dist-tags.${manifest.distTag}`, "--json"], { encoding: "utf8", env: { ...process.env, NPM_CONFIG_LOGLEVEL: "silent" } });
   if (tag.status !== 0) throw new Error(`${item.name}: dist-tag query failed closed`);
   const value = JSON.parse(tag.stdout);
-  if (typeof value === "string") currentDistTags[manifest.distTag] = currentDistTags[manifest.distTag] && currentDistTags[manifest.distTag] !== value ? "<divergent>" : value;
+  currentDistTags[item.name] = typeof value === "string" ? value : null;
 }
 const receipt = reconcilePublication(manifest, remotePackages, currentDistTags);
 if (process.argv.includes("--require-complete") && (receipt.packages.some((item) => item.state !== "verified") || receipt.state !== "RECONCILED")) throw new Error(`registry set is not complete: ${receipt.state}`);
-if (process.argv.includes("--require-dist-tags") && currentDistTags[manifest.distTag] !== manifest.version) throw new Error(`registry ${manifest.distTag} mappings are not uniformly ${manifest.version}`);
+if (process.argv.includes("--require-dist-tags") && Object.values(currentDistTags).some((value) => value !== manifest.version)) throw new Error(`registry ${manifest.distTag} mappings are not uniformly ${manifest.version}`);
 writeFileSync(resolve(root, outputPath), `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx" });
 console.log(`${receipt.state}: ${receipt.nextAction}`);
