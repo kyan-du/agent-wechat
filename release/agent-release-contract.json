@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 2,
+  "repository": "kyan-du/agent-wechat",
+  "registry": "https://registry.npmjs.org",
+  "deploymentEnabled": false,
+  "publisherWorkflow": ".github/workflows/npm-agent-release.yml",
+  "environment": "npm-production",
+  "versionPattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+  "tagPattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$",
+  "distTag": "latest",
+  "githubPrerelease": false,
+  "trustedNodeVersion": "22.14.0",
+  "trustedNpmVersion": "11.5.1",
+  "publicPackages": [
+    { "name": "@kyan-du/agent-wechat-cli", "path": "packages/cli" },
+    { "name": "@kyan-du/agent-wechat-openclaw", "path": "packages/openclaw-extension" },
+    { "name": "@kyan-du/agent-wechat-wechaty-puppet", "path": "packages/wechaty-puppet" }
+  ],
+  "authorization": {
+    "receiptPath": "release/npm-release-authorization.json",
+    "receiptTagPrefix": "npm-release-auth/",
+    "consumptionTagPrefix": "npm-release-consumed/",
+    "maximumLifetimeSeconds": 1800,
+    "requiredApprovals": [
+      "owner",
+      "legalRedistribution",
+      "productionEnvironment",
+      "trustedPublishers",
+      "protectedTagRules",
+      "registryStateReconciled"
+    ]
+  }
+}

@@ -1,91 +1,53 @@
 #!/usr/bin/env node
+import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import assert from "node:assert/strict";
+import { sha256Bytes } from "./agent-release-lib.mjs";
 
 const verifier = join(process.cwd(), "scripts/verify-npm-release-authorization.mjs");
 const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-const commit = (cwd, message) => {
-  git(cwd, ["add", "."]);
-  git(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message]);
-  return git(cwd, ["rev-parse", "HEAD"]);
-};
-const tag = (cwd, name, target, message) => {
-  git(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-f", "-a", name, target, "-m", message]);
-  return git(cwd, ["rev-parse", `refs/tags/${name}`]);
-};
-const setup = () => {
-  const dir = mkdtempSync(join(tmpdir(), "npm-auth-"));
-  git(dir, ["init", "-b", "main"]);
-  git(dir, ["remote", "add", "origin", dir]);
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "release", version: "1.2.3-next.4" }));
+const commit = (cwd, message) => { git(cwd, ["add", "."]); git(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message]); return git(cwd, ["rev-parse", "HEAD"]); };
+const tag = (cwd, name, target, message) => { git(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-f", "-a", name, target, "-m", message]); return git(cwd, ["rev-parse", `refs/tags/${name}`]); };
+const authorizationId = "a".repeat(32);
+const nonce = "one-time-nonce-not-stored";
+const version = "1.2.3";
+const tagName = `v${version}`;
+const packageNames = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"];
+
+function setup() {
+  const dir = mkdtempSync(join(tmpdir(), "npm-auth-v2-"));
+  git(dir, ["init", "-b", "main"]); git(dir, ["remote", "add", "origin", dir]);
   writeFileSync(join(dir, "release-file"), "immutable\n");
-  const release = commit(dir, "release");
-  const tree = git(dir, ["rev-parse", `${release}^{tree}`]);
-  const releaseTagOid = tag(dir, "v1.2.3-next.4", release, "release");
-  git(dir, ["update-ref", "refs/remotes/origin/main", release]);
-  git(dir, ["checkout", "-b", "authorization"]);
-  git(dir, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "receipt base"]);
-  mkdirSync(join(dir, "release"), { recursive: true });
-  const version = "1.2.3-next.4";
-  const receipt = {
-    schemaVersion: 1, enabled: true, tag: `v${version}`,
-    releaseCommit: release, releaseTree: tree,
-    intent: {
-      registry: "https://registry.npmjs.org", distTag: "next",
-      packages: [
-        { name: "@kyan-du/agent-wechat-cli", version },
-        { name: "@kyan-du/agent-wechat-openclaw", version },
-        { name: "@kyan-du/agent-wechat-wechaty-puppet", version },
-      ],
-    },
-    approvals: {
-      owner: true, legalRedistribution: true, protectedEnvironment: true,
-      trustedPublishers: true, protectedTagRules: true, registryStateReconciled: true,
-    },
-  };
+  const releaseCommit = commit(dir, "release");
+  const releaseTree = git(dir, ["rev-parse", `${releaseCommit}^{tree}`]);
+  const packages = packageNames.map((name) => ({ name, version, tarball: `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`, sha256: `sha256:${"3".repeat(64)}`, integrity: "sha512-AAAA", size: 1 }));
+  const manifest = { schemaVersion: 1, validationOnly: true, publisherWorkflow: ".github/workflows/npm-agent-release.yml", repository: "kyan-du/agent-wechat", version, tag: tagName, commit: releaseCommit, tree: releaseTree, registry: "https://registry.npmjs.org", distTag: "latest", lockfile: { path: "pnpm-lock.yaml", sha256: `sha256:${"4".repeat(64)}` }, changesets: [], packages };
+  const manifestPath = join(dir, "manifest.json"); writeFileSync(manifestPath, JSON.stringify(manifest));
+  git(dir, ["update-ref", "refs/remotes/origin/main", releaseCommit]);
+  git(dir, ["checkout", "-b", "authorization"]); mkdirSync(join(dir, "release"));
+  const receipt = { schemaVersion: 3, enabled: true, repository: manifest.repository, authorizationId, operation: "release", reconciliationSha256: null, nonceSha256: sha256Bytes(Buffer.from(nonce)), ownerConfirmationRefSha256: `sha256:${"5".repeat(64)}`, issuedAt: "2026-08-18T00:00:00.000Z", expiresAt: "2026-08-18T00:15:00.000Z", release: { tag: tagName, commit: releaseCommit, tree: releaseTree, manifestSha256: sha256Bytes(readFileSync(manifestPath)) }, intent: { registry: manifest.registry, distTag: manifest.distTag, packages: packages.map(({ name, version: v, tarball, sha256, integrity }) => ({ name, version: v, tarball, sha256, integrity })) }, approvals: { owner: true, legalRedistribution: true, productionEnvironment: true, trustedPublishers: true, protectedTagRules: true, registryStateReconciled: true }, consumption: { state: "unused", tag: `npm-release-consumed/${tagName}/${authorizationId}` } };
   writeFileSync(join(dir, "release/npm-release-authorization.json"), JSON.stringify(receipt));
   const receiptCommit = commit(dir, "authorization receipt");
-  const receiptTagOid = tag(dir, "npm-release-auth/v1.2.3-next.4", receiptCommit, "authorization");
+  const receiptName = `npm-release-auth/${tagName}/${authorizationId}`;
+  const receiptTagOid = tag(dir, receiptName, receiptCommit, "authorization");
   git(dir, ["update-ref", "refs/remotes/origin/main", receiptCommit]);
-  return { dir, release, tree, releaseTagOid, receiptCommit, receiptTagOid, receipt };
-};
-const verify = (state, overrides = {}) => spawnSync(process.execPath, [
-  verifier, overrides.tag ?? "v1.2.3-next.4", overrides.release ?? state.release,
-  overrides.ref ?? "refs/tags/npm-release-auth/v1.2.3-next.4",
-  overrides.receipt ?? state.receiptCommit, overrides.tagOid ?? state.receiptTagOid,
-  overrides.releaseTagOid ?? state.releaseTagOid,
-], { cwd: state.dir, encoding: "utf8" });
-const expectFail = (scenario, mutate) => {
-  const state = setup(); mutate(state);
-  assert.notEqual(verify(state).status, 0, scenario);
-};
-
-assert.equal(verify(setup()).status, 0, "real independent receipt should pass");
-expectFail("edited receipt", (s) => {
-  const p = join(s.dir, "release/npm-release-authorization.json");
-  writeFileSync(p, readFileSync(p, "utf8").replace('"owner":true', '"owner":false'));
-  s.receiptCommit = commit(s.dir, "edited"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "edited");
-});
-expectFail("moved receipt tag object same commit", (s) => { tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "different message"); });
-expectFail("moved release tag object same commit", (s) => { tag(s.dir, "v1.2.3-next.4", s.release, "different release message"); });
-expectFail("receipt tag of tag", (s) => { s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptTagOid, "nested"); });
-expectFail("release tag of tag", (s) => { s.releaseTagOid = tag(s.dir, "v1.2.3-next.4", s.releaseTagOid, "nested release"); });
-expectFail("deleted release tag", (s) => git(s.dir, ["tag", "-d", "v1.2.3-next.4"]));
-expectFail("non-main receipt", (s) => git(s.dir, ["update-ref", "refs/remotes/origin/main", s.release]));
-expectFail("lightweight receipt", (s) => { git(s.dir, ["tag", "-d", "npm-release-auth/v1.2.3-next.4"]); git(s.dir, ["tag", "npm-release-auth/v1.2.3-next.4", s.receiptCommit]); s.receiptTagOid = git(s.dir, ["rev-parse", "refs/tags/npm-release-auth/v1.2.3-next.4"]); });
-expectFail("ambiguous branch/ref", (s) => git(s.dir, ["branch", "npm-release-auth/v1.2.3-next.4"]));
-expectFail("receipt replay", (s) => { s.release = `${s.release}^`; });
-expectFail("symlink receipt", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); rmSync(p); symlinkSync("../package.json", p); s.receiptCommit = commit(s.dir, "symlink"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "symlink"); });
-expectFail("duplicate JSON keys", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('"owner":true', '"owner":false,"owner":true')); s.receiptCommit = commit(s.dir, "duplicate"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "duplicate"); });
-expectFail("unknown receipt key", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('{"schemaVersion"', '{"unknown":true,"schemaVersion"')); s.receiptCommit = commit(s.dir, "unknown"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "unknown"); });
-expectFail("semantic package drift", (s) => { const p = join(s.dir, "release/npm-release-authorization.json"); writeFileSync(p, readFileSync(p, "utf8").replace('"distTag":"next"', '"distTag":"latest"')); s.receiptCommit = commit(s.dir, "drift"); s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "drift"); });
-expectFail("non-JSON YAML receipt", (s) => {
-  const p = join(s.dir, "release/npm-release-authorization.json");
-  writeFileSync(p, "schemaVersion: 1\nenabled: true\ntag: v1.2.3-next.4\nreleaseCommit: " + s.release + "\nreleaseTree: " + s.tree + "\n");
-  s.receiptCommit = commit(s.dir, "yaml");
-  s.receiptTagOid = tag(s.dir, "npm-release-auth/v1.2.3-next.4", s.receiptCommit, "yaml");
-});
-console.log("npm authorization Git E2E matrix passed");
+  return { dir, manifestPath, manifest, receipt, receiptCommit, receiptTagOid, receiptName, releaseCommit };
+}
+function verify(state, overrides = {}) {
+  return spawnSync(process.execPath, [verifier, state.manifestPath, overrides.releaseCommit ?? state.releaseCommit, `refs/tags/${state.receiptName}`, overrides.receiptCommit ?? state.receiptCommit, overrides.receiptTagOid ?? state.receiptTagOid, authorizationId], { cwd: state.dir, encoding: "utf8", env: { ...process.env, RELEASE_AUTHORIZATION_NONCE: overrides.nonce ?? state.nonce ?? nonce, RELEASE_AUTHORIZATION_NOW: "2026-08-18T00:05:00.000Z" } });
+}
+function reject(label, mutate) { const state = setup(); mutate(state); assert.notEqual(verify(state).status, 0, label); rmSync(state.dir, { recursive: true, force: true }); }
+const valid = setup(); assert.equal(verify(valid).status, 0, verify(valid).stderr); rmSync(valid.dir, { recursive: true, force: true });
+reject("nonce replay", (state) => { state.nonce = "wrong"; });
+reject("moved receipt tag object", (state) => { tag(state.dir, state.receiptName, state.receiptCommit, "different annotation"); });
+reject("receipt tag of tag", (state) => { state.receiptTagOid = tag(state.dir, state.receiptName, state.receiptTagOid, "nested"); });
+reject("non-main receipt", (state) => { git(state.dir, ["update-ref", "refs/remotes/origin/main", state.releaseCommit]); });
+reject("ambiguous branch", (state) => { git(state.dir, ["branch", state.receiptName]); });
+reject("release commit replay", (state) => { state.releaseCommit = `${state.releaseCommit}^`; });
+reject("consumed authorization", (state) => { tag(state.dir, state.receipt.consumption.tag, state.receiptCommit, "consumed"); });
+reject("competing consumption writer", (state) => { tag(state.dir, state.receipt.consumption.tag, state.releaseCommit, "competing consume"); });
+reject("manifest drift", (state) => { state.manifest.version = "1.2.4"; writeFileSync(state.manifestPath, JSON.stringify(state.manifest)); });
+reject("non-JSON receipt", (state) => { writeFileSync(join(state.dir, "release/npm-release-authorization.json"), "enabled: true\n"); state.receiptCommit = commit(state.dir, "yaml"); state.receiptTagOid = tag(state.dir, state.receiptName, state.receiptCommit, "yaml"); git(state.dir, ["update-ref", "refs/remotes/origin/main", state.receiptCommit]); });
+console.log("npm formal authorization v3 Git E2E matrix passed");

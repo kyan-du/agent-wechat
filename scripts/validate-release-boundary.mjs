@@ -141,6 +141,9 @@ for (const name of workflows) {
   if (name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
     failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
   }
+  if (name.startsWith("npm-agent-") && !/deploymentEnabled!==false/.test(text)) {
+    failures.push(`${path} lacks the inactive Agent release contract guard`);
+  }
   if (GHCR_LATEST.test(text) || LOCAL_LATEST.test(text)) failures.push(`${path} can reference or move :latest before first-release authorization`);
 }
 
