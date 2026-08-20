@@ -18,6 +18,7 @@ if (deploy.permissions?.contents !== "write" || deploy.permissions?.["id-token"]
 const candidateText=YAML.stringify(candidate), deployText=YAML.stringify(deploy);
 for (const proof of ["prepare-agent-release.mjs","verify-agent-release.mjs","cmp ","diff -qr","artifact-id","artifact-digest","npm-production-${VERSION}-${RELEASE_SHA}"]) if (!text.includes(proof)) throw new Error(`candidate intent proof missing: ${proof}`);
 for (const operation of ["npm publish","npm dist-tag add","latest","ensure-github-release.mjs","verify-release-operation.mjs","verify-agent-release.mjs","reconcile-npm-release.mjs","--provenance"]) if (!deployText.includes(operation)) throw new Error(`production workflow missing ${operation}`);
+if (!deployText.includes("pnpm/action-setup@") || !deployText.includes("pnpm install --frozen-lockfile")) throw new Error("deploy job must install release script dependencies before re-hashing sealed artifacts");
 if (/npm-release-authorization|authorization_id|atomic-cas-required|NPM_AUTHORIZATION/.test(text)) throw new Error("unsupported external authorization/CAS remains");
 if (!text.includes("'^[0-9]+\\.[0-9]+\\.[0-9]+$'")) throw new Error("formal stable version guard missing");
 const npmWorkflows=readdirSync(".github/workflows").filter(n=>/^npm-.*\.ya?ml$/.test(n)).sort();
