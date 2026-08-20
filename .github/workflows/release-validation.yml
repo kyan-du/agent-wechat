@@ -20,7 +20,6 @@ on:
       - 'scripts/agent-release*.mjs'
       - 'scripts/prepare-agent-release.mjs'
       - 'scripts/prepare-release-pr.mjs'
-      - 'scripts/release-authorization*.mjs'
       - 'scripts/release-reconciliation*.mjs'
       - 'scripts/verify-agent-release.mjs'
       - 'scripts/test-agent-release-workflows.mjs'
@@ -47,7 +46,6 @@ on:
       - 'scripts/agent-release*.mjs'
       - 'scripts/prepare-agent-release.mjs'
       - 'scripts/prepare-release-pr.mjs'
-      - 'scripts/release-authorization*.mjs'
       - 'scripts/release-reconciliation*.mjs'
       - 'scripts/verify-agent-release.mjs'
       - 'scripts/test-agent-release-workflows.mjs'
@@ -90,14 +88,10 @@ jobs:
       - name: Prove validation-only contract
         run: ./scripts/test-prerelease-contract.sh
 
-      - name: Prove canonical prerelease manifest
-        run: pnpm test:prerelease-manifest
-
-      - name: Prove inactive Agent release architecture
+      - name: Prove active Agent release architecture
         run: |
           pnpm test:release-plan
           pnpm test:release-workflows
-          node scripts/test-npm-release-authorization.mjs
 
       - name: Validate clean release inputs and real pack reports
         env:

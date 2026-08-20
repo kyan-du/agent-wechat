@@ -1,5 +1,26 @@
 # @agent-wechat/wechat
 
+## 0.12.0
+
+### Minor Changes
+
+- [#3](https://github.com/kyan-du/agent-wechat/pull/3) [`8b28b10`](https://github.com/kyan-du/agent-wechat/commit/8b28b10d5aa32e017b0c030333deca1efc14c0f1) Thanks [@kyan-du](https://github.com/kyan-du)! - Update for openclaw 2026.5+ compatibility:
+
+  - Add `channelConfigs` metadata to `openclaw.plugin.json` so the gateway can validate config and load setup surfaces before the plugin runtime imports (silences the "channel plugin manifest declares wechat without channelConfigs metadata" warning).
+  - Replace deprecated `runtime.config.loadConfig()` calls with `runtime.config.current()`.
+  - Add a `message` adapter via `createChannelMessageAdapterFromOutbound` from `openclaw/plugin-sdk/channel-message`. The legacy `outbound` adapter is kept for older openclaw versions.
+  - Bump the `openclaw` peer dependency floor to `^2026.5.12`.
+
+  The deprecated `outbound` adapter and `dispatchReplyWithBufferedBlockDispatcher` ingest flow continue to work via openclaw's compat shims; a follow-up release will migrate the monitor's dispatch path to `core.channel.turn.runPrepared(...)`.
+
+- [#8](https://github.com/kyan-du/agent-wechat/pull/8) [`522415f`](https://github.com/kyan-du/agent-wechat/commit/522415fa1208919f7b4edf5ad785ca6fa11d0095) Thanks [@vangie](https://github.com/vangie)! - Experimental fingerprint and send-pacing changes. Not a guarantee of account safety.
+
+  - Per-volume machine-id; hostname/MAC generated before create (`wx up` or `scripts/device-identity.sh`) and passed into Docker. Compose fails closed if they are unset.
+  - Outbound queue (from #4) plus chat cooldown, hourly/daily budgets, quiet hours, and inbound-length reading delay
+  - Same-chat identity prefers live a11y header + local DB; Frida verify-only is fallback when that is ambiguous
+  - Reconnect catch-up stays `read-only` unless `catchUpMode` is exactly `latest`. Auto-replies are capped at `catchUpChatBudget` chats (default 5), one per poll; leftovers stay held until the budget is raised or a human handles them
+  - Security popups pause outbound; resume via POST /api/status/outbound/resume
+
 ## 0.12.0-next.0
 
 ### Minor Changes
