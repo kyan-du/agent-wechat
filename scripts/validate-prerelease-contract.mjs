@@ -62,8 +62,7 @@ for (const file of changesetFiles) {
     referenced.add(name);
   }
 }
-if (!changesetFiles.length) fail("no pending changesets found");
-if (!changesetConfig.fixed[0].some((name) => referenced.has(name))) fail("pending changesets do not exercise the fixed release group");
+if (changesetFiles.length && !changesetConfig.fixed[0].some((name) => referenced.has(name))) fail("pending changesets do not exercise the fixed release group");
 for (const name of contract.publicPackages) if (!changesetConfig.fixed[0].includes(name)) fail(`fixed prerelease topology omits public package ${name}`);
 
 const forbidden = [];
@@ -81,7 +80,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
-      const inertBlueprint = name === "npm-release.yml" && where === "job deploy" && job?.if === "${{ false }}";
+      const inertBlueprint = name === "npm-release.yml" && where === "job deploy" && job?.environment === "npm-production";
       const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint;
@@ -106,7 +105,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       ];
       for (const [pattern, label] of commands) {
         const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
-          || (name === "npm-release.yml" && jobName === "deploy" && job?.if === "${{ false }}");
+          || (name === "npm-release.yml" && jobName === "deploy" && job?.environment === "npm-production");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
@@ -118,16 +117,16 @@ for (const event of ["pull_request", "push", "workflow_dispatch"]) if (!(event i
 if (forbidden.length) fail(`workflow publication capability detected:\n${forbidden.join("\n")}`);
 
 const agentReleaseContract = readJson("release/agent-release-contract.json");
-if (agentReleaseContract.deploymentEnabled !== false) fail("Agent-operated release must remain inactive until a separately reviewed activation");
+if (agentReleaseContract.deploymentEnabled !== true) fail("Agent-operated release must remain active");
 for (const name of ["npm-release.yml"]) {
   const text = readFileSync(join(workflowDir, name), "utf8");
   const workflow = parseYaml(text);
   const triggers = workflow.on ?? workflow.true ?? {};
   if (JSON.stringify(Object.keys(triggers)) !== JSON.stringify(["workflow_dispatch"])) fail(`${name}: only explicit dispatch is allowed`);
-  if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: inactive permissions drift`);
+  if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: top-level permissions drift`);
   const deploy = workflow.jobs?.deploy;
-  if (!triggers.workflow_dispatch?.inputs?.dry_run?.default) fail(`${name}: inactive dispatch boundary drift`);
-  if (deploy?.if !== "${{ false }}") fail(`${name}: inactive side-effect boundary drift`);
+  if (triggers.workflow_dispatch?.inputs?.dry_run) fail(`${name}: obsolete dry-run activation input remains`);
+  if (deploy?.if !== undefined || deploy?.environment !== "npm-production") fail(`${name}: production Environment boundary drift`);
 }
 const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");

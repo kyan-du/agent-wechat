@@ -1,4 +1,4 @@
-name: Agent-operated npm production release (inactive)
+name: Agent-operated npm production release
 
 on:
   workflow_dispatch:
@@ -15,10 +15,6 @@ on:
         description: Lowercase sha256 digest of the reviewed release manifest
         required: true
         type: string
-      authorization_id:
-        description: Opaque one-time authorization identity
-        required: true
-        type: string
       operation:
         description: Fresh release or explicit partial-publication reconciliation
         required: true
@@ -28,14 +24,9 @@ on:
         description: Required exact PARTIAL_PUBLICATION receipt digest for reconcile
         required: false
         type: string
-      dry_run:
-        description: Validation only; deployment activation is not part of this PR
-        required: true
-        default: true
-        type: boolean
 
 concurrency:
-  group: npm-production-${{ inputs.version }}-${{ inputs.manifest_sha256 }}-${{ inputs.authorization_id }}
+  group: npm-production-${{ inputs.version }}-${{ inputs.release_sha }}-${{ inputs.manifest_sha256 }}-${{ inputs.operation }}
   cancel-in-progress: false
 
 permissions:
@@ -67,18 +58,14 @@ jobs:
           VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
-          AUTHORIZATION_ID: ${{ inputs.authorization_id }}
           OPERATION: ${{ inputs.operation }}
           RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
-          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          test "$DRY_RUN" = true
           test "$GITHUB_SHA" = "$RELEASE_SHA"
           printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
           printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$MANIFEST_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
-          printf '%s' "$AUTHORIZATION_ID" | grep -Eq '^[0-9a-f]{32}$'
           if [ "$OPERATION" = reconcile ]; then
             printf '%s' "$RECONCILIATION_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
           else
@@ -87,10 +74,10 @@ jobs:
           fi
           git fetch origin main --no-tags
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==false||c.environment!=="npm-production"||c.distTag!=="latest")throw Error("unexpected activation state")'
+          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==true||c.environment!=="npm-production"||c.distTag!=="latest")throw Error("unexpected activation state")'
           artifact_name="npm-production-${VERSION}-${RELEASE_SHA}-${MANIFEST_SHA256#sha256:}"
           printf 'artifact_name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
-      - name: Install, test, build, and prove inactive contracts
+      - name: Install, test, build, and prove active contracts
         env:
           CI: true
         run: |
@@ -101,7 +88,6 @@ jobs:
           pnpm typecheck
           pnpm -r --if-present test
           pnpm turbo run build --filter='!@kyan-du/agent-wechat-docs'
-          node scripts/test-npm-release-authorization.mjs
           node scripts/validate-release-boundary.mjs
 
   candidate:
@@ -159,9 +145,8 @@ jobs:
           echo 'artifact-id=${{ steps.upload.outputs.artifact-id }} digest=${{ steps.upload.outputs.artifact-digest }} run=${{ github.run_id }} attempt=${{ github.run_attempt }}'
 
   deploy:
-    name: Unreachable production deployment blueprint
+    name: Deploy sealed production candidate
     needs: [validate, candidate]
-    if: ${{ false }} # Activation requires a separate exact-head reviewed PR.
     runs-on: ubuntu-latest
     environment: npm-production
     permissions:
@@ -190,21 +175,6 @@ jobs:
       - run: npm install --global npm@11.5.1
       - name: Re-hash sealed production candidate without rebuilding
         run: node scripts/verify-agent-release.mjs --manifest .release-candidate/agent-release-manifest.json --artifacts .release-candidate/tarballs --version "${{ inputs.version }}" --commit "${{ inputs.release_sha }}" --manifest-sha256 "${{ inputs.manifest_sha256 }}"
-      - name: Fetch and authenticate authorization before replay lookup
-        env:
-          RELEASE_AUTHORIZATION_NONCE: ${{ secrets.RELEASE_AUTHORIZATION_NONCE }}
-          RELEASE_OPERATION: ${{ inputs.operation }}
-          RELEASE_RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
-          VERSION: ${{ inputs.version }}
-          AUTHORIZATION_ID: ${{ inputs.authorization_id }}
-          NPM_AUTHORIZATION_SHA: ${{ vars.NPM_AUTHORIZATION_SHA }}
-          NPM_AUTHORIZATION_TAG_OID: ${{ vars.NPM_AUTHORIZATION_TAG_OID }}
-        run: |
-          printf '%s' "$NPM_AUTHORIZATION_SHA" | grep -Eq '^[0-9a-f]{40}$'
-          printf '%s' "$NPM_AUTHORIZATION_TAG_OID" | grep -Eq '^[0-9a-f]{40}$'
-          authorization_ref="refs/tags/npm-release-auth/v$VERSION/$AUTHORIZATION_ID"
-          git fetch origin "$authorization_ref:$authorization_ref" --no-tags
-          node scripts/verify-npm-release-authorization.mjs .release-candidate/agent-release-manifest.json "${{ inputs.release_sha }}" "$authorization_ref" "$NPM_AUTHORIZATION_SHA" "$NPM_AUTHORIZATION_TAG_OID" "$AUTHORIZATION_ID" --skip-consumption-lookup
       - name: Authenticate operation against exact registry state before writes
         env:
           RELEASE_OPERATION: ${{ inputs.operation }}
@@ -216,14 +186,15 @@ jobs:
           if [ "$RELEASE_OPERATION" = reconcile ]; then operation_args+=(--reconciliation-sha256 "$RECONCILIATION_SHA256"); fi
           node scripts/verify-release-operation.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}"
           node scripts/select-npm-release-artifacts.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}" --output publish-list.txt
-      - name: Atomically consume authorization and create annotated tag
+      - name: Create or verify exact immutable release tag
         env:
-          AUTHORIZATION_ID: ${{ inputs.authorization_id }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
-          consumption="npm-release-consumed/v$VERSION/$AUTHORIZATION_ID"
-          node scripts/consume-release-authorization.mjs --atomic-cas-required --consumption "$consumption" --release-tag "v$VERSION" --target "$RELEASE_SHA"
+          set -euo pipefail
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v$VERSION" --jq .object.sha 2>/dev/null || true)
+          if [ -n "$existing" ]; then test "$existing" = "$RELEASE_SHA"; else gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$RELEASE_SHA"; fi
       - name: Publish only missing sealed tarballs with provenance
         env:
           NPM_CONFIG_PROVENANCE: 'true'

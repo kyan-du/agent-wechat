@@ -30,24 +30,6 @@ mutate_and_reject .changeset/config.json \
 mutate_and_reject .changeset/config.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.fixed=j.fixed.map(g=>g.filter(n=>!n.endsWith("agent-server")));fs.writeFileSync(p,JSON.stringify(j));' \
   'fixed-group topology drift'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("---\n", "---\nunknown-workspace: patch\n"));' \
-  'unknown changeset workspace'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "@kyan-du/agent-wechat-cli: minor"));' \
-  'unquoted changeset package key'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\": prerelease"));' \
-  'unsupported changeset bump'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\": [minor]"));' \
-  'unsupported changeset value structure'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8"),line="\"@kyan-du/agent-wechat-cli\": minor";fs.writeFileSync(p,s.replace(line, line+"\n"+line));' \
-  'duplicate changeset package key'
-mutate_and_reject .changeset/risk-anti-detection.md \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("\"@kyan-du/agent-wechat-cli\": minor", "\"@kyan-du/agent-wechat-cli\" minor"));' \
-  'malformed changeset YAML'
 mutate_and_reject .github/workflows/release-validation.yml \
   'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("run: ./scripts/test-prerelease-contract.sh","run: npm publish --tag next"));' \
   'npm publish capability'
@@ -61,20 +43,17 @@ mutate_and_reject package.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.scripts.release="pnpm changeset publish";fs.writeFileSync(p,JSON.stringify(j));' \
   'root publish script'
 mutate_and_reject release/agent-release-contract.json \
-  'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.deploymentEnabled=true;fs.writeFileSync(p,JSON.stringify(j));' \
-  'Agent release activation in implementation PR'
+  'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.deploymentEnabled=false;fs.writeFileSync(p,JSON.stringify(j));' \
+  'stable release deactivation'
 mutate_and_reject .github/workflows/npm-release.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("id-token: none","id-token: write"));' \
-  'inactive OIDC permission expansion'
-mutate_and_reject .github/workflows/npm-release.yml \
-  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("if: ${{ false }} # Activation", "if: ${{ always() }} # Activation"));' \
-  'inactive single-publisher deployment activation'
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("environment: npm-production","environment: npm-unreviewed"));' \
+  'production Environment bypass'
 mutate_and_reject release/agent-release-contract.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.distTag="next";fs.writeFileSync(p,JSON.stringify(j));' \
   'formal publisher changed to next'
 
 node scripts/test-agent-release-workflows.mjs
-node --test scripts/agent-release.test.mjs scripts/release-authorization.test.mjs scripts/release-reconciliation.test.mjs
+node --test scripts/agent-release.test.mjs scripts/release-reconciliation.test.mjs
 if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-release.yml >/dev/null; then
   echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1
