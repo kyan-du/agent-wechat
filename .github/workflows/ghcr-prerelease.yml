@@ -27,7 +27,7 @@ jobs:
       sha: ${{ steps.guard.outputs.sha }}
       version: ${{ steps.guard.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -67,7 +67,7 @@ jobs:
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
@@ -78,15 +78,15 @@ jobs:
           cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
           [ -f packages/agent-server-rust/Cargo.lock ] && cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
           cp -r packages/agent-server-rust/src packages/agent-server-rust/migrations docker/agent-server-rust/
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
       - id: build
         name: Push content-addressed image only
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: docker
           platforms: ${{ matrix.platform }}
@@ -99,7 +99,7 @@ jobs:
           digest='${{ steps.build.outputs.digest }}'
           test "${digest#sha256:}" != "$digest"
           touch "/tmp/digests/${digest#sha256:}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -111,17 +111,17 @@ jobs:
     needs: [authorize, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: digest-*
           path: /tmp/digests
           merge-multiple: true
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
       - name: Publish exact tag and verify platforms
         env:
           VERSION: ${{ needs.authorize.outputs.version }}
