@@ -71,7 +71,7 @@ jobs:
           pnpm typecheck
           pnpm turbo run build --filter='!@kyan-du/agent-wechat-docs'
           pnpm -r --if-present test
-          pnpm test:release-boundary -- --require-rendered
+          pnpm test:release-boundary
 
       - name: Pack exact production tarballs
         run: |
