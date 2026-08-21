@@ -51,9 +51,11 @@ mutate_and_reject .github/workflows/npm-release.yml \
 mutate_and_reject release/agent-release-contract.json \
   'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p));j.distTag="next";fs.writeFileSync(p,JSON.stringify(j));' \
   'formal publisher changed to next'
+mutate_and_reject .github/workflows/npm-release.yml \
+  'const fs=require("fs"),p=process.argv[1],s=fs.readFileSync(p,"utf8");fs.writeFileSync(p,s.replace("version:\\n        description:", "version:\\n        description:").replace("version:\\n", "version:\\n      operation:\\n        required: true\\n        type: string\\n"));' \
+  'extra dispatch input'
 
-node scripts/test-agent-release-workflows.mjs
-node --test scripts/agent-release.test.mjs scripts/release-reconciliation.test.mjs
+node scripts/check-npm-production-release.mjs
 if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-release.yml >/dev/null; then
   echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1

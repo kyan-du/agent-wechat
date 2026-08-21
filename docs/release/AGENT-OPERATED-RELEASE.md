@@ -1,41 +1,47 @@
-# Agent-operated formal npm release
+# npm production release
 
-This is a **stable-only** production flow: no npm prerelease, no canary promotion, and no mutable tag/SHA input. The only publisher is `.github/workflows/npm-release.yml` in `kyan-du/agent-wechat`, protected by the `npm-production` GitHub Environment and npm Trusted Publishing.
+This repository has one stable npm production workflow: `.github/workflows/npm-release.yml`.
+It is intentionally small enough for a one-person project while keeping the important safety
+boundaries: exact version input, current `main`, CI evidence, package build/test/pack, one
+human approval gate, npm provenance, public registry verification, and an exact GitHub tag
+and Release.
 
-## Exact dispatch contract
+## Dispatch contract
 
-Dispatch the workflow from the exact release commit on `main` with:
+Run the workflow manually with one input:
 
-- `version`: exact stable `X.Y.Z` matching all three public package manifests;
-- `release_sha`: full 40-character immutable commit SHA, required to be an ancestor of `origin/main`;
-- `operation`: `release` when all exact versions are absent, otherwise `reconcile`;
-- `reconciliation_sha256`: empty for `release`; for `reconcile`, the exact digest of the reviewed partial publication receipt.
+- `version`: exact stable `X.Y.Z`, matching `@kyan-du/agent-wechat-cli` and `@kyan-du/agent-wechat-openclaw`.
 
-GitHub Environment approval is the human authorization boundary. There is deliberately no bespoke one-time receipt, nonce, owner-confirmation transport, or unsupported external CAS service.
+The workflow checks out `main` and fails unless the dispatch SHA equals the current
+`origin/main` SHA. It also requires at least one successful `CI` run for that commit on
+`main` before it packs or publishes.
 
-## Sealed artifacts and provenance
+## Approval and publishing
 
-The candidate job checks out only `release_sha`, builds the manifest and tarballs twice on the pinned runner toolchain, compares all bytes, verifies version/commit/artifact integrity, computes the manifest digest, and uploads one artifact whose name binds version, SHA, and that runner-generated manifest digest. Deploy downloads by the exact artifact ID from the same run and re-hashes it against the candidate job output; it never rebuilds.
+The `verify` job has read-only permissions. It installs dependencies, checks package
+metadata, typechecks, runs package tests, builds, creates npm tarballs, and clean-installs
+the packed tarballs.
 
-The deploy job receives `id-token: write` only after the `npm-production` Environment gate. Every missing tarball is published under a temporary staging tag using npm Trusted Publishing and `--provenance`. Existing versions fail closed unless their SRI and provenance match the manifest repository, workflow, source commit, and artifact.
+The `publish` job is bound to the `npm-production` GitHub Environment. Only after that
+environment is approved does the job receive `contents: write` and `id-token: write`.
+It verifies the downloaded tarballs, then publishes in this order with npm provenance:
 
-## Fail-closed reconciliation and partial publication recovery
+1. `@kyan-du/agent-wechat-cli`
+2. `@kyan-du/agent-wechat-openclaw`
 
-Before any write, registry and GitHub Release state is reconciled against the sealed manifest.
+After publication it queries both exact public registry versions, clean-installs them in
+a fresh project, imports both packages, and runs the `wx --version` binary smoke.
 
-- `release` is accepted only when all three exact versions are absent.
-- A partial publication requires a new explicit `reconcile` dispatch bound to the exact reconciliation receipt digest.
-- Drift in package integrity, provenance, source identity, or GitHub Release identity stops the run.
-- Recovery publishes only missing sealed tarballs. Zero missing tarballs is valid.
-- `latest` moves only after every package is verified; GitHub Release creation and clean-install smoke happen afterward.
+## Finalization
 
-The immutable `vX.Y.Z` ref is created or verified against `release_sha` immediately before package writes. Environment concurrency prevents overlapping runs for the same exact intent; npm version immutability plus registry reconciliation is the durable write boundary.
+Only after registry verification succeeds, the workflow creates or verifies:
 
-## Platform setup required before dispatch
+- exact tag `vX.Y.Z` pointing at the dispatch/current-main SHA;
+- GitHub Release `vX.Y.Z`.
 
-1. `npm-production` Environment must require an authorized reviewer and protected-branch deployment.
-2. Each public npm package must trust repository `kyan-du/agent-wechat`, workflow `.github/workflows/npm-release.yml`, Environment `npm-production`.
-3. The workflow needs repository contents write for `vX.Y.Z` and the final GitHub Release; tag rules must permit the GitHub Actions identity while preventing mutable release tags.
-4. Dispatch from `main` only after the activation PR is merged and the exact version, release SHA, operation, and reconciliation receipt requirement are independently reviewed.
+There is no manifest summary protocol, cross-job producer identity protocol, byte-for-byte
+double build, release/reconcile state machine, or partial-publication auto-recovery. If npm
+publishing is interrupted, stop and decide manually whether to use a new version or perform
+a targeted operator repair outside this workflow.
 
-GHCR is independent and is not triggered by this workflow.
+GHCR remains independent and is not triggered by this npm workflow.

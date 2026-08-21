@@ -1,28 +1,15 @@
-name: Agent-operated npm production release
+name: npm production release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact formal X.Y.Z version
+        description: Exact stable version to publish, for example 0.12.0
         required: true
-        type: string
-      release_sha:
-        description: Full immutable release commit SHA on main
-        required: true
-        type: string
-      operation:
-        description: Fresh release or explicit partial-publication reconciliation
-        required: true
-        type: choice
-        options: [release, reconcile]
-      reconciliation_sha256:
-        description: Required exact PARTIAL_PUBLICATION receipt digest for reconcile
-        required: false
         type: string
 
 concurrency:
-  group: npm-production-${{ inputs.version }}-${{ inputs.release_sha }}-${{ inputs.operation }}-${{ inputs.reconciliation_sha256 }}
+  group: npm-production-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions:
@@ -30,118 +17,88 @@ permissions:
   id-token: none
 
 jobs:
-  validate:
-    name: Validate explicit immutable production intent
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.release_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22.23.2
-          cache: pnpm
-      - run: npm install --global npm@11.5.1
-      - id: intent
-        name: Reject mutable, prerelease, or activated input
-        env:
-          VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
-          OPERATION: ${{ inputs.operation }}
-          RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_SHA" = "$RELEASE_SHA"
-          printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          printf '%s' "$RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'
-          if [ "$OPERATION" = reconcile ]; then
-            printf '%s' "$RECONCILIATION_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$'
-          else
-            test "$OPERATION" = release
-            test -z "$RECONCILIATION_SHA256"
-          fi
-          git fetch origin main --no-tags
-          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-          node -e 'const c=require("./release/agent-release-contract.json");if(c.deploymentEnabled!==true||c.environment!=="npm-production"||c.distTag!=="latest")throw Error("unexpected activation state")'
-      - name: Install, test, build, and prove active contracts
-        env:
-          CI: true
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm test:prerelease-contract
-          pnpm test:release-plan
-          pnpm test:release-workflows
-          pnpm typecheck
-          pnpm -r --if-present test
-          pnpm turbo run build --filter='!@kyan-du/agent-wechat-docs'
-          node scripts/validate-release-boundary.mjs
-
-  candidate:
-    name: Seal deterministic production candidate
-    needs: validate
+  verify:
+    name: Verify production package candidate
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
-      contents: read
       actions: read
-    outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
-      manifest_sha256: ${{ steps.seal.outputs.manifest_sha256 }}
+      contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.release_sha }}
+          ref: main
           fetch-depth: 0
           persist-credentials: false
+
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.23.2
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - id: seal
-        name: Generate twice and compare the complete candidate byte-for-byte
+
+      - name: Confirm dispatch SHA is current main with passing CI
         env:
-          VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p .release-candidate/first .release-candidate/second
-          node scripts/prepare-agent-release.mjs --output .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs
-          node scripts/prepare-agent-release.mjs --output .release-candidate/second/agent-release-manifest.json --artifacts .release-candidate/second/tarballs
-          cmp .release-candidate/first/agent-release-manifest.json .release-candidate/second/agent-release-manifest.json
-          diff -qr .release-candidate/first/tarballs .release-candidate/second/tarballs
-          node scripts/verify-agent-release.mjs --manifest .release-candidate/first/agent-release-manifest.json --artifacts .release-candidate/first/tarballs --version "$VERSION" --commit "$RELEASE_SHA"
-          manifest_sha256=$(node --input-type=module -e 'import { readFileSync } from "node:fs"; import { sha256Bytes } from "./scripts/agent-release-lib.mjs"; console.log(sha256Bytes(readFileSync(process.argv[1])));' .release-candidate/first/agent-release-manifest.json)
-          printf 'manifest_sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
-          printf 'artifact_name=npm-production-%s-%s-%s\n' "$VERSION" "$RELEASE_SHA" "${manifest_sha256#sha256:}" >> "$GITHUB_OUTPUT"
-          rm -rf .release-candidate/second
-          mv .release-candidate/first/agent-release-manifest.json .release-candidate/
-          mv .release-candidate/first/tarballs .release-candidate/
-          rmdir .release-candidate/first
-      - id: upload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+          git fetch origin main --no-tags
+          main_sha=$(git rev-parse origin/main)
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          test "$GITHUB_SHA" = "$main_sha"
+          successes=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow CI \
+            --branch main \
+            --commit "$GITHUB_SHA" \
+            --status completed \
+            --limit 20 \
+            --json conclusion \
+            --jq '[.[] | select(.conclusion == "success")] | length')
+          test "$successes" -gt 0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate exact release version and package metadata
+        run: node scripts/check-npm-production-release.mjs "${{ inputs.version }}"
+
+      - name: Test and build
+        env:
+          CI: true
+        run: |
+          pnpm typecheck
+          pnpm turbo run build --filter='!@kyan-du/agent-wechat-docs'
+          pnpm -r --if-present test
+          pnpm test:release-boundary -- --require-rendered
+
+      - name: Pack exact production tarballs
+        run: |
+          set -euo pipefail
+          rm -rf .release-pack
+          mkdir -p .release-pack
+          npm pack ./packages/cli --json --ignore-scripts --pack-destination .release-pack
+          npm pack ./packages/openclaw-extension --json --ignore-scripts --pack-destination .release-pack
+          npm pack ./packages/wechaty-puppet --json --ignore-scripts --pack-destination .release-pack
+          shasum -a 256 .release-pack/*.tgz > .release-pack/SHA256SUMS
+          node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
+
+      - name: Clean-install and import packed tarballs
+        run: pnpm test:npm-packages
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ steps.seal.outputs.artifact_name }}
-          path: |
-            .release-candidate/agent-release-manifest.json
-            .release-candidate/tarballs/*.tgz
+          name: npm-production-${{ inputs.version }}-${{ github.sha }}
+          path: .release-pack
           if-no-files-found: error
           retention-days: 7
-      - name: Bind artifact producer identity
-        run: |
-          test -n '${{ steps.upload.outputs.artifact-id }}'
-          echo 'artifact-id=${{ steps.upload.outputs.artifact-id }} digest=${{ steps.upload.outputs.artifact-digest }} run=${{ github.run_id }} attempt=${{ github.run_attempt }}'
 
-  deploy:
-    name: Deploy sealed production candidate
-    needs: [validate, candidate]
+  publish:
+    name: Publish to npm production
+    needs: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     environment: npm-production
     permissions:
       contents: write
@@ -149,72 +106,61 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.release_sha }}
+          ref: main
           fetch-depth: 0
           persist-credentials: true
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          artifact-ids: ${{ needs.candidate.outputs.artifact_id }}
-          path: .release-candidate
-          merge-multiple: true
-          run-id: ${{ github.run_id }}
-          github-token: ${{ github.token }}
-      - name: Bind downloaded artifact to producer digest
-        run: |
-          test -n '${{ needs.candidate.outputs.artifact_id }}'
-          test -n '${{ needs.candidate.outputs.artifact_digest }}'
-          test -f .release-candidate/agent-release-manifest.json
-          test -d .release-candidate/tarballs
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+          name: npm-production-${{ inputs.version }}-${{ github.sha }}
+          path: .release-pack
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.23.2
           registry-url: https://registry.npmjs.org
-      - run: npm install --global npm@11.5.1
-      - run: pnpm install --frozen-lockfile
-      - name: Re-hash sealed production candidate without rebuilding
-        run: node scripts/verify-agent-release.mjs --manifest .release-candidate/agent-release-manifest.json --artifacts .release-candidate/tarballs --version "${{ inputs.version }}" --commit "${{ inputs.release_sha }}" --manifest-sha256 "${{ needs.candidate.outputs.manifest_sha256 }}"
-      - name: Authenticate operation against exact registry state before writes
-        env:
-          RELEASE_OPERATION: ${{ inputs.operation }}
-          RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.5.1
+
+      - name: Confirm exact main and packed tarballs
         run: |
           set -euo pipefail
-          node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --output reconciliation-before.json
-          operation_args=(--operation "$RELEASE_OPERATION")
-          if [ "$RELEASE_OPERATION" = reconcile ]; then operation_args+=(--reconciliation-sha256 "$RECONCILIATION_SHA256"); fi
-          node scripts/verify-release-operation.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}"
-          node scripts/select-npm-release-artifacts.mjs --manifest .release-candidate/agent-release-manifest.json --reconciliation reconciliation-before.json "${operation_args[@]}" --output publish-list.txt
-      - name: Create or verify exact immutable release tag
+          git fetch origin main --no-tags
+          main_sha=$(git rev-parse origin/main)
+          test "$(git rev-parse HEAD)" = "$main_sha"
+          test "$GITHUB_SHA" = "$main_sha"
+          shasum -a 256 --check .release-pack/SHA256SUMS
+          node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
+
+      - name: Publish @kyan-du/agent-wechat-cli with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
+
+      - name: Publish @kyan-du/agent-wechat-openclaw with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-openclaw-${{ inputs.version }}.tgz" --access public --provenance
+
+      - name: Publish @kyan-du/agent-wechat-wechaty-puppet with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-wechaty-puppet-${{ inputs.version }}.tgz" --access public --provenance
+
+      - name: Verify public registry versions and clean install
+        run: node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"
+
+      - name: Create exact tag and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
           set -euo pipefail
-          existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v$VERSION" --jq .object.sha 2>/dev/null || true)
-          if [ -n "$existing" ]; then test "$existing" = "$RELEASE_SHA"; else gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$RELEASE_SHA"; fi
-      - name: Publish only missing sealed tarballs with provenance
-        env:
-          NPM_CONFIG_PROVENANCE: 'true'
-        run: |
-          while IFS= read -r tarball; do
-            test -n "$tarball" || continue
-            npm publish ".release-candidate/tarballs/$tarball" --tag "agent-stage-${{ inputs.version }}" --access public --provenance
-          done < publish-list.txt
-      - name: Verify package integrity and provenance before latest
-        run: node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --output reconciliation-complete.json
-      - name: Advance only incorrect latest mappings
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          npm dist-tag add "@kyan-du/agent-wechat-cli@$VERSION" latest
-          npm dist-tag add "@kyan-du/agent-wechat-openclaw@$VERSION" latest
-          npm dist-tag add "@kyan-du/agent-wechat-wechaty-puppet@$VERSION" latest
-          node scripts/reconcile-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json --require-complete --require-dist-tags --output reconciliation-final.json
-      - name: Create or verify exact final GitHub Release after registry reconciliation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/ensure-github-release.mjs --manifest .release-candidate/agent-release-manifest.json
-      - name: Clean-install exact public registry versions
-        run: node scripts/smoke-published-npm-release.mjs --manifest .release-candidate/agent-release-manifest.json
+          tag="v$VERSION"
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            test "$existing" = "$GITHUB_SHA"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA"
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_tag=$(gh release view "$tag" --json tagName --jq .tagName)
+            test "$release_tag" = "$tag"
+          else
+            gh release create "$tag" --verify-tag --title "$tag" --notes "Release $tag"
+          fi

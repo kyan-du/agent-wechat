@@ -80,7 +80,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (permissions === "write-all") forbidden.push(`${name}: ${where} write-all permission`);
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
-      const inertBlueprint = name === "npm-release.yml" && where === "job deploy" && job?.environment === "npm-production";
+      const inertBlueprint = name === "npm-release.yml" && where === "job publish" && job?.environment === "npm-production";
       const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint;
@@ -105,7 +105,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       ];
       for (const [pattern, label] of commands) {
         const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
-          || (name === "npm-release.yml" && jobName === "deploy" && job?.environment === "npm-production");
+          || (name === "npm-release.yml" && jobName === "publish" && job?.environment === "npm-production");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }
@@ -118,21 +118,44 @@ if (forbidden.length) fail(`workflow publication capability detected:\n${forbidd
 
 const agentReleaseContract = readJson("release/agent-release-contract.json");
 if (agentReleaseContract.deploymentEnabled !== true) fail("Agent-operated release must remain active");
-for (const name of ["npm-release.yml"]) {
-  const text = readFileSync(join(workflowDir, name), "utf8");
-  const workflow = parseYaml(text);
-  const triggers = workflow.on ?? workflow.true ?? {};
-  if (JSON.stringify(Object.keys(triggers)) !== JSON.stringify(["workflow_dispatch"])) fail(`${name}: only explicit dispatch is allowed`);
-  if (workflow.permissions?.contents !== "read" || workflow.permissions?.["id-token"] !== "none") fail(`${name}: top-level permissions drift`);
-  const deploy = workflow.jobs?.deploy;
-  if (triggers.workflow_dispatch?.inputs?.dry_run) fail(`${name}: obsolete dry-run activation input remains`);
-  if (deploy?.if !== undefined || deploy?.environment !== "npm-production") fail(`${name}: production Environment boundary drift`);
+const npmText = readFileSync(join(workflowDir, "npm-release.yml"), "utf8");
+const npmWorkflow = parseYaml(npmText);
+const npmTriggers = npmWorkflow.on ?? npmWorkflow.true ?? {};
+if (JSON.stringify(Object.keys(npmTriggers)) !== JSON.stringify(["workflow_dispatch"])) fail("npm-release.yml: only explicit dispatch is allowed");
+const npmInputs = npmTriggers.workflow_dispatch?.inputs ?? {};
+if (JSON.stringify(Object.keys(npmInputs)) !== JSON.stringify(["version"])) fail(`npm-release.yml: expected only version input, found ${Object.keys(npmInputs).join(", ")}`);
+if (workflowDir && /release_sha|operation|reconciliation_sha256|manifest|artifact_id|artifact-digest|cmp |diff -qr|reconcile-npm-release|prepare-agent-release/.test(npmText)) {
+  fail("npm-release.yml: obsolete manifest/artifact/reconcile machinery remains");
 }
+if (npmWorkflow.permissions?.contents !== "read" || npmWorkflow.permissions?.["id-token"] !== "none") fail("npm-release.yml: top-level permissions drift");
+const verify = npmWorkflow.jobs?.verify;
+const publish = npmWorkflow.jobs?.publish;
+if (!verify || !publish || publish?.if !== undefined || publish?.environment !== "npm-production") fail("npm-release.yml: production Environment boundary drift");
+if (publish.permissions?.contents !== "write" || publish.permissions?.["id-token"] !== "write") fail("npm-release.yml: production write permissions must remain environment-gated");
+for (const required of [
+  "git rev-parse origin/main",
+  "test \"$GITHUB_SHA\" = \"$main_sha\"",
+  "--workflow CI",
+  "check-npm-production-release.mjs",
+  "npm pack ./packages/cli",
+  "npm pack ./packages/openclaw-extension",
+  "npm pack ./packages/wechaty-puppet",
+  "upload-artifact@",
+  "environment: npm-production",
+  "npm publish \".release-pack/kyan-du-agent-wechat-cli-",
+  "npm publish \".release-pack/kyan-du-agent-wechat-openclaw-",
+  "npm publish \".release-pack/kyan-du-agent-wechat-wechaty-puppet-",
+  "--provenance",
+  "verify-published-npm-release.mjs",
+  "refs/tags/$tag",
+  "gh release create",
+]) if (!npmText.includes(required)) fail(`npm-release.yml: missing ${required}`);
 const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");
 if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md")) || !existsSync(join(root, "docs", "release", "AGENT-OPERATED-RELEASE.md"))) fail("release runbook is missing");
 
 if (agentReleaseContract.environment !== "npm-production" || agentReleaseContract.distTag !== "latest" || agentReleaseContract.githubPrerelease !== false) fail("formal production release identity drift");
+if (!same(agentReleaseContract.publicPackages.map((item) => item.name), contract.publicPackages)) fail("formal production package set drift");
 if (/next|prerelease/i.test(JSON.stringify({ environment: agentReleaseContract.environment, versionPattern: agentReleaseContract.versionPattern, distTag: agentReleaseContract.distTag }))) fail("Agent release contract retained prerelease identity");
 const releaseWorkflows = readdirSync(workflowDir).filter((name) => /release/i.test(name)).sort();
 if (JSON.stringify(releaseWorkflows) !== JSON.stringify(["ghcr-prerelease.yml", "npm-release.yml", "release-validation.yml"])) fail(`unexpected release workflows: ${releaseWorkflows.join(", ")}`);

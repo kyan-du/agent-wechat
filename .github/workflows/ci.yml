@@ -55,6 +55,9 @@ jobs:
               - 'scripts/validate-prerelease.sh'
               - 'scripts/test-prerelease-contract.sh'
               - 'scripts/test-prerelease-manifest.sh'
+              - 'scripts/check-npm-production-release.mjs'
+              - 'scripts/verify-published-npm-release.mjs'
+              - 'scripts/smoke-npm-packages.mjs'
               - 'scripts/test-packed-cli.sh'
               - 'scripts/test-packed-cli-health.mjs'
               - 'release/**'
@@ -140,7 +143,9 @@ jobs:
         run: ./scripts/test-packed-cli.sh
 
       - name: Validate prerelease contract without publication
-        run: pnpm test:prerelease-contract
+        run: |
+          pnpm test:prerelease-contract
+          pnpm test:npm-production-release
 
       - name: Guard unreleased channels and root CLI image behavior
         run: |
