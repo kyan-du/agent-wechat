@@ -5,7 +5,7 @@ does not recover partial publication automatically.
 
 ## Immutable contract
 
-- Public packages: `@agent-wechat/cli` and `@agent-wechat/wechat`.
+- Public packages: `@kyan-du/agent-wechat-cli` and `@kyan-du/agent-wechat-openclaw`.
 - Workflow: `.github/workflows/npm-release.yml`.
 - Environment gate: `npm-production`.
 - Input: exact stable `X.Y.Z` only.
@@ -46,7 +46,7 @@ Manually run `npm production release` from `main` with the exact version. The wo
 2. confirm successful CI evidence for that commit;
 3. install, test, build, and pack;
 4. wait at the `npm-production` approval gate;
-5. publish `@agent-wechat/cli` then `@agent-wechat/wechat` with provenance;
+5. publish `@kyan-du/agent-wechat-cli` then `@kyan-du/agent-wechat-openclaw` with provenance;
 6. verify exact public registry versions by clean install/import;
 7. create or verify `vX.Y.Z` and the GitHub Release.
 

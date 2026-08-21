@@ -2,8 +2,8 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd); cd "$root"
 pnpm --filter @kyan-du/agent-wechat-shared build
-pnpm --filter @agent-wechat/cli build
-pnpm --filter @agent-wechat/wechat build
+pnpm --filter @kyan-du/agent-wechat-cli build
+pnpm --filter @kyan-du/agent-wechat-openclaw build
 pnpm --filter @kyan-du/agent-wechat-wechaty-puppet build
 ./scripts/audit-release.sh
 ./scripts/audit-release.sh
@@ -25,7 +25,7 @@ probe_npm_forbidden() {
   fi
   rm -f "$package_dir/$path"
 }
-for package_dir in packages/cli packages/openclaw-extension; do
+for package_dir in packages/cli packages/openclaw-extension packages/wechaty-puppet; do
   for path in \
     dist/mysecret.txt dist/mycredential.txt dist/mytoken.txt \
     dist/.env.local dist/myenvironment.txt dist/my-private-key.txt \

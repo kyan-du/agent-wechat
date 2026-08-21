@@ -3,13 +3,12 @@
   "lockfile": "pnpm-lock.yaml",
   "artifacts": [
     {
-      "name": "@agent-wechat/cli",
+      "name": "@kyan-du/agent-wechat-cli",
       "packedPaths": [
         "README.md",
         "dist/cli.js",
         "dist/device_identity.py",
         "dist/image-compatibility.json",
-        "dist/index.js",
         "package.json"
       ],
       "bundled": [
@@ -79,7 +78,7 @@
       ]
     },
     {
-      "name": "@agent-wechat/wechat",
+      "name": "@kyan-du/agent-wechat-openclaw",
       "packedPaths": [
         "README.md",
         "dist/index.js",
@@ -129,6 +128,81 @@
           "name": "typescript",
           "specifier": "^5.4.5",
           "version": "5.9.3",
+          "license": "Apache-2.0"
+        }
+      ],
+      "projectFiles": []
+    },
+    {
+      "name": "@kyan-du/agent-wechat-wechaty-puppet",
+      "packedPaths": [
+        "README.md",
+        "dist/mod.d.ts",
+        "dist/mod.js",
+        "dist/poll-guard.d.ts",
+        "dist/puppet-agent-wechat.d.ts",
+        "dist/send-confirmation.d.ts",
+        "dist/type-map.d.ts",
+        "package.json"
+      ],
+      "bundled": [
+        {
+          "name": "zod",
+          "version": "3.25.76",
+          "license": "MIT"
+        }
+      ],
+      "externalRuntime": [
+        {
+          "name": "file-box",
+          "specifier": "^1.4.15",
+          "version": "1.4.15",
+          "license": "Apache-2.0"
+        }
+      ],
+      "peer": [
+        {
+          "name": "wechaty-puppet",
+          "specifier": "^1.10.2",
+          "version": "1.20.2",
+          "license": "Apache-2.0"
+        }
+      ],
+      "dev": [
+        {
+          "name": "@kyan-du/agent-wechat-shared",
+          "specifier": "workspace:*",
+          "version": "0.1.1",
+          "license": "NOASSERTION"
+        },
+        {
+          "name": "@types/node",
+          "specifier": "^22",
+          "version": "22.19.11",
+          "license": "MIT"
+        },
+        {
+          "name": "esbuild",
+          "specifier": "^0.25.0",
+          "version": "0.25.12",
+          "license": "MIT"
+        },
+        {
+          "name": "tsx",
+          "specifier": "^4.19.0",
+          "version": "4.21.0",
+          "license": "MIT"
+        },
+        {
+          "name": "typescript",
+          "specifier": "^5.4.5",
+          "version": "5.9.3",
+          "license": "Apache-2.0"
+        },
+        {
+          "name": "wechaty-puppet",
+          "specifier": "^1.20.2",
+          "version": "1.20.2",
           "license": "Apache-2.0"
         }
       ],

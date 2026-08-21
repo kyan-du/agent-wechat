@@ -6,8 +6,9 @@ import { basename, join, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const packages = [
-  ["packages/cli", "@agent-wechat/cli"],
-  ["packages/openclaw-extension", "@agent-wechat/wechat"],
+  ["packages/cli", "@kyan-du/agent-wechat-cli"],
+  ["packages/openclaw-extension", "@kyan-du/agent-wechat-openclaw"],
+  ["packages/wechaty-puppet", "@kyan-du/agent-wechat-wechaty-puppet"],
 ];
 const privateWorkspaceNames = new Set([
   "@kyan-du/agent-wechat-agent-server",
@@ -50,7 +51,7 @@ try {
   run("node", [join(project, "node_modules/.bin/wx"), "--version"], project);
   // Import the extension entry without running setup or connecting to external services.
   run("npm", ["install", "--ignore-scripts", "--legacy-peer-deps", "openclaw@^2026.5.12", "wechaty-puppet@^1.10.2"], project);
-  run("node", ["--input-type=module", "-e", "await Promise.all([import('@agent-wechat/cli'), import('@agent-wechat/wechat')])"], project);
+  run("node", ["--input-type=module", "-e", "await Promise.all([import('@kyan-du/agent-wechat-openclaw'), import('@kyan-du/agent-wechat-wechaty-puppet')])"], project);
 
   console.log(`npm package smoke passed for ${tarballs.map((tarball) => basename(tarball)).join(", ")}`);
 } finally {

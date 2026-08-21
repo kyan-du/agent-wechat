@@ -10,7 +10,7 @@ and Release.
 
 Run the workflow manually with one input:
 
-- `version`: exact stable `X.Y.Z`, matching `@agent-wechat/cli` and `@agent-wechat/wechat`.
+- `version`: exact stable `X.Y.Z`, matching `@kyan-du/agent-wechat-cli` and `@kyan-du/agent-wechat-openclaw`.
 
 The workflow checks out `main` and fails unless the dispatch SHA equals the current
 `origin/main` SHA. It also requires at least one successful `CI` run for that commit on
@@ -26,8 +26,8 @@ The `publish` job is bound to the `npm-production` GitHub Environment. Only afte
 environment is approved does the job receive `contents: write` and `id-token: write`.
 It verifies the downloaded tarballs, then publishes in this order with npm provenance:
 
-1. `@agent-wechat/cli`
-2. `@agent-wechat/wechat`
+1. `@kyan-du/agent-wechat-cli`
+2. `@kyan-du/agent-wechat-openclaw`
 
 After publication it queries both exact public registry versions, clean-installs them in
 a fresh project, imports both packages, and runs the `wx --version` binary smoke.

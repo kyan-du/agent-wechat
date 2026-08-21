@@ -8,7 +8,7 @@ trap 'rm -rf "$STAGE" "$PACKS"' EXIT
 
 cd "$ROOT"
 pnpm --filter @kyan-du/agent-wechat-shared build
-pnpm --filter @agent-wechat/cli build
+pnpm --filter @kyan-du/agent-wechat-cli build
 TARBALL=$(cd packages/cli && npm pack --silent --ignore-scripts --pack-destination "$PACKS")
 mkdir -p "$STAGE/node_modules/qrcode-terminal"
 cp -R packages/cli/node_modules/qrcode-terminal/* "$STAGE/node_modules/qrcode-terminal/"

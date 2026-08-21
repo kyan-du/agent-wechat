@@ -62,7 +62,5 @@ test("checked-in Compose release boundary uses the local build image", { skip: (
 test("changeset config generates future changelog links with fork identity", () => {
   const config = JSON.parse(fs.readFileSync(path.join(repo, ".changeset/config.json"), "utf8"));
   assert.deepEqual(config.changelog, ["@changesets/changelog-github", { repo: "kyan-du/agent-wechat" }]);
-  for (const group of config.fixed) {
-    for (const name of group) assert.match(name, /^(?:@agent-wechat\/(?:cli|wechat)|@kyan-du\/agent-wechat-)/);
-  }
+  for (const group of config.fixed) for (const name of group) assert.match(name, /^@kyan-du\/agent-wechat-/);
 });

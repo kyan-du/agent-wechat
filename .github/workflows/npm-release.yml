@@ -80,6 +80,7 @@ jobs:
           mkdir -p .release-pack
           npm pack ./packages/cli --json --ignore-scripts --pack-destination .release-pack
           npm pack ./packages/openclaw-extension --json --ignore-scripts --pack-destination .release-pack
+          npm pack ./packages/wechaty-puppet --json --ignore-scripts --pack-destination .release-pack
           shasum -a 256 .release-pack/*.tgz > .release-pack/SHA256SUMS
           node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
 
@@ -132,11 +133,14 @@ jobs:
           shasum -a 256 --check .release-pack/SHA256SUMS
           node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
 
-      - name: Publish @agent-wechat/cli with provenance
-        run: npm publish ".release-pack/agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
+      - name: Publish @kyan-du/agent-wechat-cli with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
 
-      - name: Publish @agent-wechat/wechat with provenance
-        run: npm publish ".release-pack/agent-wechat-wechat-${{ inputs.version }}.tgz" --access public --provenance
+      - name: Publish @kyan-du/agent-wechat-openclaw with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-openclaw-${{ inputs.version }}.tgz" --access public --provenance
+
+      - name: Publish @kyan-du/agent-wechat-wechaty-puppet with provenance
+        run: npm publish ".release-pack/kyan-du-agent-wechat-wechaty-puppet-${{ inputs.version }}.tgz" --access public --provenance
 
       - name: Verify public registry versions and clean install
         run: node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"

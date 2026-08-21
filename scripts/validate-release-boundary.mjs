@@ -199,14 +199,14 @@ for (const root of ["docs/src/content", "docs/dist"]) {
 
 const documentationNegativeCases = [
   ["missing P1-B gate", "```bash\npnpm cli -- up\n```", false],
-  ["npm install", "> P1-B is not available until published and verified.\n```bash\nnpm install @agent-wechat/wechat\n```", false],
-  ["tilde fence", "> P1-B is not available until published and verified.\n~~~bash\nnpx @agent-wechat/cli up\n~~~", false],
-  ["indented code", "> P1-B is not available until published and verified.\n\n    openclaw plugins install @agent-wechat/wechat", false],
-  ["shell continuation", "> P1-B is not available until published and verified.\n```sh\nnpm install \\\n  @agent-wechat/wechat\n```", false],
+  ["npm install", "> P1-B is not available until published and verified.\n```bash\nnpm install @kyan-du/agent-wechat-wechaty-puppet\n```", false],
+  ["tilde fence", "> P1-B is not available until published and verified.\n~~~bash\nnpx @kyan-du/agent-wechat-cli up\n~~~", false],
+  ["indented code", "> P1-B is not available until published and verified.\n\n    openclaw plugins install @kyan-du/agent-wechat-openclaw", false],
+  ["shell continuation", "> P1-B is not available until published and verified.\n```sh\nnpm install \\\n  @kyan-du/agent-wechat-wechaty-puppet\n```", false],
   ["GHCR pull", "> P1-B is not available until published and verified.\n```bash\ndocker pull ghcr.io/kyan-du/agent-wechat:1.2.3\n```", false],
   ["bare wx", "> P1-B is not available until published and verified.\n```bash\nwx up\n```", false],
   ["HTML-comment-only gate", "<!-- P1-B is not available until published and verified. -->\n```bash\npnpm cli -- up\n```", false],
-  ["rendered multiline", "<p>P1-B is not available until published and verified.</p><pre><code>npm install \\\n@agent-wechat/wechat</code></pre>", true],
+  ["rendered multiline", "<p>P1-B is not available until published and verified.</p><pre><code>npm install \\\n@kyan-du/agent-wechat-wechaty-puppet</code></pre>", true],
   ["rendered comment-only gate", "<!-- P1-B is not available until published and verified. --><pre><code>pnpm cli -- up</code></pre>", true],
 ];
 for (const [name, sample, rendered] of documentationNegativeCases) {

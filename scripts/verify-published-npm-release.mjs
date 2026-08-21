@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const version = process.argv[2];
-const packages = ["@agent-wechat/cli", "@agent-wechat/wechat"];
+const packages = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"];
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
   throw new Error("usage: verify-published-npm-release.mjs <exact stable version>");
 }
@@ -27,7 +27,7 @@ try {
   run("npm", ["install", "--ignore-scripts", "--legacy-peer-deps", ...packages.map((name) => `${name}@${version}`)], dir);
   run("node", [join(dir, "node_modules/.bin/wx"), "--version"], dir);
   run("npm", ["install", "--ignore-scripts", "--legacy-peer-deps", "openclaw@^2026.5.12"], dir);
-  run("node", ["--input-type=module", "-e", "await Promise.all([import('@agent-wechat/cli'), import('@agent-wechat/wechat')])"], dir);
+  run("node", ["--input-type=module", "-e", "await Promise.all([import('@kyan-du/agent-wechat-openclaw'), import('@kyan-du/agent-wechat-wechaty-puppet')])"], dir);
   console.log(`public registry smoke passed for ${packages.map((name) => `${name}@${version}`).join(", ")}`);
 } finally {
   rmSync(dir, { recursive: true, force: true });

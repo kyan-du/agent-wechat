@@ -9,8 +9,9 @@ const version = process.argv[2] && !process.argv[2].startsWith("--") ? process.a
 const tarballIndex = process.argv.indexOf("--tarballs");
 const tarballDir = tarballIndex >= 0 ? resolve(root, process.argv[tarballIndex + 1] ?? "") : undefined;
 const packages = [
-  { dir: "packages/cli", name: "@agent-wechat/cli", tarball: `agent-wechat-cli-${version}.tgz` },
-  { dir: "packages/openclaw-extension", name: "@agent-wechat/wechat", tarball: `agent-wechat-wechat-${version}.tgz` },
+  { dir: "packages/cli", name: "@kyan-du/agent-wechat-cli", tarball: `kyan-du-agent-wechat-cli-${version}.tgz` },
+  { dir: "packages/openclaw-extension", name: "@kyan-du/agent-wechat-openclaw", tarball: `kyan-du-agent-wechat-openclaw-${version}.tgz` },
+  { dir: "packages/wechaty-puppet", name: "@kyan-du/agent-wechat-wechaty-puppet", tarball: `kyan-du-agent-wechat-wechaty-puppet-${version}.tgz` },
 ];
 
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
