@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 
 export function classifyGithubRelease(manifest, result) {
   if (result.status !== 0) {
-    if (result.status === 1 && /^release not found\s*$/i.test(result.stderr ?? "")) return { state: "absent" };
+    if (result.status === 1 && (result.stdout ?? "") === "" && /^release not found\s*$/i.test(result.stderr ?? "")) return { state: "absent" };
     throw new Error("GitHub Release query failed closed");
   }
   let release;

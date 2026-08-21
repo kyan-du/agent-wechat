@@ -4,7 +4,10 @@ import { classifyGithubRelease, queryGithubRelease } from "./github-release-stat
 
 const manifest = { tag: "v1.2.3", commit: "1".repeat(40), manifestSha256: `sha256:${"2".repeat(64)}` };
 const exact = { id: "R_1", tagName: manifest.tag, targetCommitish: manifest.commit, name: manifest.tag, isDraft: false, isPrerelease: false, body: `notes\nAgent-Release-Manifest-SHA256: ${manifest.manifestSha256}`, assets: [], url: "https://example/release" };
-test("missing exact tag is absent", () => assert.deepEqual(classifyGithubRelease(manifest, { status: 1, stdout: "", stderr: "release not found\n" }), { state: "absent" }));
+test("missing exact tag is absent only for the authenticated gh not-found shape", () => {
+  assert.deepEqual(classifyGithubRelease(manifest, { status: 1, stdout: "", stderr: "release not found\n" }), { state: "absent" });
+  assert.throws(() => classifyGithubRelease(manifest, { status: 1, stdout: "{}", stderr: "release not found\n" }), /failed closed/);
+});
 test("exact final Release is a no-op recovery state", () => assert.equal(classifyGithubRelease(manifest, { status: 0, stdout: JSON.stringify(exact), stderr: "" }).state, "exact"));
 for (const [name, mutation] of [
   ["target", { targetCommitish: "main" }], ["prerelease", { isPrerelease: true }], ["draft", { isDraft: true }],
@@ -13,6 +16,7 @@ for (const [name, mutation] of [
 test("malformed and API failures fail closed", () => {
   assert.throws(() => classifyGithubRelease(manifest, { status: 0, stdout: "{", stderr: "" }), /malformed/);
   assert.throws(() => classifyGithubRelease(manifest, { status: 2, stdout: "", stderr: "network" }), /failed closed/);
+  assert.throws(() => classifyGithubRelease(manifest, { status: 4, stdout: "", stderr: "To get started with GitHub CLI, please run:  gh auth login\nAlternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n" }), /failed closed/);
 });
 test("query uses exact tag and complete identity fields", () => {
   const calls = [];

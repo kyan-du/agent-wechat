@@ -176,6 +176,7 @@ jobs:
         run: node scripts/verify-agent-release.mjs --manifest .release-candidate/agent-release-manifest.json --artifacts .release-candidate/tarballs --version "${{ inputs.version }}" --commit "${{ inputs.release_sha }}" --manifest-sha256 "${{ needs.candidate.outputs.manifest_sha256 }}"
       - name: Authenticate operation against exact registry state before writes
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_OPERATION: ${{ inputs.operation }}
           RECONCILIATION_SHA256: ${{ inputs.reconciliation_sha256 }}
         run: |

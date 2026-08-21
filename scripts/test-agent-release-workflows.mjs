@@ -50,6 +50,8 @@ if (!candidateText.includes("sha256Bytes(readFileSync(process.argv[1]))")) throw
 if (candidateText.includes("--manifest-sha256 \"$MANIFEST_SHA256\"")) throw new Error("candidate must not require a dispatch manifest digest");
 const deployVerify = deploy.steps.find((step) => step.name === "Re-hash sealed production candidate without rebuilding");
 if (!deployVerify?.run?.includes('--manifest-sha256 "${{ needs.candidate.outputs.manifest_sha256 }}"')) throw new Error("deploy must re-hash against the sealed candidate digest");
+const reconcileStep = deploy.steps.find((step) => step.name === "Authenticate operation against exact registry state before writes");
+if (reconcileStep?.env?.GH_TOKEN !== "${{ github.token }}") throw new Error("registry reconciliation must authenticate gh release view with job-scoped GITHUB_TOKEN");
 for (const operation of ["npm publish","npm dist-tag add","latest","ensure-github-release.mjs","verify-release-operation.mjs","verify-agent-release.mjs","reconcile-npm-release.mjs","--provenance"]) if (!deployText.includes(operation)) throw new Error(`production workflow missing ${operation}`);
 if (!deployText.includes("pnpm/action-setup@") || !deployText.includes("pnpm install --frozen-lockfile")) throw new Error("deploy job must install release script dependencies before re-hashing sealed artifacts");
 if (/npm-release-authorization|authorization_id|atomic-cas-required|NPM_AUTHORIZATION/.test(text)) throw new Error("unsupported external authorization/CAS remains");
