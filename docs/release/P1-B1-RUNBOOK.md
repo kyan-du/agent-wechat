@@ -8,7 +8,7 @@ Phase 1 is validation-only. Do not create a tag, publish, move `latest`, create 
 
 - Public packages: CLI, OpenClaw extension and Wechaty Puppet; one lockstep stable version.
 - Publisher: `.github/workflows/npm-release.yml` bound to `npm-production`.
-- Identity: exact `X.Y.Z`, `vX.Y.Z`, full commit/tree, manifest sha256 and three tarball sha256/SRI values.
+- Identity: exact `X.Y.Z`, `vX.Y.Z`, full commit/tree, runner-generated manifest sha256 and three tarball sha256/SRI values.
 - npm: `latest` only. `next` and `-next.N` are rejected by the formal publisher.
 - GitHub: final non-prerelease Release only.
 - GHCR remains separate and cannot be triggered by npm success.
@@ -39,15 +39,14 @@ node scripts/verify-agent-release.mjs \
   --manifest /tmp/release/manifest.json \
   --artifacts /tmp/release/tarballs \
   --version <X.Y.Z> \
-  --commit <full-sha> \
-  --manifest-sha256 sha256:<digest>
+  --commit <full-sha>
 ```
 
-Generate twice and compare the complete manifest/tarball set byte-for-byte. Deployment may consume only the uploaded sealed artifact identified by version + full SHA + manifest digest and the producer artifact ID/digest/run.
+Generate twice and compare the complete manifest/tarball set byte-for-byte on the production runner. Deployment may consume only the uploaded sealed artifact identified by version + full SHA + runner-generated manifest digest and the producer artifact ID/digest/run.
 
 ## Owner authorization
 
-The owner confirms exact repository, stable version/tag, commit/tree, manifest digest, `latest`, every package/tarball integrity, authorization ID, nonce and expiry. A reconciliation run needs a new confirmation bound to the exact reconciliation receipt digest. No owner chat text, token, nonce plaintext or npm credential enters the repository or logs.
+The owner confirms exact repository, stable version/tag, commit/tree, `latest`, every package/tarball integrity, and the required operation/reconciliation inputs. A reconciliation run needs a new confirmation bound to the exact reconciliation receipt digest. No owner chat text, token, nonce plaintext or npm credential enters the repository or logs.
 
 ## Activation blockers
 
