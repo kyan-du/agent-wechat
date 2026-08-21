@@ -3,7 +3,7 @@ import {execFileSync} from 'node:child_process';
 import {existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {dirname, join, relative, resolve, sep} from 'node:path';
 const root=resolve(import.meta.dirname,'..');
-const expected=['@kyan-du/agent-wechat-cli','@kyan-du/agent-wechat-openclaw','@kyan-du/agent-wechat-wechaty-puppet'];
+const expected=['@agent-wechat/cli','@agent-wechat/wechat'];
 const forbiddenComponent=/^(cache|coverage|fixtures?|tmp|temp|\.data|node_modules)$/i;
 const sensitiveSubstring=/(credential|secret|token)/i;
 const sensitiveSegment=/(^|[-_.])env([-_.]|$)|environment|private[-_.]?key|api[-_.]?key|cert(?:ificate)?/i;

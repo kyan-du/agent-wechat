@@ -1,8 +1,8 @@
-name: Prerelease Validation Only
+name: Release Validation
 
-# P1-B1 is evidence generation only. This workflow has no publication
-# credentials, write permission, tag trigger, publish step, registry push, or
-# GitHub Release operation. A later owner/legal-approved PR must add those.
+# Pull request and main-branch validation for release contracts and package
+# materials. Publication capability stays only in npm-release.yml behind the
+# npm-production Environment gate.
 on:
   pull_request:
     paths:
@@ -17,15 +17,10 @@ on:
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
       - 'scripts/smoke-npm-packages.mjs'
-      - 'scripts/agent-release*.mjs'
-      - 'scripts/prepare-agent-release.mjs'
-      - 'scripts/prepare-release-pr.mjs'
-      - 'scripts/release-reconciliation*.mjs'
-      - 'scripts/verify-agent-release.mjs'
-      - 'scripts/test-agent-release-workflows.mjs'
+      - 'scripts/check-npm-production-release.mjs'
+      - 'scripts/verify-published-npm-release.mjs'
       - '.github/workflows/release-validation.yml'
       - '.github/workflows/npm-*.yml'
-      - 'docs/release/AGENT-OPERATED-RELEASE.md'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -43,15 +38,10 @@ on:
       - 'scripts/test-prerelease-contract.sh'
       - 'scripts/test-prerelease-manifest.sh'
       - 'scripts/smoke-npm-packages.mjs'
-      - 'scripts/agent-release*.mjs'
-      - 'scripts/prepare-agent-release.mjs'
-      - 'scripts/prepare-release-pr.mjs'
-      - 'scripts/release-reconciliation*.mjs'
-      - 'scripts/verify-agent-release.mjs'
-      - 'scripts/test-agent-release-workflows.mjs'
+      - 'scripts/check-npm-production-release.mjs'
+      - 'scripts/verify-published-npm-release.mjs'
       - '.github/workflows/release-validation.yml'
       - '.github/workflows/npm-*.yml'
-      - 'docs/release/AGENT-OPERATED-RELEASE.md'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
@@ -85,13 +75,11 @@ jobs:
       - name: Install validation dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Prove validation-only contract
+      - name: Prove release capability boundaries
         run: ./scripts/test-prerelease-contract.sh
 
-      - name: Prove active Agent release architecture
-        run: |
-          pnpm test:release-plan
-          pnpm test:release-workflows
+      - name: Validate npm production release contract
+        run: pnpm test:npm-production-release
 
       - name: Validate clean release inputs and real pack reports
         env:

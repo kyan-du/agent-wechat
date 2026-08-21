@@ -13,16 +13,12 @@
   "trustedNpmVersion": "11.5.1",
   "publicPackages": [
     {
-      "name": "@kyan-du/agent-wechat-cli",
+      "name": "@agent-wechat/cli",
       "path": "packages/cli"
     },
     {
-      "name": "@kyan-du/agent-wechat-openclaw",
+      "name": "@agent-wechat/wechat",
       "path": "packages/openclaw-extension"
-    },
-    {
-      "name": "@kyan-du/agent-wechat-wechaty-puppet",
-      "path": "packages/wechaty-puppet"
     }
   ]
 }

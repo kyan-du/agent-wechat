@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 
-const result = await build({
+const cliResult = await build({
   entryPoints: ["src/cli.ts"],
   bundle: true,
   format: "esm",
@@ -20,6 +20,16 @@ const result = await build({
       'import{createRequire}from"module";const require=createRequire(import.meta.url);',
     ].join("\n"),
   },
+  external: ["qrcode-terminal"],
+  metafile: true,
+});
+
+const indexResult = await build({
+  entryPoints: ["src/index.ts"],
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  outfile: "dist/index.js",
   external: ["qrcode-terminal"],
   metafile: true,
 });
@@ -40,4 +50,7 @@ const compatibility = {
 };
 writeFileSync(join(here, "dist/image-compatibility.json"), `${JSON.stringify(compatibility, null, 2)}\n`);
 
-writeFileSync("dist/.release-metafile.json", JSON.stringify(result.metafile, null, 2) + "\n");
+writeFileSync("dist/.release-metafile.json", JSON.stringify({
+  inputs: { ...cliResult.metafile.inputs, ...indexResult.metafile.inputs },
+  outputs: { ...cliResult.metafile.outputs, ...indexResult.metafile.outputs },
+}, null, 2) + "\n");

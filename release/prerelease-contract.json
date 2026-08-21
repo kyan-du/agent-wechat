@@ -5,13 +5,12 @@
   "versionPrerelease": "next",
   "imageRepository": "ghcr.io/kyan-du/agent-wechat",
   "publicPackages": [
-    "@kyan-du/agent-wechat-cli",
-    "@kyan-du/agent-wechat-openclaw",
-    "@kyan-du/agent-wechat-wechaty-puppet"
+    "@agent-wechat/cli",
+    "@agent-wechat/wechat"
   ],
   "fixedWorkspaceGroup": [
-    "@kyan-du/agent-wechat-cli",
-    "@kyan-du/agent-wechat-openclaw",
+    "@agent-wechat/cli",
+    "@agent-wechat/wechat",
     "@kyan-du/agent-wechat-wechaty-puppet",
     "@kyan-du/agent-wechat-wechaty-gateway",
     "@kyan-du/agent-wechat-agent-server"
@@ -19,6 +18,7 @@
   "privatePackages": [
     "@kyan-du/agent-wechat-agent-server",
     "@kyan-du/agent-wechat-shared",
+    "@kyan-du/agent-wechat-wechaty-puppet",
     "@kyan-du/agent-wechat-wechaty-gateway"
   ],
   "requiredApprovals": ["owner", "legalRedistribution"],

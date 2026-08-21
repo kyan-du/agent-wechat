@@ -2,6 +2,7 @@
   "name": "@kyan-du/agent-wechat-wechaty-puppet",
   "version": "0.12.0",
   "description": "Wechaty Puppet for agent-wechat — bridges Wechaty bots to WeChat via the agent-wechat REST/WebSocket server",
+  "private": true,
   "type": "module",
   "main": "./dist/mod.js",
   "types": "./dist/mod.d.ts",

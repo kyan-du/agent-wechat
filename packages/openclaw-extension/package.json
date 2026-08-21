@@ -1,5 +1,5 @@
 {
-  "name": "@kyan-du/agent-wechat-openclaw",
+  "name": "@agent-wechat/wechat",
   "version": "0.12.0",
   "type": "module",
   "files": [
@@ -33,7 +33,7 @@
       "order": 80
     },
     "install": {
-      "npmSpec": "@kyan-du/agent-wechat-openclaw"
+      "npmSpec": "@agent-wechat/wechat"
     }
   },
   "publishConfig": {

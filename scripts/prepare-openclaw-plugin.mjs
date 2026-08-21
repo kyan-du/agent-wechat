@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const source = resolve("packages/openclaw-extension");
 const target = resolve(process.argv[2] ?? ".artifacts/openclaw-extension");
 if (!existsSync(resolve(source, "dist/index.js"))) {
-  throw new Error("packages/openclaw-extension/dist/index.js is missing; run pnpm --filter @kyan-du/agent-wechat-openclaw build first");
+  throw new Error("packages/openclaw-extension/dist/index.js is missing; run pnpm --filter @agent-wechat/wechat build first");
 }
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });

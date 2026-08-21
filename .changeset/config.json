@@ -2,7 +2,7 @@
   "$schema": "https://unpkg.com/@changesets/config@3.1.2/schema.json",
   "changelog": ["@changesets/changelog-github", { "repo": "kyan-du/agent-wechat" }],
   "commit": false,
-  "fixed": [["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet", "@kyan-du/agent-wechat-wechaty-gateway", "@kyan-du/agent-wechat-agent-server"]],
+  "fixed": [["@agent-wechat/cli", "@agent-wechat/wechat", "@kyan-du/agent-wechat-wechaty-puppet", "@kyan-du/agent-wechat-wechaty-gateway", "@kyan-du/agent-wechat-agent-server"]],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
