@@ -49,6 +49,15 @@ export function verifyReleaseManifest(manifest, { artifactDir, expectedChannel, 
   return manifest;
 }
 
+export function verifyReleaseManifestBytes(raw, options = {}) {
+  const bytes = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  if (options.expectedManifestSha256) {
+    requireDigest(options.expectedManifestSha256, "expected manifest digest");
+    if (sha256Bytes(bytes) !== options.expectedManifestSha256) throw new Error("release manifest digest mismatch");
+  }
+  return verifyReleaseManifest(strictJson(bytes.toString("utf8"), "release manifest"), options);
+}
+
 function arg(name) { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; }
 if (process.argv[1]?.endsWith("verify-agent-release.mjs")) {
   const manifestPath = resolve(root, arg("--manifest") ?? "");
@@ -56,8 +65,7 @@ if (process.argv[1]?.endsWith("verify-agent-release.mjs")) {
   if (!arg("--manifest") || !arg("--artifacts")) throw new Error("usage: verify-agent-release.mjs --manifest <manifest.json> --artifacts <directory> [--channel ... --version ... --commit ... --manifest-sha256 ...]");
   const raw = readFileSync(manifestPath);
   const expectedManifestSha256 = arg("--manifest-sha256");
-  if (expectedManifestSha256 && sha256Bytes(raw) !== expectedManifestSha256) throw new Error("release manifest digest mismatch");
-  const manifest = verifyReleaseManifest(strictJson(raw.toString("utf8"), "release manifest"), {
+  const manifest = verifyReleaseManifestBytes(raw, {
     artifactDir,
     expectedVersion: arg("--version"),
     expectedCommit: arg("--commit"),

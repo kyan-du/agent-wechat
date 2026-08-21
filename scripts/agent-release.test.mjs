@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { sha256Bytes, sha512Integrity, validateReleaseIdentity } from "./agent-release-lib.mjs";
-import { verifyReleaseManifest } from "./verify-agent-release.mjs";
+import { verifyReleaseManifest, verifyReleaseManifestBytes } from "./verify-agent-release.mjs";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-release-test-"));
 const version = "1.2.3";
@@ -31,6 +31,12 @@ test("only formal stable identity is accepted", () => {
   assert.throws(() => validateReleaseIdentity({ version, tag: `v${version}`, distTag: "next" }), /must be latest/);
 });
 test("canonical manifest passes structural verification", () => assert.equal(verifyReleaseManifest(fixture()).version, version));
+test("manifest byte digest is checked only against the generated manifest bytes", () => {
+  const raw = `${JSON.stringify(fixture(), null, 2)}\n`;
+  const digest = sha256Bytes(Buffer.from(raw));
+  assert.equal(verifyReleaseManifestBytes(raw, { expectedManifestSha256: digest }).version, version);
+  assert.throws(() => verifyReleaseManifestBytes(raw, { expectedManifestSha256: `sha256:${"0".repeat(64)}` }), /release manifest digest mismatch/);
+});
 test("unknown manifest keys fail closed", () => { const value = fixture(); value.extra = true; assert.throws(() => verifyReleaseManifest(value), /exact schema/); });
 test("package order drift fails closed", () => { const value = fixture(); value.packages.reverse(); assert.throws(() => verifyReleaseManifest(value), /identity\/version drift/); });
 test("artifact byte drift fails closed", () => {
