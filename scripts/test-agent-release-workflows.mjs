@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, readdirSync } from "node:fs";
+import { posix } from "node:path";
 import YAML from "yaml";
 const publisherPath = ".github/workflows/npm-release.yml";
 const contract = JSON.parse(readFileSync("release/agent-release-contract.json", "utf8"));
@@ -16,6 +17,33 @@ const candidate=workflow.jobs?.candidate, deploy=workflow.jobs?.deploy;
 if (!candidate || !deploy || deploy.if !== undefined || deploy.environment !== "npm-production") throw new Error("reachable npm-production deployment drift");
 if (deploy.permissions?.contents !== "write" || deploy.permissions?.["id-token"] !== "write") throw new Error("production capability must remain job-scoped");
 const candidateText=YAML.stringify(candidate), deployText=YAML.stringify(deploy);
+const splitUploadPaths = (value) => String(value).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+const globBase = (path) => {
+  const parts = path.split("/");
+  const globIndex = parts.findIndex((part) => /[*?\[]/.test(part));
+  return globIndex < 0 ? posix.dirname(path) : parts.slice(0, globIndex).join("/");
+};
+const commonAncestor = (paths) => {
+  const [first, ...rest] = paths.map((path) => path.split("/"));
+  const common = [];
+  for (let index = 0; index < first.length; index += 1) {
+    if (!rest.every((parts) => parts[index] === first[index])) break;
+    common.push(first[index]);
+  }
+  return common.join("/");
+};
+const uploadStep = candidate.steps.find((step) => step.id === "upload");
+const downloadStep = deploy.steps.find((step) => String(step.uses ?? "").includes("actions/download-artifact@"));
+if (!uploadStep?.with?.path || !downloadStep?.with) throw new Error("candidate upload or deploy download step missing");
+const uploadPaths = splitUploadPaths(uploadStep.with.path);
+const payloadRoot = commonAncestor(uploadPaths.map(globBase));
+const payloadEntries = uploadPaths.map((path) => posix.relative(payloadRoot, path)).sort();
+if (payloadRoot !== ".release-candidate") throw new Error(`release artifact payload root drift: ${payloadRoot}`);
+if (JSON.stringify(payloadEntries) !== JSON.stringify(["agent-release-manifest.json", "tarballs/*.tgz"])) throw new Error(`release artifact payload entries drift: ${payloadEntries.join(", ")}`);
+const materializedEntries = payloadEntries.map((entry) => posix.join(downloadStep.with.path, downloadStep.with["merge-multiple"] === true ? entry : "<artifact-name>", downloadStep.with["merge-multiple"] === true ? "" : entry).replace(/\/$/, ""));
+for (const expected of [".release-candidate/agent-release-manifest.json", ".release-candidate/tarballs/*.tgz"]) {
+  if (!materializedEntries.includes(expected)) throw new Error(`downloaded candidate layout cannot satisfy ${expected}; got ${materializedEntries.join(", ")}`);
+}
 for (const proof of ["prepare-agent-release.mjs","verify-agent-release.mjs","cmp ","diff -qr","artifact-id","artifact-digest","artifact_name=npm-production-%s-%s-%s"]) if (!text.includes(proof)) throw new Error(`candidate intent proof missing: ${proof}`);
 if (!candidate.outputs?.manifest_sha256?.includes("steps.seal.outputs.manifest_sha256")) throw new Error("candidate must expose its generated manifest digest");
 if (!candidateText.includes("sha256Bytes(readFileSync(process.argv[1]))")) throw new Error("candidate must hash the runner-generated manifest");
