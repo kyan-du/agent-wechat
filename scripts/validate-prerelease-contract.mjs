@@ -141,6 +141,7 @@ for (const required of [
   "npm pack ./packages/openclaw-extension",
   "npm pack ./packages/wechaty-puppet",
   "upload-artifact@",
+  "include-hidden-files: true",
   "environment: npm-production",
   "npm publish \".release-pack/kyan-du-agent-wechat-cli-",
   "npm publish \".release-pack/kyan-du-agent-wechat-openclaw-",
