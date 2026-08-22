@@ -17,6 +17,16 @@ CLI="$STAGE/package/dist/cli.js"
 NODE=$(command -v node)
 NO_DOCKER_PATH="$STAGE/no-docker-bin"
 mkdir -p "$NO_DOCKER_PATH"
+cat >"$NO_DOCKER_PATH/npm" <<'EOF'
+#!/bin/sh
+test "$#" -eq 4
+test "$1" = "view"
+test "$2" = "@kyan-du/agent-wechat-cli"
+test "$3" = "dist-tags.latest"
+test "$4" = "--json"
+printf '"0.12.1"\n'
+EOF
+chmod +x "$NO_DOCKER_PATH/npm"
 
 node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.apiVersion!==1||x.repository!=="ghcr.io/kyan-du/agent-wechat"||x.floatingTagsAllowed!==false||!x.allowedReferences.includes("sha256-digest"))process.exit(1)' "$STAGE/package/dist/image-compatibility.json"
 node "$CLI" --help | grep -q 'start'
@@ -54,14 +64,12 @@ for command in status doctor; do
   test ! -s "$STAGE/$command-err"
   node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.ok||x.code!=="DOCKER_UNAVAILABLE"||x.diagnostics?.docker!=="unavailable")process.exit(1)' "$STAGE/$command-json"
 done
-set +e
 PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" --json upgrade --cli >"$STAGE/upgrade-json" 2>"$STAGE/upgrade-err"
-upgrade_code=$?
-set -e
-test "$upgrade_code" -eq 3
 test ! -s "$STAGE/upgrade-err"
-! grep -q 'npm install' "$STAGE/upgrade-json"
-node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||x.ok||x.code!=="CLI_UPGRADE_UNAVAILABLE")process.exit(1)' "$STAGE/upgrade-json"
+node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||!x.ok||x.data.currentVersion!=="0.12.0"||x.data.latestVersion!=="0.12.1"||!x.data.updateAvailable||x.data.command!=="npm install --global @kyan-du/agent-wechat-cli@0.12.1")process.exit(1)' "$STAGE/upgrade-json"
+PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" upgrade --cli >"$STAGE/upgrade-human" 2>"$STAGE/upgrade-human-err"
+test ! -s "$STAGE/upgrade-human-err"
+test "$(cat "$STAGE/upgrade-human")" = "npm install --global @kyan-du/agent-wechat-cli@0.12.1"
 node "$ROOT/scripts/test-packed-cli-health.mjs" "$CLI" "$STAGE"
 
 echo 'Packed CLI clean-consumer journeys passed.'
