@@ -43,6 +43,7 @@ import {
   waitHealthy,
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
+import { checkCliUpgrade, CliUpgradeError } from "./cli-upgrade.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
@@ -364,7 +365,20 @@ program.command("upgrade").description("Check CLI/image upgrades without claimin
   .action((options) => action(async () => {
     const selected = [options.check === true, options.cli === true, typeof options.image === "string"].filter(Boolean).length;
     if (selected > 1) throw new CliError("ARGUMENT_CONFLICT", "--check, --cli, and --image are mutually exclusive", EXIT.ARGUMENT);
-    if (options.cli) throw new CliError("CLI_UPGRADE_UNAVAILABLE", "P1-B npm publication has not been independently verified; use the repository-only pnpm cli workflow", EXIT.ENVIRONMENT);
+    if (options.cli) {
+      let result;
+      try { result = checkCliUpgrade(VERSION); }
+      catch (error) {
+        if (error instanceof CliUpgradeError) {
+          throw new CliError(error.code, error.message, error.code === "CLI_UPGRADE_REGISTRY_ERROR" ? EXIT.SERVICE : EXIT.ENVIRONMENT);
+        }
+        throw error;
+      }
+      return output(result, () => {
+        if (result.command) console.log(result.command);
+        else console.log(`CLI is already up to date (${result.currentVersion})`);
+      });
+    }
     if (options.image) {
       const result = await replaceImage({ image: options.image, identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken() });
       return output({ upgraded: true, imageDigest: result.imageDigest }, () => console.log(`Image upgraded to ${result.imageDigest}`));
