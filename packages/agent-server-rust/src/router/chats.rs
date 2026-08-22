@@ -151,6 +151,13 @@ fn chat_open_error_code(plan_error: Option<&str>, execution_error: Option<&str>)
     }
 }
 
+fn mark_read_error_code(plan_error: Option<&str>) -> &'static str {
+    match plan_error {
+        Some(COMPOSER_UNAVAILABLE) => COMPOSER_UNAVAILABLE,
+        _ => "MARK_READ_UNVERIFIED",
+    }
+}
+
 pub async fn mark_read(Path(chat_id): Path<String>) -> Json<serde_json::Value> {
     let session = match get_session("default") {
         Some(session) => session,
@@ -203,9 +210,17 @@ pub async fn mark_read(Path(chat_id): Path<String>) -> Json<serde_json::Value> {
             .as_ref()
             .is_some_and(|result| result.ok && result.verified.unwrap_or(false))
     {
-        return Json(
-            serde_json::json!({ "ok": false, "errorCode": "MARK_READ_UNVERIFIED", "error": "UI operation was not verified" }),
-        );
+        let error_code = mark_read_error_code(plan_state.diagnostic_error);
+        let error = if error_code == COMPOSER_UNAVAILABLE {
+            "Chat composer is unavailable"
+        } else {
+            "UI operation was not verified"
+        };
+        return Json(serde_json::json!({
+            "ok": false,
+            "errorCode": error_code,
+            "error": error,
+        }));
     }
     let after = wechat_chats::get_chat_by_username(&logged_in_user, &keys, &chat_id)
         .map(|chat| chat.unread_count)
@@ -328,6 +343,19 @@ mod open_chat_tests {
         assert_eq!(
             chat_open_error_code(Some(COMPOSER_UNAVAILABLE), Some("No action selected")),
             COMPOSER_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn mark_read_preserves_composer_unavailable_diagnostic() {
+        assert_eq!(
+            mark_read_error_code(Some(COMPOSER_UNAVAILABLE)),
+            COMPOSER_UNAVAILABLE
+        );
+        assert_eq!(mark_read_error_code(None), "MARK_READ_UNVERIFIED");
+        assert_eq!(
+            mark_read_error_code(Some("UNRELATED_PLAN_ERROR")),
+            "MARK_READ_UNVERIFIED"
         );
     }
 }
