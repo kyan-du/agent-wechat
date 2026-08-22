@@ -42,6 +42,8 @@ import {
   type WeChatPolicyContext,
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
+import { safeBodyAfterKnownMediaFailure, saveValidatedInboundMedia } from "./inbound-media.js";
+import { pollMedia } from "./inbound-media-poll.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -88,33 +90,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * Poll for media data, retrying until data is available or max attempts reached.
- */
-async function pollMedia(
-  client: WeChatClient,
-  chatId: string,
-  localId: number,
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
-  maxAttempts = 15,
-  intervalMs = 1000,
-): Promise<MediaResult | null> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await client.getMedia(chatId, localId);
-    if (result.type === "unsupported") {
-      // Server knows this message type has no media — no point retrying
-      return null;
-    }
-    if (result.data) {
-      return result;
-    }
-    if (attempt < maxAttempts) {
-      log?.info?.(`[media] Attempt ${attempt}/${maxAttempts} for ${chatId}:${localId} returned no data, retrying...`);
-      await new Promise(r => setTimeout(r, intervalMs));
-    }
-  }
-  return null;
-}
 
 function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
   try {
@@ -446,46 +421,29 @@ async function prepareMessage(
       const result = await pollMedia(client, chatId, msg.localId, log);
       if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Media result: type=${result.type}, format=${result.format}, hasData=${!!result.data}, filename=${result.filename}`);
-        const mimeMap: Record<string, string> = {
-          jpeg: "image/jpeg",
-          jpg: "image/jpeg",
-          png: "image/png",
-          gif: "image/gif",
-          mp3: "audio/mpeg",
-          pdf: "application/pdf",
-          doc: "application/msword",
-          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          xls: "application/vnd.ms-excel",
-          xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          ppt: "application/vnd.ms-powerpoint",
-          pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          zip: "application/zip",
-          txt: "text/plain",
-        };
-        mediaMime = mimeMap[result.format] ?? `application/${result.format || "octet-stream"}`;
-        const buf = Buffer.from(result.data!, "base64");
-        const saved = await core.channel.media.saveMediaBuffer(
-          buf,
-          mediaMime,
-          "inbound",
-          undefined,
-          result.filename,
+        log?.info?.(`[wechat:media] inbound media received type=${result.type} format=${result.format}`);
+        const saved = await saveValidatedInboundMedia(result, async (buffer, mime, filename) =>
+          core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
         );
-        mediaPath = saved?.path;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Saved media to ${mediaPath}`);
+        if (!saved.ok) {
+          log?.error?.(`[wechat:media] inbound media rejected code=${saved.code}`);
+        } else {
+          mediaMime = saved.mime;
+          mediaPath = saved.path;
+          log?.info?.("[wechat:media] inbound media saved");
+        }
       } else if (MEDIA_TYPES.has(baseType)) {
         // Image/voice expected media but got nothing
         hasMedia = true;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Media not available after retries for msg ${msg.localId}`);
+        log?.info?.("[wechat:media] inbound media unavailable after retries");
       }
     } catch (err) {
-      log?.error?.(`[wechat:${liveAccount.accountId}] Media download failed: ${err}`);
+      log?.error?.("[wechat:media] inbound media failed code=MEDIA_DOWNLOAD_FAILED");
     }
   }
 
   const timestamp = new Date(msg.timestamp).getTime();
-  let rawBody = msg.content || "";
+  let rawBody = mediaPath ? (msg.content || "") : safeBodyAfterKnownMediaFailure(baseType, msg.content || "");
   if (mediaPath && mediaMime) {
     if (!rawBody) {
       if (mediaMime.startsWith("audio/")) {
@@ -584,7 +542,7 @@ async function dispatchSegment(
 
   log?.info?.(
     `[wechat:${liveAccount.accountId}] Dispatching segment: ${segment.length} msg(s), last=${msg.localId}` +
-    `${mediaPath ? ` media=${mediaPath}` : ""}`,
+    `${mediaPath ? " media=present" : ""}`,
   );
 
   const hasControlCommand =

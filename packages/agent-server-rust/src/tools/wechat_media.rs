@@ -1,5 +1,6 @@
 use crate::ia::types::MediaResult;
 use crate::tools::wechat_db::{get_db_path, query_wechat_db};
+use crate::tools::wechat_message_type::normalize_local_type;
 use crate::tools::wechat_messages::{decode_message_content, extract_xml_tag, find_message_db, get_msg_table_name};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -924,8 +925,9 @@ pub fn get_message_media(
             }
         };
 
-    let base = (local_type & 0xFFFFFFFF) as i32;
-    let sub = (local_type >> 32) as i32;
+    let normalized = normalize_local_type(local_type);
+    let base = normalized.base;
+    let sub = normalized.subtype;
 
     match base {
         49 if sub == 6 => {

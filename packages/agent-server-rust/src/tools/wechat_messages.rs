@@ -1,5 +1,6 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
 use crate::ia::types::{Message, ReplyInfo};
+use crate::tools::wechat_message_type::normalize_local_type;
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 
@@ -62,8 +63,8 @@ fn extract_group_sender(content: &str) -> (Option<String>, String) {
 
 /// Clean message content for display based on message type.
 /// Replaces verbose XML with concise summaries.
-fn clean_content(content: &str, msg_type: i32) -> String {
-    let base = msg_type & 0x7FFFFFFF;
+fn clean_content(content: &str, local_type: i64) -> String {
+    let base = normalize_local_type(local_type).base;
     match base {
         // Image (type 3): replace XML with empty string
         3 if content.contains("<img") => String::new(),
@@ -351,10 +352,11 @@ pub fn list_messages(
                 .get("server_id")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            let msg_type = row
+            let local_type = row
                 .get("local_type")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
+                .unwrap_or(0);
+            let msg_type = normalize_local_type(local_type).base;
 
             let hex_content = row
                 .get("hex_content")
@@ -386,7 +388,7 @@ pub fn list_messages(
             let reply = extract_reply_info(&body, msg_type);
 
             // Clean content for display (replace XML with summaries)
-            let content = clean_content(&body, msg_type);
+            let content = clean_content(&body, local_type);
 
             let timestamp = row
                 .get("create_time")
@@ -474,5 +476,11 @@ mod merged_forward_tests {
     fn merged_forward_without_items_falls_back_to_title() {
         let xml = r#"<msg><appmsg><title>Empty history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
         assert_eq!(clean_content(xml, 49), "Empty history");
+    }
+
+    #[test]
+    fn packed_group_image_xml_is_removed() {
+        let packed = ((11_i64) << 32) | 0x8000_0003_u32 as i64;
+        assert_eq!(clean_content(r#"<msg><img aeskey="redacted"/></msg>"#, packed), "");
     }
 }
