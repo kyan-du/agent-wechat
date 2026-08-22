@@ -15,12 +15,27 @@ pub struct ChatOpenParams {
 pub struct ChatOpenPlanState {
     pub phase: ChatOpenPhase,
     pub result: Option<OpenChatResult>,
+    pub focus_attempts: u8,
+    pub diagnostic_error: Option<&'static str>,
 }
 
 pub enum ChatOpenPhase {
     Opening,
     Focusing,
     Done,
+}
+
+pub const COMPOSER_UNAVAILABLE: &str = "COMPOSER_UNAVAILABLE";
+const MAX_FOCUS_ATTEMPTS: u8 = 3;
+
+fn record_missing_composer(plan_state: &mut ChatOpenPlanState) -> bool {
+    plan_state.focus_attempts = plan_state.focus_attempts.saturating_add(1);
+    if plan_state.focus_attempts >= MAX_FOCUS_ATTEMPTS {
+        plan_state.diagnostic_error = Some(COMPOSER_UNAVAILABLE);
+        true
+    } else {
+        false
+    }
 }
 
 fn find_edit_area(a11y: &A11yNode) -> Option<&A11yNode> {
@@ -34,12 +49,16 @@ impl Plan for ChatOpenPlan {
     type PlanState = ChatOpenPlanState;
     type Params = ChatOpenParams;
 
-    fn id(&self) -> &str { "chat_open" }
+    fn id(&self) -> &str {
+        "chat_open"
+    }
 
     fn initial_plan_state(&self) -> ChatOpenPlanState {
         ChatOpenPlanState {
             phase: ChatOpenPhase::Opening,
             result: None,
+            focus_attempts: 0,
+            diagnostic_error: None,
         }
     }
 
@@ -60,7 +79,10 @@ impl Plan for ChatOpenPlan {
         if state.popup.is_some() && identified.popup.is_some() {
             return Some(SelectedAction {
                 action: actions::dismiss_popup(),
-                frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                frame: identified
+                    .main_window
+                    .as_ref()
+                    .and_then(|m| m.frame.clone()),
             });
         }
 
@@ -118,7 +140,10 @@ impl Plan for ChatOpenPlan {
                         if !skipped {
                             return Some(SelectedAction {
                                 action: actions::wait_short(),
-                                frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                                frame: identified
+                                    .main_window
+                                    .as_ref()
+                                    .and_then(|m| m.frame.clone()),
                             });
                         }
                         continue;
@@ -129,7 +154,10 @@ impl Plan for ChatOpenPlan {
                     tracing::info!("[chat_open] Opening → Done (no clear_unreads)");
                     return Some(SelectedAction {
                         action: actions::wait_short(),
-                        frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                        frame: identified
+                            .main_window
+                            .as_ref()
+                            .and_then(|m| m.frame.clone()),
                     });
                 }
 
@@ -142,20 +170,38 @@ impl Plan for ChatOpenPlan {
                     let edit_node = match find_edit_area(a11y) {
                         Some(n) => n,
                         None => {
-                            tracing::info!("[chat_open] Focusing: edit area not found");
-                            return None;
+                            let exhausted = record_missing_composer(plan_state);
+                            tracing::warn!(
+                                "[chat_open] composer unavailable attempt={}/{} exhausted={}",
+                                plan_state.focus_attempts,
+                                MAX_FOCUS_ATTEMPTS,
+                                exhausted,
+                            );
+                            if exhausted {
+                                return None;
+                            }
+                            return Some(SelectedAction {
+                                action: actions::wait_short(),
+                                frame: identified
+                                    .main_window
+                                    .as_ref()
+                                    .and_then(|m| m.frame.clone()),
+                            });
                         }
                     };
 
                     // Focusing the verified target is sufficient to let WeChat clear the
                     // conversation unread count. Never click message content while marking read.
                     plan_state.phase = ChatOpenPhase::Done;
-                    tracing::info!("[chat_open] Focusing → Done, edit_bounds={:?}", edit_node.bounds);
+                    tracing::info!("[chat_open] Focusing → Done, composer_ready=true");
 
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
                             action: actions::click_bounds(bounds),
-                            frame: identified.main_window.as_ref().and_then(|m| m.frame.clone()),
+                            frame: identified
+                                .main_window
+                                .as_ref()
+                                .and_then(|m| m.frame.clone()),
                         });
                     }
                     continue;
@@ -164,5 +210,24 @@ impl Plan for ChatOpenPlan {
                 ChatOpenPhase::Done => return None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_open_missing_edit_area_retries_then_fails_closed() {
+        let plan = ChatOpenPlan;
+        let mut state = plan.initial_plan_state();
+        state.phase = ChatOpenPhase::Focusing;
+
+        assert!(!record_missing_composer(&mut state));
+        assert!(!record_missing_composer(&mut state));
+        assert!(record_missing_composer(&mut state));
+        assert_eq!(state.focus_attempts, MAX_FOCUS_ATTEMPTS);
+        assert_eq!(state.diagnostic_error, Some(COMPOSER_UNAVAILABLE));
+        assert!(!plan.is_goal_reached(&AppState::default(), &state));
     }
 }
