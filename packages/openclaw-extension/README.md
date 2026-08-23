@@ -81,7 +81,7 @@ If running alongside OpenClaw on the same Docker network, set `serverUrl` to `ht
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 pnpm --filter @kyan-du/agent-wechat-openclaw build
 node scripts/prepare-openclaw-plugin.mjs
-openclaw plugins install -l ./.artifacts/openclaw-extension
+openclaw plugins install ./.artifacts/agent-wechat-openclaw.tgz
 ```
 
 ### 3. Configure the channel
@@ -185,14 +185,14 @@ cd agent-wechat
 pnpm install && pnpm build
 ```
 
-### Link for local development
+### Install a private source build
 
 ```bash
 node scripts/prepare-openclaw-plugin.mjs
-openclaw plugins install -l ./.artifacts/openclaw-extension
+openclaw plugins install ./.artifacts/agent-wechat-openclaw.tgz
 ```
 
-This stages only the built plugin files and a production manifest, avoiding pnpm workspace symlinks that OpenClaw correctly rejects as escaping the install root. Rebuild and restage after making changes, then restart the gateway.
+This creates a clean npm archive from the built plugin. OpenClaw installs its runtime dependencies, including the platform-specific `sharp` package, without relying on workspace-hoisted modules. Rebuild and repack after making changes, then restart the gateway.
 
 ## Architecture
 

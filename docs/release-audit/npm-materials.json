@@ -97,7 +97,14 @@
           "license": "MIT"
         }
       ],
-      "externalRuntime": [],
+      "externalRuntime": [
+        {
+          "name": "sharp",
+          "specifier": "^0.35.3",
+          "version": "0.35.3",
+          "license": "Apache-2.0"
+        }
+      ],
       "peer": [],
       "dev": [
         {

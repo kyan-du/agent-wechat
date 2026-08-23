@@ -3,6 +3,13 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn sqlite_failure_code(error: &rusqlite::Error) -> String {
+    match error {
+        rusqlite::Error::SqliteFailure(code, _) => format!("SQLITE_{:?}", code.code),
+        _ => "SQLITE_CLIENT_ERROR".to_string(),
+    }
+}
+
 /// Query a WeChat database and return parsed rows.
 /// Opens the database with `immutable=1` to avoid acquiring any shared locks
 /// that could interfere with WeChat's own writes. Since we open a fresh
@@ -22,7 +29,7 @@ pub fn query_wechat_db(
     ) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("[wechat-db] Failed to open {db_path}: {e}");
+            tracing::warn!("[wechat-db] open failed code={}", sqlite_failure_code(&e));
             return Vec::new();
         }
     };
@@ -30,14 +37,14 @@ pub fn query_wechat_db(
     if let Err(e) = conn.execute_batch(&format!(
         "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"
     )) {
-        tracing::warn!("[wechat-db] PRAGMA failed for {db_path}: {e}");
+        tracing::warn!("[wechat-db] pragma failed code={}", sqlite_failure_code(&e));
         return Vec::new();
     }
 
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("[wechat-db] Prepare failed for {db_path}: {e}");
+            tracing::warn!("[wechat-db] prepare failed code={}", sqlite_failure_code(&e));
             return Vec::new();
         }
     };
@@ -79,7 +86,7 @@ pub fn query_wechat_db(
     match rows {
         Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
         Err(e) => {
-            tracing::warn!("[wechat-db] Query failed for {db_path}: {e}");
+            tracing::warn!("[wechat-db] query failed code={}", sqlite_failure_code(&e));
             Vec::new()
         }
     }
