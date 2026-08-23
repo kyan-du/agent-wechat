@@ -33,7 +33,7 @@
     "test:prerelease-contract": "bash scripts/test-prerelease-contract.sh",
     "test:prerelease-manifest": "bash scripts/test-prerelease-manifest.sh",
     "test:npm-packages": "node scripts/smoke-npm-packages.mjs",
-    "test:npm-production-release": "node scripts/check-npm-production-release.mjs",
+    "test:npm-production-release": "node scripts/check-npm-production-release.mjs && node --test scripts/npm-release-utils.test.mjs",
     "test:ghcr-release": "node scripts/validate-ghcr-release.mjs && node scripts/test-ghcr-release.mjs"
   },
   "devDependencies": {

@@ -134,35 +134,8 @@ jobs:
           shasum -a 256 --check .release-pack/SHA256SUMS
           node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
 
-      - name: Publish @kyan-du/agent-wechat-cli with provenance
-        run: |
-          set -euo pipefail
-          package="@kyan-du/agent-wechat-cli"
-          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
-            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
-          else
-            npm publish ".release-pack/kyan-du-agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
-          fi
-
-      - name: Publish @kyan-du/agent-wechat-openclaw with provenance
-        run: |
-          set -euo pipefail
-          package="@kyan-du/agent-wechat-openclaw"
-          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
-            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
-          else
-            npm publish ".release-pack/kyan-du-agent-wechat-openclaw-${{ inputs.version }}.tgz" --access public --provenance
-          fi
-
-      - name: Publish @kyan-du/agent-wechat-wechaty-puppet with provenance
-        run: |
-          set -euo pipefail
-          package="@kyan-du/agent-wechat-wechaty-puppet"
-          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
-            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
-          else
-            npm publish ".release-pack/kyan-du-agent-wechat-wechaty-puppet-${{ inputs.version }}.tgz" --access public --provenance
-          fi
+      - name: Publish or verify existing public npm packages
+        run: node scripts/npm-release-utils.mjs publish-existing-safe "${{ inputs.version }}" .release-pack
 
       - name: Verify public registry versions and clean install
         run: node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"
