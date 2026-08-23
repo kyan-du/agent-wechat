@@ -3,14 +3,24 @@ title: OpenClaw Configuration
 description: Configure the WeChat channel in OpenClaw.
 ---
 
-All configuration lives under `channels.wechat` in OpenClaw's config file (`~/.openclaw/openclaw.json`).
+All configuration lives under `channels.agent-wechat` in OpenClaw's config file (`~/.openclaw/openclaw.json`). Do not use `channels.wechat` as the canonical key: OpenClaw's official catalog maps `wechat` / `weixin` / `微信` to `@tencent-weixin/openclaw-weixin`. Existing `channels.wechat` blocks are still read as a one-release fallback.
+
+After upgrading the npm plugin, migrate OpenClaw config:
+
+- `plugins.entries.agent-wechat.enabled=true` (remove `plugins.entries.wechat` and any leftover `openclaw-weixin`)
+- move `channels.wechat` → `channels.agent-wechat`
+- set cron `delivery.channel` to `agent-wechat`
+- `openclaw channels login --channel agent-wechat`
+- restart the gateway
+
+Session keys change from `…:wechat:…` to `…:agent-wechat:…`; old sessions do not continue automatically.
 
 ## Full example
 
 ```json
 {
   "channels": {
-    "wechat": {
+    "agent-wechat": {
       "enabled": true,
       "serverUrl": "http://localhost:6174",
       "token": "your-auth-token",

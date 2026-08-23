@@ -1,6 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveWeChatAccount } from "./types.ts";
+import { OPENCLAW_CHANNEL_ID, resolveWeChatAccount } from "./types.ts";
+
+test("OPENCLAW_CHANNEL_ID is agent-wechat", () => {
+  assert.equal(OPENCLAW_CHANNEL_ID, "agent-wechat");
+});
+
+test("resolveWeChatAccount prefers channels.agent-wechat over channels.wechat", () => {
+  const account = resolveWeChatAccount({
+    channels: {
+      wechat: { serverUrl: "http://legacy:6174", catchUpChatBudget: 3 },
+      [OPENCLAW_CHANNEL_ID]: { serverUrl: "http://canonical:6174", catchUpChatBudget: 9 },
+    },
+  });
+  assert.equal(account?.serverUrl, "http://canonical:6174");
+  assert.equal(account?.catchUpChatBudget, 9);
+});
+
+test("resolveWeChatAccount falls back to channels.wechat", () => {
+  const account = resolveWeChatAccount({
+    channels: { wechat: { serverUrl: "http://legacy:6174", catchUpChatBudget: 3 } },
+  });
+  assert.equal(account?.serverUrl, "http://legacy:6174");
+  assert.equal(account?.catchUpChatBudget, 3);
+});
 
 test("resolveWeChatAccount defaults catch-up to read-only", () => {
   const account = resolveWeChatAccount({
