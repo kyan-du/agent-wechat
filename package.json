@@ -28,6 +28,7 @@
     "gateway:test:remote": "pnpm --filter @kyan-du/agent-wechat-wechaty-gateway exec -- node --import tsx scripts/test-gateway-remote.ts",
     "version-packages": "pnpm changeset version && bash scripts/sync-cargo-version.sh && pnpm install --lockfile-only",
     "prepare:openclaw-plugin": "node scripts/prepare-openclaw-plugin.mjs",
+    "test:openclaw-private-install": "node scripts/test-openclaw-private-install.mjs",
     "validate:prerelease": "bash scripts/validate-prerelease.sh",
     "test:prerelease-contract": "bash scripts/test-prerelease-contract.sh",
     "test:prerelease-manifest": "bash scripts/test-prerelease-manifest.sh",
