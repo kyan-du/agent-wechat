@@ -86,14 +86,14 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 
 ### 3. Configure the channel
 
-OpenClaw's channel catalog may map `openclaw channels add --channel wechat` to its official Weixin plugin rather than this source plugin. Configure the staged plugin through its schema keys and verify the runtime load explicitly:
+This plugin registers as channel id `agent-wechat`. Do not use `wechat`, `weixin`, or `微信` — OpenClaw's official catalog maps those aliases to `@tencent-weixin/openclaw-weixin`, so outbound and cron delivery never reach this plugin.
 
 ```bash
-openclaw config set channels.wechat.enabled true
-openclaw config set channels.wechat.serverUrl http://localhost:6174
+openclaw config set channels.agent-wechat.enabled true
+openclaw config set channels.agent-wechat.serverUrl http://localhost:6174
 # Optional when the server requires an explicit token:
-openclaw config set channels.wechat.token <token>
-openclaw plugins inspect wechat --runtime
+openclaw config set channels.agent-wechat.token <token>
+openclaw plugins inspect agent-wechat --runtime
 ```
 
 Or edit `~/.openclaw/openclaw.json` directly:
@@ -101,7 +101,7 @@ Or edit `~/.openclaw/openclaw.json` directly:
 ```json
 {
   "channels": {
-    "wechat": {
+    "agent-wechat": {
       "enabled": true,
       "serverUrl": "http://localhost:6174",
       "dmPolicy": "open",
@@ -130,7 +130,7 @@ Ask your bot to log in to WeChat:
 Your bot should generate a QR code image. Alternatively, use the CLI:
 
 ```bash
-openclaw channels login --channel wechat
+openclaw channels login --channel agent-wechat
 ```
 
 ### 6. Scan the QR code
@@ -155,7 +155,7 @@ Once connected, configure how the bot handles direct messages and group chats. Y
 
 ## Configuration Reference
 
-All config lives under `channels.wechat` in OpenClaw's config file:
+All config lives under `channels.agent-wechat` in OpenClaw's config file. `channels.wechat` is still read as a one-release fallback.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

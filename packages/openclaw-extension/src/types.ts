@@ -73,12 +73,17 @@ export const DEFAULT_CATCH_UP_CHAT_BUDGET = 5;
 export const DEFAULT_MEDIA_PART_DELAY_MS = 750;
 export const DEFAULT_ACCOUNT_ID = "default";
 
+/** OpenClaw channel/plugin id. Must not collide with official catalog aliases. */
+export const OPENCLAW_CHANNEL_ID = "agent-wechat" as const;
+
 export function resolveWeChatAccount(
   cfg: Record<string, unknown>,
   accountId?: string,
 ): ResolvedWeChatAccount | null {
-  const wechat = (cfg as { channels?: { wechat?: WeChatConfig } }).channels
-    ?.wechat;
+  const channels = (cfg as { channels?: Record<string, WeChatConfig | undefined> })
+    .channels;
+  const wechat =
+    channels?.[OPENCLAW_CHANNEL_ID] ?? channels?.wechat;
   if (!wechat?.serverUrl) return null;
 
   return {

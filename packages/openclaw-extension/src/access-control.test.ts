@@ -36,6 +36,7 @@ function baseAccount(overrides: Partial<ResolvedWeChatAccount> = {}): ResolvedWe
 
 test("normalizeWeChatId strips prefix and whitespace", () => {
   assert.equal(normalizeWeChatId("  wechat:wxid_123  "), "wxid_123");
+  assert.equal(normalizeWeChatId("  agent-wechat:wxid_123  "), "wxid_123");
   assert.equal(normalizeWeChatId("room@chatroom"), "room@chatroom");
   assert.equal(normalizeWeChatId(""), "");
 });
@@ -45,7 +46,7 @@ test("normalizeWeChatAllowFrom dedupes and preserves wildcard", () => {
     " wechat:wxid_abc ",
     "wxid_abc",
     "*",
-    "wechat:wxid_xyz",
+    "agent-wechat:wxid_xyz",
   ]);
   assert.deepEqual(entries, ["wxid_abc", "*", "wxid_xyz"]);
 });
@@ -124,7 +125,7 @@ test("normalizeWeChatCommandBody strips leading mentions before slash commands i
 test("resolveWeChatPolicyContext resolves overrides and effective allowlists", () => {
   const cfg: OpenClawConfig = {
     channels: {
-      wechat: {},
+      "agent-wechat": {},
       defaults: { groupPolicy: "allowlist" },
     },
   } as OpenClawConfig;
