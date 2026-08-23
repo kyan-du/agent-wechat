@@ -139,6 +139,7 @@ function decodeExactGifLzwPixels(
   minCodeSize: number,
   pixelCount: number,
   colorCount: number,
+  operationBudget: { remaining: number },
 ): number | undefined {
   if (!Number.isInteger(minCodeSize) || minCodeSize < 2 || minCodeSize > 8) return undefined;
   const clearCode = 1 << minCodeSize;
@@ -155,10 +156,9 @@ function decodeExactGifLzwPixels(
   let first = 0;
   let produced = 0;
   let sawInitialClear = false;
-  let operations = 0;
 
-  while (produced <= pixelCount && operations < MAX_GIF_LZW_OPERATIONS) {
-    operations += 1;
+  while (produced <= pixelCount && operationBudget.remaining > 0) {
+    operationBudget.remaining -= 1;
     const next = reader.read(codeSize);
     if (next === undefined) return undefined;
     if (!sawInitialClear) {
@@ -197,9 +197,9 @@ function decodeExactGifLzwPixels(
 
     let links = 0;
     while (code >= clearCode + 2) {
-      operations += 1;
+      operationBudget.remaining -= 1;
       if (
-        operations >= MAX_GIF_LZW_OPERATIONS
+        operationBudget.remaining < 0
         || code >= available
         || top >= stack.length
         || links++ >= GIF_MAX_DICTIONARY_SIZE
@@ -239,6 +239,7 @@ function validateGifLzwStreams(buffer: Buffer): boolean {
   let offset = 13 + globalColorCount * 3;
   if (offset > buffer.length) return false;
   let frameCount = 0;
+  const operationBudget = { remaining: MAX_GIF_LZW_OPERATIONS };
 
   while (offset < buffer.length) {
     const marker = buffer[offset++];
@@ -281,6 +282,7 @@ function validateGifLzwStreams(buffer: Buffer): boolean {
       minCodeSize,
       width * height,
       colorCount,
+      operationBudget,
     );
     if (nextOffset === undefined) return false;
     offset = nextOffset;
