@@ -396,7 +396,7 @@ fn find_dat_via_hardlink(
     let row = match file_rows.first() {
         Some(r) => r,
         None => {
-            tracing::warn!("[media:hardlink] no hardlink row for md5={}", image_md5);
+            tracing::warn!("[media:hardlink] no hardlink row md5_present=true");
             return None;
         }
     };
@@ -432,7 +432,7 @@ fn find_dat_via_hardlink(
             return Some(dat_path.to_string_lossy().to_string());
         }
     }
-    tracing::warn!("[media:hardlink] .dat file not found on disk for md5={}", image_md5);
+    tracing::warn!("[media:hardlink] dat file not found md5_present=true");
     None
 }
 
@@ -471,7 +471,7 @@ fn find_file_hash_via_resource_db(
     let hex_info = info_rows.first()?.get("hex_info")?.as_str()?.to_string();
 
     let file_hash = extract_file_hash_from_packed_info(&hex_info)?;
-    tracing::info!("[media:resource-db] file_hash={} for local_id={}", file_hash, local_id);
+    tracing::info!("[media:resource-db] file hash resolved message_ref_present=true");
     Some(file_hash)
 }
 
@@ -506,7 +506,7 @@ fn find_dat_via_resource_db(
         }
     }
 
-    tracing::warn!("[media:resource-db] file not on disk yet for hash={}", file_hash);
+    tracing::warn!("[media:resource-db] file not on disk hash_present=true");
     None
 }
 
@@ -536,7 +536,7 @@ fn get_video_data(
             let mp4_path = video_dir.join(format!("{hash}.mp4"));
             if mp4_path.exists() {
                 if let Ok(data) = fs::read(&mp4_path) {
-                    tracing::info!("[media:video] found mp4 for local_id={}, size={}", local_id, data.len());
+                    tracing::info!("[media:video] found mp4 size={}", data.len());
                     return MediaResult {
                         media_type: "video".into(),
                         data: Some(base64::Engine::encode(
@@ -554,7 +554,7 @@ fn get_video_data(
             let cover_path = video_dir.join(format!("{hash}.jpg"));
             if cover_path.exists() {
                 if let Ok(data) = fs::read(&cover_path) {
-                    tracing::info!("[media:video] found cover for local_id={}", local_id);
+                    tracing::info!("[media:video] found cover");
                     return MediaResult {
                         media_type: "video".into(),
                         data: Some(base64::Engine::encode(
@@ -572,7 +572,7 @@ fn get_video_data(
             let thumb_path = video_dir.join(format!("{hash}_thumb.jpg"));
             if thumb_path.exists() {
                 if let Ok(data) = fs::read(&thumb_path) {
-                    tracing::info!("[media:video] found thumb for local_id={}", local_id);
+                    tracing::info!("[media:video] found thumb");
                     return MediaResult {
                         media_type: "video".into(),
                         data: Some(base64::Engine::encode(
@@ -594,7 +594,7 @@ fn get_video_data(
     }
 
     // Video exists but no file found on disk yet
-    tracing::warn!("[media:video] no video file found for local_id={}", local_id);
+    tracing::warn!("[media:video] no video file found message_ref_present=true");
     pending()
 }
 
@@ -917,10 +917,7 @@ pub fn get_message_media(
         match lookup_message_raw(account_dir, keys, chat_id, local_id) {
             Some(t) => t,
             None => {
-                tracing::warn!(
-                    "[media] lookup_message_raw returned None for chat_id={}, local_id={}",
-                    chat_id, local_id
-                );
+                tracing::warn!("[media] lookup_message_raw returned none message_ref_present=true");
                 return unsupported();
             }
         };
@@ -937,18 +934,19 @@ pub fn get_message_media(
         3 => {
             // Image
             tracing::info!(
-                "[media] image msg chat_id={}, local_id={}, create_time={}, content_len={}",
-                chat_id, local_id, create_time, content.len()
+                "[media] image msg metadata create_time_present={} content_len={}",
+                create_time != 0,
+                content.len()
             );
 
             // Try cached thumbnail first
             if let Some(thumb) =
                 get_image_thumbnail(account_dir, chat_id, local_id, create_time)
             {
-                tracing::info!("[media] found thumbnail for local_id={}", local_id);
+                tracing::info!("[media] found thumbnail");
                 return thumb;
             }
-            tracing::info!("[media] no thumbnail for local_id={}", local_id);
+            tracing::info!("[media] no thumbnail message_ref_present=true");
 
 
             // Try .dat decryption if we have image keys
@@ -962,22 +960,22 @@ pub fn get_message_media(
                 if let Some(dat_path) = find_dat_via_resource_db(
                     account_dir, keys, chat_id, local_id, create_time,
                 ) {
-                    tracing::info!("[media] found dat via resource-db: {}", dat_path);
+                    tracing::info!("[media] found dat via resource-db path_present=true");
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
                 // Fallback: try hardlink.db (older images may not be in resource db)
                 if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content) {
-                    tracing::info!("[media] found dat via hardlink: {}", dat_path);
+                    tracing::info!("[media] found dat via hardlink path_present=true");
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
                 tracing::warn!(
-                    "[media] no dat found for local_id={}, md5={}",
-                    local_id, xml_attr(&content, "md5").unwrap_or_default()
+                    "[media] no dat found md5_present={}",
+                    xml_attr(&content, "md5").is_some()
                 );
             } else {
-                tracing::warn!("[media] no image keys available for local_id={}", local_id);
+                tracing::warn!("[media] no image keys available message_ref_present=true");
             }
 
             // Image exists but can't be retrieved
@@ -1009,6 +1007,104 @@ pub fn get_message_media(
                 return thumb;
             }
             unsupported()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            Self(Arc::clone(&self.0))
+        }
+    }
+
+    fn capture_logs(run: impl FnOnce()) -> String {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(LogBuffer(Arc::clone(&buf)))
+            .with_ansi(false)
+            .with_level(true)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = buf.lock().expect("log buffer poisoned").clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn hostile_media_failure_logs_are_redacted() {
+        let mut keys = HashMap::new();
+        keys.insert("hardlink.db".to_string(), "hostile-secret-hardlink-key".to_string());
+        keys.insert(
+            "message_resource.db".to_string(),
+            "hostile-secret-resource-key".to_string(),
+        );
+        keys.insert("message_0.db".to_string(), "hostile-secret-message-key".to_string());
+
+        let account_dir = "hostile-account/Users/kyan/private/xwechat_files";
+        let chat_id = "wxid_sensitive_chat@chatroom";
+        let local_id = 987654321_i64;
+        let xml_md5 = "0123456789abcdef0123456789abcdef";
+        let file_hash = "fedcba9876543210fedcba9876543210";
+        let filename = "private-family-photo.dat";
+        let cdn_url = "https://cdn.example.invalid/path/private-family-photo.jpg?token=secret";
+        let content = format!(
+            r#"<msg><img md5="{xml_md5}" aeskey="secret-aes-key" cdnmidimgurl="{cdn_url}" cdnbigimgurl="{cdn_url}" filehash="{file_hash}" filename="{filename}"/></msg>"#
+        );
+
+        let logs = capture_logs(|| {
+            let _ = find_dat_via_hardlink(account_dir, &keys, chat_id, &content);
+            let _ = find_dat_via_resource_db(account_dir, &keys, chat_id, local_id, 1_760_000_000);
+            let _ = get_message_media(
+                account_dir,
+                &keys,
+                chat_id,
+                local_id,
+                Some(("00112233445566778899aabbccddeeff".to_string(), Some(0x42))),
+            );
+        });
+
+        assert!(logs.contains("[media"), "expected media diagnostics in logs: {logs}");
+        for forbidden in [
+            account_dir,
+            "/Users/kyan/private",
+            "xwechat_files",
+            chat_id,
+            &local_id.to_string(),
+            xml_md5,
+            file_hash,
+            filename,
+            cdn_url,
+            "cdnmidimgurl",
+            "cdnbigimgurl",
+            "secret-aes-key",
+            "hostile-secret-hardlink-key",
+            "hostile-secret-resource-key",
+            "hostile-secret-message-key",
+        ] {
+            assert!(!logs.contains(forbidden), "leaked {forbidden} in logs: {logs}");
         }
     }
 }
