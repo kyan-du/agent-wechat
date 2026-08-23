@@ -8,7 +8,7 @@
     "!dist/.release-metafile.json"
   ],
   "scripts": {
-    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --metafile=dist/.release-metafile.json --external:openclaw",
+    "build": "esbuild index.ts --bundle --format=esm --platform=node --outfile=dist/index.js --metafile=dist/.release-metafile.json --external:openclaw --external:sharp",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types src/*.test.ts"
   },
@@ -48,5 +48,9 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "gifuct-js": "^2.1.2",
+    "sharp": "^0.35.3"
   }
 }
