@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::create_context;
 use crate::db::get_db;
 use crate::execution::{run_execution_loop, ExecutionResult};
+use crate::ia::helpers::find_edit_and_send_button;
 use crate::ia::types::*;
 use crate::ia::{find_state_by_id, identify_states};
 use crate::outbound::outbound_sender;
@@ -207,15 +208,31 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         "logged_out"
     };
 
+    let composer_ready =
+        context.state.main_window.is_logged_in && find_edit_and_send_button(&a11y).is_some();
+    let readiness = if !context.state.main_window.is_logged_in {
+        "not_logged_in"
+    } else if composer_ready {
+        "ready"
+    } else {
+        "composer_unavailable"
+    };
+
     tracing::info!(
-        "[auth_status] view={:?}, status={}",
+        "[auth_status] view={:?}, status={}, readiness={}",
         context.state.main_window.view,
-        status
+        status,
+        readiness,
     );
 
     Json(serde_json::json!({
         "status": status,
         "loggedInUser": session.logged_in_user,
+        "readiness": {
+            "status": readiness,
+            "composerReady": composer_ready,
+            "errorCode": if readiness == "composer_unavailable" { Some("COMPOSER_UNAVAILABLE") } else { None },
+        },
     }))
 }
 
@@ -301,11 +318,17 @@ pub async fn logout() -> Json<serde_json::Value> {
 pub async fn reset_auth() -> Json<serde_json::Value> {
     let session = match get_session("default") {
         Some(session) => session,
-        None => return Json(serde_json::json!({ "success": false, "errorCode": "SESSION_NOT_FOUND", "error": "default session not found" })),
+        None => {
+            return Json(
+                serde_json::json!({ "success": false, "errorCode": "SESSION_NOT_FOUND", "error": "default session not found" }),
+            )
+        }
     };
     let stopped = crate::sessions::manager::stop_session(&session.id).await;
     if stopped.is_err() {
-        return Json(serde_json::json!({ "success": false, "errorCode": "AUTH_RESET_STOP_FAILED", "error": "could not stop WeChat session" }));
+        return Json(
+            serde_json::json!({ "success": false, "errorCode": "AUTH_RESET_STOP_FAILED", "error": "could not stop WeChat session" }),
+        );
     }
     let reset = {
         let mut db = get_db();
@@ -313,7 +336,9 @@ pub async fn reset_auth() -> Json<serde_json::Value> {
     };
     match reset {
         Ok(()) => Json(serde_json::json!({ "success": true })),
-        Err(code) => Json(serde_json::json!({ "success": false, "errorCode": code, "error": "authentication state reset failed" })),
+        Err(code) => Json(
+            serde_json::json!({ "success": false, "errorCode": code, "error": "authentication state reset failed" }),
+        ),
     }
 }
 
