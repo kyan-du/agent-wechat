@@ -135,13 +135,34 @@ jobs:
           node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
 
       - name: Publish @kyan-du/agent-wechat-cli with provenance
-        run: npm publish ".release-pack/kyan-du-agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
+        run: |
+          set -euo pipefail
+          package="@kyan-du/agent-wechat-cli"
+          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
+            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
+          else
+            npm publish ".release-pack/kyan-du-agent-wechat-cli-${{ inputs.version }}.tgz" --access public --provenance
+          fi
 
       - name: Publish @kyan-du/agent-wechat-openclaw with provenance
-        run: npm publish ".release-pack/kyan-du-agent-wechat-openclaw-${{ inputs.version }}.tgz" --access public --provenance
+        run: |
+          set -euo pipefail
+          package="@kyan-du/agent-wechat-openclaw"
+          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
+            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
+          else
+            npm publish ".release-pack/kyan-du-agent-wechat-openclaw-${{ inputs.version }}.tgz" --access public --provenance
+          fi
 
       - name: Publish @kyan-du/agent-wechat-wechaty-puppet with provenance
-        run: npm publish ".release-pack/kyan-du-agent-wechat-wechaty-puppet-${{ inputs.version }}.tgz" --access public --provenance
+        run: |
+          set -euo pipefail
+          package="@kyan-du/agent-wechat-wechaty-puppet"
+          if npm view "$package@${{ inputs.version }}" version --json >/dev/null 2>&1; then
+            echo "$package@${{ inputs.version }} already exists on npm; skipping publish"
+          else
+            npm publish ".release-pack/kyan-du-agent-wechat-wechaty-puppet-${{ inputs.version }}.tgz" --access public --provenance
+          fi
 
       - name: Verify public registry versions and clean install
         run: node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"
@@ -153,11 +174,14 @@ jobs:
         run: |
           set -euo pipefail
           tag="v$VERSION"
-          existing=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+          existing=""
+          if existing_ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$tag" --jq .object.sha 2>/dev/null); then
+            existing="$existing_ref"
+          fi
           if [ -n "$existing" ]; then
             test "$existing" = "$GITHUB_SHA"
           else
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA"
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --jq .ref
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             release_tag=$(gh release view "$tag" --json tagName --jq .tagName)

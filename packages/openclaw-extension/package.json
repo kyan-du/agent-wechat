@@ -1,6 +1,6 @@
 {
   "name": "@kyan-du/agent-wechat-openclaw",
-  "version": "0.13.2",
+  "version": "0.13.3",
   "type": "module",
   "files": [
     "dist",

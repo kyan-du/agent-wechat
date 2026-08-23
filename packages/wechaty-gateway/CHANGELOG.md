@@ -1,5 +1,14 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.13.3
+
+### Patch Changes
+
+- Harden npm production release automation for registry retries and tag creation.
+
+- Updated dependencies []:
+  - @kyan-du/agent-wechat-wechaty-puppet@0.13.3
+
 ## 0.13.2
 
 ### Patch Changes
