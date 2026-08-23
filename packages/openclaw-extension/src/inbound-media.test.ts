@@ -106,6 +106,23 @@ function adversarialGifEmptyLzwData(): Buffer {
   ]);
 }
 
+function adversarialGifOnePixelForDeclaredFrame(width: number, height: number): Buffer {
+  const dimensions = Buffer.alloc(4);
+  dimensions.writeUInt16LE(width, 0);
+  dimensions.writeUInt16LE(height, 2);
+  return Buffer.concat([
+    Buffer.from("GIF89a", "ascii"),
+    dimensions,
+    // Global color table with two entries.
+    Buffer.from([0x80, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    Buffer.from([0xff, 0xff, 0xff]),
+    Buffer.from([0x2c, 0x00, 0x00, 0x00, 0x00]),
+    dimensions,
+    // LZW minimum size 2; clear, one literal pixel, then EOI.
+    Buffer.from([0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b]),
+  ]);
+}
+
 function truncateForDecoder(format: string, bytes: Buffer): Buffer {
   if (format === "jpeg") return bytes.subarray(0, bytes.length - 12);
   if (format === "png") return bytes.subarray(0, bytes.indexOf("IDAT", 0, "ascii") + 10);
@@ -176,6 +193,31 @@ test("rejects adversarial image containers that are structurally plausible but n
   for (const [format, bytes] of Object.entries(adversarial)) {
     assert.deepEqual(await validateInboundMedia(media(format, bytes)), { ok: false, code: "MEDIA_IMAGE_INVALID" }, format);
   }
+});
+
+test("rejects truncated GIF LZW streams before allocating their declared frames", async () => {
+  for (const dimension of [100, 6324]) {
+    const truncated = adversarialGifOnePixelForDeclaredFrame(dimension, dimension);
+    assert.equal(truncated.length, 35);
+    assert.deepEqual(
+      await validateInboundMedia(media("gif", truncated)),
+      { ok: false, code: "MEDIA_IMAGE_INVALID" },
+      `${dimension}x${dimension}`,
+    );
+  }
+});
+
+test("concurrent truncated GIF validation remains memory bounded", async () => {
+  const truncated = adversarialGifOnePixelForDeclaredFrame(6324, 6324);
+  const rssBefore = process.memoryUsage.rss();
+  const results = await Promise.all(
+    Array.from({ length: 32 }, () => validateInboundMedia(media("gif", truncated))),
+  );
+  const rssGrowth = process.memoryUsage.rss() - rssBefore;
+  for (const result of results) {
+    assert.deepEqual(result, { ok: false, code: "MEDIA_IMAGE_INVALID" });
+  }
+  assert.ok(rssGrowth < 64 * 1024 * 1024, `unexpected RSS growth: ${rssGrowth}`);
 });
 
 test("rejects image payloads above the bounded validation size", async () => {
