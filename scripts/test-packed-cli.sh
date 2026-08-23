@@ -9,6 +9,8 @@ trap 'rm -rf "$STAGE" "$PACKS"' EXIT
 cd "$ROOT"
 pnpm --filter @kyan-du/agent-wechat-shared build
 pnpm --filter @kyan-du/agent-wechat-cli build
+CURRENT_VERSION=$(node -p "require('./packages/cli/package.json').version")
+NEXT_VERSION=$(node -e 'const parts = process.argv[1].split(".").map(Number); parts[2] += 1; console.log(parts.join("."));' "$CURRENT_VERSION")
 TARBALL=$(cd packages/cli && npm pack --silent --ignore-scripts --pack-destination "$PACKS")
 mkdir -p "$STAGE/node_modules/qrcode-terminal"
 cp -R packages/cli/node_modules/qrcode-terminal/* "$STAGE/node_modules/qrcode-terminal/"
@@ -17,14 +19,14 @@ CLI="$STAGE/package/dist/cli.js"
 NODE=$(command -v node)
 NO_DOCKER_PATH="$STAGE/no-docker-bin"
 mkdir -p "$NO_DOCKER_PATH"
-cat >"$NO_DOCKER_PATH/npm" <<'EOF'
+cat >"$NO_DOCKER_PATH/npm" <<EOF
 #!/bin/sh
-test "$#" -eq 4
-test "$1" = "view"
-test "$2" = "@kyan-du/agent-wechat-cli"
-test "$3" = "dist-tags.latest"
-test "$4" = "--json"
-printf '"0.12.1"\n'
+test "\$#" -eq 4
+test "\$1" = "view"
+test "\$2" = "@kyan-du/agent-wechat-cli"
+test "\$3" = "dist-tags.latest"
+test "\$4" = "--json"
+printf '"$NEXT_VERSION"\n'
 EOF
 chmod +x "$NO_DOCKER_PATH/npm"
 
@@ -66,10 +68,10 @@ for command in status doctor; do
 done
 PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" --json upgrade --cli >"$STAGE/upgrade-json" 2>"$STAGE/upgrade-err"
 test ! -s "$STAGE/upgrade-err"
-node -e 'const fs=require("fs");const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(x.schemaVersion!==1||!x.ok||x.data.currentVersion!=="0.12.0"||x.data.latestVersion!=="0.12.1"||!x.data.updateAvailable||x.data.command!=="npm install --global @kyan-du/agent-wechat-cli@0.12.1")process.exit(1)' "$STAGE/upgrade-json"
+node -e 'const fs=require("fs");const [path,current,latest]=process.argv.slice(1);const x=JSON.parse(fs.readFileSync(path,"utf8"));if(x.schemaVersion!==1||!x.ok||x.data.currentVersion!==current||x.data.latestVersion!==latest||!x.data.updateAvailable||x.data.command!==`npm install --global @kyan-du/agent-wechat-cli@${latest}`)process.exit(1)' "$STAGE/upgrade-json" "$CURRENT_VERSION" "$NEXT_VERSION"
 PATH="$NO_DOCKER_PATH" HOME="$STAGE/home" "$NODE" "$CLI" upgrade --cli >"$STAGE/upgrade-human" 2>"$STAGE/upgrade-human-err"
 test ! -s "$STAGE/upgrade-human-err"
-test "$(cat "$STAGE/upgrade-human")" = "npm install --global @kyan-du/agent-wechat-cli@0.12.1"
+test "$(cat "$STAGE/upgrade-human")" = "npm install --global @kyan-du/agent-wechat-cli@$NEXT_VERSION"
 node "$ROOT/scripts/test-packed-cli-health.mjs" "$CLI" "$STAGE"
 
 echo 'Packed CLI clean-consumer journeys passed.'

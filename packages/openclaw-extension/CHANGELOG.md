@@ -1,5 +1,23 @@
 # @agent-wechat/wechat
 
+## 0.13.0
+
+### Minor Changes
+
+- [#71](https://github.com/kyan-du/agent-wechat/pull/71) [`8b272ca`](https://github.com/kyan-du/agent-wechat/commit/8b272ca02095fff28661844d7c0c1ebb259cb3bd) Thanks [@vangie](https://github.com/vangie)! - Rename the OpenClaw channel/plugin id from `wechat` to `agent-wechat`.
+
+  OpenClaw 2026.7+ resolves outbound and cron channel names through the official catalog first. Catalog aliases `wechat` / `weixin` / `微信` map to `@tencent-weixin/openclaw-weixin`, so `openclaw channels login --channel wechat` and cron `delivery.channel=wechat` never reached this plugin.
+
+  This plugin now registers as `agent-wechat` with no catalog-colliding aliases. `resolveWeChatAccount` still reads `channels.wechat` as a one-release fallback.
+
+  After upgrading, reconfigure OpenClaw:
+
+  - `plugins.entries.agent-wechat.enabled=true` (remove `plugins.entries.wechat` / leftover `openclaw-weixin`)
+  - move `channels.wechat` → `channels.agent-wechat`
+  - set cron `delivery.channel=agent-wechat`
+  - `openclaw channels login --channel agent-wechat`
+  - restart the gateway
+
 ## 0.12.0
 
 ### Minor Changes

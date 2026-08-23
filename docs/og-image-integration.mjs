@@ -1,15 +1,30 @@
 import satori from 'satori';
 import sharp from 'sharp';
-import { readFileSync, readdirSync, statSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { resolve, dirname } from 'path';
 
 export const OG_WIDTH = 1200;
 export const OG_HEIGHT = 630;
 
-const fontRegular = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf');
-const fontBold = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf');
-const fontMono = readFileSync('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf');
+function readFirstFont(paths) {
+  const path = paths.find((candidate) => existsSync(candidate));
+  if (!path) throw new Error(`No usable OG image font found in: ${paths.join(', ')}`);
+  return readFileSync(path);
+}
+
+const fontRegular = readFirstFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+  '/System/Library/Fonts/Supplemental/Arial.ttf',
+]);
+const fontBold = readFirstFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+]);
+const fontMono = readFirstFont([
+  '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+  '/System/Library/Fonts/Supplemental/Courier New.ttf',
+]);
 
 function ogTemplate(title, description, isRoot = false) {
   return {
