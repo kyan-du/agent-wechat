@@ -1,13 +1,13 @@
 {
-  "id": "wechat",
-  "channels": ["wechat"],
+  "id": "agent-wechat",
+  "channels": ["agent-wechat"],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {}
   },
   "channelConfigs": {
-    "wechat": {
+    "agent-wechat": {
       "label": "WeChat",
       "description": "WeChat messaging via agent-wechat container.",
       "schema": {
