@@ -165,6 +165,12 @@
           "specifier": "^1.4.15",
           "version": "1.4.15",
           "license": "Apache-2.0"
+        },
+        {
+          "name": "wechaty-puppet",
+          "specifier": "^1.20.2",
+          "version": "1.20.2",
+          "license": "Apache-2.0"
         }
       ],
       "peer": [

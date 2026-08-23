@@ -1,5 +1,11 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.13.1
+
+### Patch Changes
+
+- Declare `wechaty-puppet` as a runtime dependency so clean npm installs can import the published puppet package without relying on a separately installed peer.
+
 ## 0.13.0
 
 ## 0.12.0

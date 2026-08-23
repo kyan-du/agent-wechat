@@ -140,6 +140,9 @@ importers:
       file-box:
         specifier: ^1.4.15
         version: 1.4.15
+      wechaty-puppet:
+        specifier: ^1.20.2
+        version: 1.20.2(rxjs@7.8.2)
     devDependencies:
       '@kyan-du/agent-wechat-shared':
         specifier: workspace:*
@@ -156,9 +159,6 @@ importers:
       typescript:
         specifier: ^5.4.5
         version: 5.9.3
-      wechaty-puppet:
-        specifier: ^1.20.2
-        version: 1.20.2(rxjs@7.8.2)
 
 packages:
 
