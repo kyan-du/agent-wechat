@@ -1,5 +1,14 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.13.2
+
+### Patch Changes
+
+- Retry npm registry visibility checks during production release verification.
+
+- Updated dependencies []:
+  - @kyan-du/agent-wechat-wechaty-puppet@0.13.2
+
 ## 0.13.1
 
 ### Patch Changes

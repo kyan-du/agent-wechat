@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.13.2
+
+### Patch Changes
+
+- Retry npm registry visibility checks during production release verification.
+
 ## 0.13.1
 
 ## 0.13.0

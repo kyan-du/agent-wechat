@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const version = process.argv[2];
 const packages = ["@kyan-du/agent-wechat-cli", "@kyan-du/agent-wechat-openclaw", "@kyan-du/agent-wechat-wechaty-puppet"];
@@ -14,8 +15,29 @@ const run = (command, args, cwd = process.cwd(), options = {}) => {
   return execFileSync(command, args, { cwd, encoding: "utf8", stdio: options.capture ? ["ignore", "pipe", "inherit"] : "inherit" });
 };
 
+const retry = async (description, fn) => {
+  let lastError;
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt === 12) {
+        break;
+      }
+      console.warn(`${description} was not visible yet; retrying in 10s (${attempt}/12)`);
+      await sleep(10_000);
+    }
+  }
+  throw lastError;
+};
+
 for (const name of packages) {
-  const metadata = JSON.parse(run("npm", ["view", `${name}@${version}`, "name", "version", "--json"], process.cwd(), { capture: true }));
+  const metadata = JSON.parse(
+    await retry(`${name}@${version}`, () =>
+      run("npm", ["view", `${name}@${version}`, "name", "version", "--json"], process.cwd(), { capture: true }),
+    ),
+  );
   if (metadata.name !== name || metadata.version !== version) {
     throw new Error(`registry returned ${metadata.name}@${metadata.version} for ${name}@${version}`);
   }
