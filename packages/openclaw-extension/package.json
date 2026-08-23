@@ -24,12 +24,10 @@
       "./dist/index.js"
     ],
     "channel": {
-      "id": "wechat",
+      "id": "agent-wechat",
       "label": "WeChat",
-      "selectionLabel": "WeChat (微信)",
-      "aliases": [
-        "weixin"
-      ],
+      "selectionLabel": "WeChat (agent-wechat)",
+      "aliases": [],
       "order": 80
     },
     "install": {

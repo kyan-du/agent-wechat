@@ -3,7 +3,7 @@ import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wech
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
-import { resolveWeChatAccount } from "./types.js";
+import { OPENCLAW_CHANNEL_ID, resolveWeChatAccount } from "./types.js";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
 import {
   enrichStartupBaselineFromMessages,
@@ -631,7 +631,7 @@ async function dispatchSegment(
     // Resolve routing using the last (triggering) message
     const route = core.channel.routing.resolveAgentRoute({
       cfg,
-      channel: "wechat",
+      channel: OPENCLAW_CHANNEL_ID,
       accountId: liveAccount.accountId,
       peer: {
         kind: isGroup ? "group" : "direct",
@@ -724,21 +724,21 @@ async function dispatchSegment(
       RawBody: rawBody,
       CommandBody: commandBody,
       InboundHistory: inboundHistory,
-      From: isGroup ? `wechat:group:${chatId}` : `wechat:${senderId}`,
-      To: `wechat:${chatId}`,
+      From: isGroup ? `${OPENCLAW_CHANNEL_ID}:group:${chatId}` : `${OPENCLAW_CHANNEL_ID}:${senderId}`,
+      To: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
       SessionKey: route.sessionKey,
       AccountId: route.accountId,
       ChatType: isGroup ? "group" : "direct",
       ConversationLabel: fromLabel,
       SenderName: senderName || undefined,
       SenderId: senderId,
-      Provider: "wechat",
-      Surface: "wechat",
-      MessageSid: `wechat:${chatId}:${msg.localId}`,
+      Provider: OPENCLAW_CHANNEL_ID,
+      Surface: OPENCLAW_CHANNEL_ID,
+      MessageSid: `${OPENCLAW_CHANNEL_ID}:${chatId}:${msg.localId}`,
       WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
-      OriginatingChannel: "wechat",
-      OriginatingTo: `wechat:${chatId}`,
+      OriginatingChannel: OPENCLAW_CHANNEL_ID,
+      OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
       ...(msg.reply ? {
         ReplyToBody: msg.reply.content.length > 50 ? msg.reply.content.slice(0, 50) + "..." : msg.reply.content,
@@ -762,7 +762,7 @@ async function dispatchSegment(
     const { onModelSelected, ...prefixOptions } = createChannelReplyPipeline({
       cfg,
       agentId: route.agentId,
-      channel: "wechat",
+      channel: OPENCLAW_CHANNEL_ID,
       accountId: liveAccount.accountId,
     });
 
@@ -780,7 +780,7 @@ async function dispatchSegment(
 
           const tableMode = core.channel.text.resolveMarkdownTableMode({
             cfg,
-            channel: "wechat",
+            channel: OPENCLAW_CHANNEL_ID,
             accountId: liveAccount.accountId,
           });
           const text = core.channel.text.convertMarkdownTables(
@@ -853,7 +853,7 @@ async function dispatchSegment(
 
     // Record activity
     core.channel.activity?.record?.({
-      channel: "wechat",
+      channel: OPENCLAW_CHANNEL_ID,
       accountId: liveAccount.accountId,
       direction: "inbound",
       at: timestamp,
@@ -918,7 +918,7 @@ async function processUnreadChat(
     account;
   const chatId = chat.username ?? chat.id;
   const storeAllowFrom = await core.channel.pairing
-    .readAllowFromStore({ channel: "wechat", accountId: liveAccount.accountId, env: process.env })
+    .readAllowFromStore({ channel: OPENCLAW_CHANNEL_ID, accountId: liveAccount.accountId, env: process.env })
     .catch(() => [] as string[]);
   const policy = resolveWeChatPolicyContext({
     account: liveAccount,
@@ -928,7 +928,7 @@ async function processUnreadChat(
   });
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
-    surface: "wechat",
+    surface: OPENCLAW_CHANNEL_ID,
   });
   let opened = false;
   const openChatIfNeeded = async () => {
@@ -1218,7 +1218,7 @@ async function processUnreadChat(
     }
     if (decision.action === "defer") {
       log?.info?.(
-        `[wechat:${liveAccount.accountId}] Catch-up hold for ${chatId} (budget ${liveAccount.catchUpChatBudget}); raise channels.wechat.catchUpChatBudget to continue`,
+        `[wechat:${liveAccount.accountId}] Catch-up hold for ${chatId} (budget ${liveAccount.catchUpChatBudget}); raise channels.${OPENCLAW_CHANNEL_ID}.catchUpChatBudget to continue`,
       );
       return "deferred";
     }

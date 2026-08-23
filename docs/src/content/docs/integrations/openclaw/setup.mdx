@@ -39,10 +39,12 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 
 ### 3. Add the WeChat channel
 
+This plugin's channel id is `agent-wechat`. OpenClaw's official catalog already owns `wechat` / `weixin` / `微信`.
+
 ```bash
-openclaw config set channels.wechat.enabled true
-openclaw config set channels.wechat.serverUrl http://localhost:6174
-openclaw plugins inspect wechat --runtime
+openclaw config set channels.agent-wechat.enabled true
+openclaw config set channels.agent-wechat.serverUrl http://localhost:6174
+openclaw plugins inspect agent-wechat --runtime
 ```
 
 ### 4. Restart the gateway
@@ -67,10 +69,10 @@ openclaw plugins install -l ./.artifacts/openclaw-extension
 ### 2. Add the WeChat channel
 
 ```bash
-openclaw config set channels.wechat.enabled true
-openclaw config set channels.wechat.serverUrl <your-server-url>
-openclaw config set channels.wechat.token <your-token>
-openclaw plugins inspect wechat --runtime
+openclaw config set channels.agent-wechat.enabled true
+openclaw config set channels.agent-wechat.serverUrl <your-server-url>
+openclaw config set channels.agent-wechat.token <your-token>
+openclaw plugins inspect agent-wechat --runtime
 ```
 
 ### 3. Restart the gateway
@@ -88,7 +90,7 @@ Ask your bot:
 Your bot generates a QR code image. Alternatively:
 
 ```bash
-openclaw channels login --channel wechat
+openclaw channels login --channel agent-wechat
 ```
 
 Display the QR code on a screen separate from your phone. Scan it using WeChat's built-in scanner (tap **+** > **Scan**), then tap **Login** on the confirmation screen.

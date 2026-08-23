@@ -22,6 +22,7 @@ test("collectWeChatStatusIssues: WARN when connected is explicitly false", () =>
   ]);
   assert.equal(issues.length, 1);
   assert.equal(issues[0].kind, "runtime");
+  assert.equal(issues[0].channel, "agent-wechat");
   assert.ok(issues[0].message.includes("Cannot reach"));
 });
 
@@ -69,7 +70,9 @@ test("collectWeChatStatusIssues: reports unlinked session", () => {
   ]);
   assert.equal(issues.length, 1);
   assert.equal(issues[0].kind, "auth");
+  assert.equal(issues[0].channel, "agent-wechat");
   assert.ok(issues[0].message.includes("not authenticated"));
+  assert.ok(issues[0].fix.includes("--channel agent-wechat"));
 });
 
 test("collectWeChatStatusIssues: handles empty array", () => {

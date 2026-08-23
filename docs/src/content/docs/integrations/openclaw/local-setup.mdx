@@ -25,9 +25,9 @@ pnpm cli start
 # Pending P1-B (not available yet): openclaw plugins install @kyan-du/agent-wechat-openclaw
 node scripts/prepare-openclaw-plugin.mjs
 openclaw plugins install -l ./.artifacts/openclaw-extension
-openclaw config set channels.wechat.enabled true
-openclaw config set channels.wechat.serverUrl http://localhost:6174
-openclaw plugins inspect wechat --runtime
+openclaw config set channels.agent-wechat.enabled true
+openclaw config set channels.agent-wechat.serverUrl http://localhost:6174
+openclaw plugins inspect agent-wechat --runtime
 ```
 
 No additional configuration is needed — the defaults (`http://localhost:6174` and the shared token file) work automatically.
@@ -43,7 +43,7 @@ openclaw gateway start
 Ask your bot to log in, or use the CLI:
 
 ```bash
-openclaw channels login --channel wechat
+openclaw channels login --channel agent-wechat
 ```
 
 ## How it works locally
