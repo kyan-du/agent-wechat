@@ -1,0 +1,48 @@
+{
+  "role": "desktop-frame",
+  "name": "main",
+  "children": [
+    {
+      "role": "frame",
+      "name": "Detached",
+      "children": [
+        {
+          "role": "panel",
+          "name": "",
+          "children": [
+            { "role": "text", "name": "", "states": ["EDITABLE", "FOCUSED"] },
+            { "role": "push-button", "name": "Send(S)" }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "application",
+      "name": "wechat",
+      "children": [
+        {
+          "role": "frame",
+          "name": "WeChat",
+          "bounds": { "x": 0, "y": 0, "width": 1024, "height": 768 },
+          "children": [
+            {
+              "role": "tool-bar",
+              "name": "Navigation",
+              "children": [
+                { "role": "push-button", "name": "WeChat" },
+                { "role": "push-button", "name": "Contacts" }
+              ]
+            },
+            {
+              "role": "list",
+              "name": "Chats",
+              "children": [
+                { "role": "list-item", "name": "Visible row" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ const DEFAULT_TEXT_CHUNK_CHARS: usize = 24;
 const DEFAULT_TEXT_CHUNK_PAUSE_MS: u64 = 45;
 const DEFAULT_TEXT_CHUNK_JITTER_MS: u64 = 80;
 const MAX_CHUNKED_TEXT_CHARS: usize = 4_096;
+const MAX_FOCUS_ATTEMPTS: u8 = 3;
 
 fn bounded_env_usize(name: &str, default: usize, min: usize, max: usize) -> usize {
     std::env::var(name)
@@ -92,6 +93,7 @@ pub enum SendMessagePhase {
 pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
+    pub focus_attempts: u8,
     pub confirm_attempts: u32,
     /// Set only once the irreversible Return/send command is attempted.
     pub send_action_executed: bool,
@@ -185,6 +187,19 @@ fn reset_after_popup(plan_state: &mut SendMessagePlanState) -> Result<(), &'stat
     Ok(())
 }
 
+fn retry_focus(
+    plan_state: &mut SendMessagePlanState,
+    code: &'static str,
+) -> Result<(), &'static str> {
+    plan_state.focus_attempts = plan_state.focus_attempts.saturating_add(1);
+    if plan_state.focus_attempts >= MAX_FOCUS_ATTEMPTS {
+        plan_state.diagnostic_error = Some(code.to_string());
+        Err(code)
+    } else {
+        Ok(())
+    }
+}
+
 fn allow_single_send(plan_state: &mut SendMessagePlanState) -> Result<(), &'static str> {
     if plan_state.send_action_executed {
         plan_state.diagnostic_error = Some("duplicate_send_action_suppressed".to_string());
@@ -225,6 +240,7 @@ impl Plan for SendMessagePlan {
         SendMessagePlanState {
             phase: SendMessagePhase::Opening,
             open_result: None,
+            focus_attempts: 0,
             confirm_attempts: 0,
             send_action_executed: false,
             diagnostic_error: None,
@@ -332,8 +348,16 @@ impl Plan for SendMessagePlan {
 
                 SendMessagePhase::Focusing => {
                     if main_state_id != Some("chat_open") {
-                        plan_state.diagnostic_error = Some("target_ui_not_open".to_string());
-                        return None;
+                        if retry_focus(plan_state, "target_ui_not_open").is_err() {
+                            return None;
+                        }
+                        return Some(SelectedAction {
+                            action: actions::wait_short(),
+                            frame: identified
+                                .main_window
+                                .as_ref()
+                                .and_then(|m| m.frame.clone()),
+                        });
                     }
                     if plan_state
                         .open_result
@@ -348,12 +372,20 @@ impl Plan for SendMessagePlan {
                     let (edit_node, _) = match find_edit_and_send_button(a11y) {
                         Some(found) => found,
                         None => {
-                            plan_state.diagnostic_error =
-                                Some("localized_composer_not_found".to_string());
-                            return None;
+                            if retry_focus(plan_state, "localized_composer_not_found").is_err() {
+                                return None;
+                            }
+                            return Some(SelectedAction {
+                                action: actions::wait_short(),
+                                frame: identified
+                                    .main_window
+                                    .as_ref()
+                                    .and_then(|m| m.frame.clone()),
+                            });
                         }
                     };
 
+                    plan_state.focus_attempts = 0;
                     plan_state.phase = SendMessagePhase::Inputting;
 
                     if node_has_state(edit_node, "FOCUSED") {
@@ -709,6 +741,24 @@ mod tests {
             target_confirmation_error(&open_result(Some("target"), None), "target"),
             Some("target_confirmation_not_verified".to_string())
         );
+    }
+
+    #[test]
+    fn focusing_retries_are_bounded_and_return_stable_codes() {
+        let mut state = SendMessagePlan.initial_plan_state();
+        state.phase = SendMessagePhase::Focusing;
+        assert_eq!(retry_focus(&mut state, "target_ui_not_open"), Ok(()));
+        assert_eq!(retry_focus(&mut state, "target_ui_not_open"), Ok(()));
+        assert_eq!(
+            retry_focus(&mut state, "target_ui_not_open"),
+            Err("target_ui_not_open")
+        );
+        assert_eq!(state.focus_attempts, MAX_FOCUS_ATTEMPTS);
+        assert_eq!(
+            state.diagnostic_error.as_deref(),
+            Some("target_ui_not_open")
+        );
+        assert!(!state.send_action_executed);
     }
 
     #[test]

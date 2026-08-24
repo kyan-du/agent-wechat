@@ -77,6 +77,17 @@ struct ComposerPair<'a> {
 ///   3. pair under the main application frame (not a ghost/detached frame)
 /// The first pair (DFS order) breaks any remaining ties.
 pub fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
+    find_ranked_composer(a11y, false)
+}
+
+/// Find a composer that belongs to the live main WeChat frame. State
+/// identification uses this stricter variant so a detached-window composer
+/// cannot make an empty main window look like an open chat.
+pub fn find_main_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
+    find_ranked_composer(a11y, true)
+}
+
+fn find_ranked_composer(a11y: &A11yNode, main_frame_only: bool) -> Option<(&A11yNode, &A11yNode)> {
     let mut candidates: Vec<ComposerPair> = Vec::new();
     collect_edit_send_pairs(a11y, false, &mut candidates);
 
@@ -85,6 +96,7 @@ pub fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNod
     candidates
         .iter()
         .enumerate()
+        .filter(|(_, candidate)| !main_frame_only || candidate.in_main_frame)
         .min_by_key(|(idx, c)| {
             (
                 !node_has_state(c.edit, "FOCUSED"),
@@ -226,4 +238,16 @@ mod composer_tests {
         );
         assert!(find_edit_and_send_button(&tree).is_some());
     }
+    #[test]
+    fn main_only_composer_rejects_detached_window_pair() {
+        let tree = node(
+            "desktop-frame",
+            "",
+            &[],
+            vec![node("frame", "Detached", &[], vec![composer(true, false)])],
+        );
+        assert!(find_edit_and_send_button(&tree).is_some());
+        assert!(find_main_edit_and_send_button(&tree).is_none());
+    }
+
 }

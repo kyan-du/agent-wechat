@@ -278,6 +278,7 @@ mod tests {
         let json = match name {
             "chat_view" => include_str!("states/test_fixtures/chat_view.json"),
             "chat_open_view" => include_str!("states/test_fixtures/chat_open_view.json"),
+            "chat_open_offscreen_selected" => include_str!("states/test_fixtures/chat_open_offscreen_selected.json"),
             "unknown_chat_without_chats_name" => {
                 include_str!("states/test_fixtures/unknown_chat_without_chats_name.json")
             }
@@ -322,6 +323,17 @@ mod tests {
             .state_outcomes
             .iter()
             .any(|outcome| outcome.state_id == "chat_open" && outcome.outcome == "matched"));
+    }
+
+    #[test]
+    fn reports_offscreen_open_pane_without_selected_sidebar_row() {
+        let tree = load_fixture("chat_open_offscreen_selected");
+        let states = identify_states(&tree, "");
+        let diagnostics = identify_diagnostics(&tree, "");
+        assert_eq!(states.main_window.as_ref().map(|s| s.state_id.as_str()), Some("chat_open"));
+        assert_eq!(diagnostics.chat_rules.selected_chat_item_count, 0);
+        assert_eq!(diagnostics.chat_rules.editable_text_count, 1);
+        assert_eq!(diagnostics.chat_rules.send_button_count, 1);
     }
 
     #[test]
