@@ -106,6 +106,40 @@ fn group_aliases_from_ext_buffer(hex: &str) -> HashMap<String, String> {
     aliases
 }
 
+fn group_membership_sql(group_id: &str, logged_in_user: &str) -> String {
+    let escaped_group = group_id.replace('\'', "''");
+    let escaped_user = logged_in_user.replace('\'', "''");
+    format!(
+        "SELECT r.id, r.username, c.id AS contact_id, c.delete_flag,
+                EXISTS(
+                  SELECT 1 FROM chatroom_member self_member
+                  JOIN contact self_contact ON self_contact.id = self_member.member_id
+                  WHERE self_member.room_id = r.id
+                    AND self_contact.username != ''
+                    AND instr('{escaped_user}', self_contact.username) = 1
+                ) AS current_user_is_member
+         FROM chat_room r
+         LEFT JOIN contact c ON c.username = r.username
+         WHERE r.username = '{escaped_group}'
+         LIMIT 1;"
+    )
+}
+
+fn group_membership_row(
+    contact_db: &str,
+    contact_key: &str,
+    group_id: &str,
+    logged_in_user: &str,
+) -> Result<Option<serde_json::Value>, GroupMemberQueryError> {
+    let rows = query_wechat_db_checked(
+        contact_db,
+        contact_key,
+        &group_membership_sql(group_id, logged_in_user),
+    )
+    .map_err(|_| GroupMemberQueryError::MissingDatabase)?;
+    Ok(rows.into_iter().next())
+}
+
 /// List group members directly from contact.db. The query is read-only and
 /// keyset-paginated by stable member id; it never logs member fields.
 pub fn list_group_members(
@@ -122,26 +156,17 @@ pub fn list_group_members(
         .get("contact.db")
         .ok_or(GroupMemberQueryError::MissingDatabase)?;
     let contact_db = get_db_path(account_dir, "contact.db");
-    let escaped_group = group_id.replace('\'', "''");
-    let group = query_wechat_db_checked(
-        &contact_db,
-        contact_key,
-        &format!(
-            "SELECT r.id, r.username, c.id AS contact_id, c.delete_flag
-             FROM chat_room r
-             LEFT JOIN contact c ON c.username = r.username
-             WHERE r.username = '{escaped_group}'
-             LIMIT 1;"
-        ),
-    )
-    .map_err(|_| GroupMemberQueryError::MissingDatabase)?;
-    let Some(group) = group.first() else {
+    let Some(group) = group_membership_row(&contact_db, contact_key, group_id, account_dir)? else {
         return Err(GroupMemberQueryError::GroupNotFound);
     };
     if group
         .get("contact_id")
         .and_then(|value| value.as_i64())
         .is_none()
+        || group
+            .get("current_user_is_member")
+            .and_then(|value| value.as_i64())
+            != Some(1)
         || group
             .get("delete_flag")
             .and_then(|value| value.as_i64())
@@ -263,5 +288,54 @@ mod tests {
     fn malformed_or_truncated_alias_buffers_fail_closed() {
         assert!(group_aliases_from_ext_buffer("not-hex").is_empty());
         assert!(group_aliases_from_ext_buffer("0a10ff").is_empty());
+    }
+
+    #[test]
+    fn membership_query_distinguishes_joined_stale_deleted_and_missing_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contact.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, delete_flag INTEGER);
+             CREATE TABLE chat_room(id INTEGER PRIMARY KEY, username TEXT);
+             CREATE TABLE chatroom_member(room_id INTEGER, member_id INTEGER);
+             INSERT INTO contact VALUES(1,'self_wxid',0),(2,'joined@chatroom',0),
+               (3,'stale@chatroom',0),(4,'deleted@chatroom',1),(5,'member_wxid',0);
+             INSERT INTO chat_room VALUES(10,'joined@chatroom'),(11,'stale@chatroom'),
+               (12,'deleted@chatroom');
+             INSERT INTO chatroom_member VALUES(10,1),(10,5),(11,5),(12,1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let sql = group_membership_sql("joined@chatroom", "self_wxid");
+        let joined: (i64, i64) = conn
+            .query_row(&sql, [], |row| Ok((row.get(3)?, row.get(4)?)))
+            .unwrap();
+        assert_eq!(joined, (0, 1));
+        let stale: (i64, i64) = conn
+            .query_row(
+                &group_membership_sql("stale@chatroom", "self_wxid"),
+                [],
+                |row| Ok((row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(stale, (0, 0));
+        let deleted: (i64, i64) = conn
+            .query_row(
+                &group_membership_sql("deleted@chatroom", "self_wxid"),
+                [],
+                |row| Ok((row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(deleted, (1, 1));
+        assert!(conn
+            .query_row::<i64, _, _>(
+                &group_membership_sql("missing@chatroom", "self_wxid"),
+                [],
+                |row| row.get(0)
+            )
+            .is_err());
     }
 }

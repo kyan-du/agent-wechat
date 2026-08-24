@@ -2,7 +2,7 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import { loginStart, getActiveLoginState } from "./login.js";
 import { buildOpenClawConfirmedSend } from "./confirmed-send.js";
-import { hasExplicitGroupMemberConsent } from "./group-members-consent.js";
+import { groupMemberErrorCode, hasExplicitGroupMemberConsent } from "./group-members-consent.js";
 
 export function createWeChatConfirmedSendTool(account: ResolvedWeChatAccount) {
   const client = new WeChatClient({
@@ -93,7 +93,7 @@ export function createWeChatGroupMembersTool(account: ResolvedWeChatAccount) {
       } catch (error) {
         return {
           content: [{ type: "text" as const, text: "Group member lookup failed." }],
-          details: { error: true, code: error instanceof Error ? error.name : "GROUP_MEMBERS_FAILED" },
+          details: { error: true, code: groupMemberErrorCode(error) },
         };
       }
     },
