@@ -1,4 +1,4 @@
-use crate::ia::helpers::{extract_active_chat_id, find_frame_for};
+use crate::ia::helpers::{extract_active_chat_id, find_frame_for, find_main_edit_and_send_button};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use super::base::extract_window_control_bounds;
@@ -58,6 +58,16 @@ fn find_selected_chat_item(a11y: &A11yNode) -> Option<&A11yNode> {
         .find(|item| item.states.as_ref().map(|s| s.iter().any(|st| st == "SELECTED")).unwrap_or(false))
 }
 
+fn has_open_chat_pane(a11y: &A11yNode) -> bool {
+    // The selected sidebar row disappears from a11y when it scrolls off-screen.
+    // Target identity remains independently confirmed by the plan before send.
+    find_main_edit_and_send_button(a11y).is_some()
+}
+
+fn is_chat_open(a11y: &A11yNode) -> bool {
+    find_selected_chat_item(a11y).is_some() || has_open_chat_pane(a11y)
+}
+
 /// Chat state — no chat selected.
 struct ChatState;
 
@@ -69,7 +79,7 @@ impl IAState for ChatState {
         if !is_chat_view(args.a11y) {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
-        if find_selected_chat_item(args.a11y).is_some() {
+        if is_chat_open(args.a11y) {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
         Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"list[name="Chats"]"#) })
@@ -102,7 +112,7 @@ impl IAState for ChatOpenState {
         if !is_chat_view(args.a11y) {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
-        if find_selected_chat_item(args.a11y).is_none() {
+        if !is_chat_open(args.a11y) {
             return Ok(IdentifyResult { identified: false, frame: None });
         }
         Ok(IdentifyResult { identified: true, frame: find_frame_for(args.a11y, r#"list[name="Chats"]"#) })
@@ -182,3 +192,30 @@ fn collect_labels<'a>(node: &'a A11yNode, out: &mut Vec<&'a A11yNode>) {
 pub static CHAT_STATES: std::sync::LazyLock<Vec<Box<dyn IAState>>> = std::sync::LazyLock::new(|| {
     vec![Box::new(ChatState), Box::new(ChatOpenState)]
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ia::identify_states;
+
+    fn fixture(value: &str) -> A11yNode {
+        serde_json::from_str(value).expect("fixture parses")
+    }
+
+    #[test]
+    fn offscreen_selected_row_still_identifies_chat_open() {
+        let tree = fixture(include_str!("test_fixtures/chat_open_offscreen_selected.json"));
+        let states = identify_states(&tree, "");
+        assert_eq!(states.main_window.as_ref().map(|s| s.state_id.as_str()), Some("chat_open"));
+        assert!(find_selected_chat_item(&tree).is_none());
+        assert!(has_open_chat_pane(&tree));
+    }
+
+    #[test]
+    fn detached_composer_does_not_identify_main_chat_as_open() {
+        let tree = fixture(include_str!("test_fixtures/chat_view_detached_composer.json"));
+        let states = identify_states(&tree, "");
+        assert_eq!(states.main_window.as_ref().map(|s| s.state_id.as_str()), Some("chat"));
+        assert!(!has_open_chat_pane(&tree));
+    }
+}
