@@ -81,6 +81,13 @@ export const groupMemberSchema = z.object({
   nickName: z.string().optional(),
 });
 
+export const groupMembersPageSchema = z.object({
+  schemaVersion: z.literal(1),
+  items: z.array(groupMemberSchema),
+  nextCursor: z.string().nullable().optional(),
+  errorCode: z.string().optional(),
+});
+
 export const listGroupMembersParamsSchema = z.object({
   groupId: z.string().endsWith("@chatroom"),
   limit: z.number().int().positive().max(100).optional().default(50),

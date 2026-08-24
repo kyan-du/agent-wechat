@@ -1,4 +1,4 @@
-use super::wechat_db::{get_db_path, query_wechat_db};
+use super::wechat_db::{get_db_path, query_wechat_db_checked};
 use crate::ia::types::GroupMember;
 use std::collections::HashMap;
 
@@ -123,26 +123,30 @@ pub fn list_group_members(
         .ok_or(GroupMemberQueryError::MissingDatabase)?;
     let contact_db = get_db_path(account_dir, "contact.db");
     let escaped_group = group_id.replace('\'', "''");
-
-    let group = query_wechat_db(
+    let group = query_wechat_db_checked(
         &contact_db,
         contact_key,
         &format!(
-            "SELECT r.id, r.username, c.delete_flag
+            "SELECT r.id, r.username, c.id AS contact_id, c.delete_flag
              FROM chat_room r
              LEFT JOIN contact c ON c.username = r.username
              WHERE r.username = '{escaped_group}'
              LIMIT 1;"
         ),
-    );
+    )
+    .map_err(|_| GroupMemberQueryError::MissingDatabase)?;
     let Some(group) = group.first() else {
         return Err(GroupMemberQueryError::GroupNotFound);
     };
     if group
-        .get("delete_flag")
+        .get("contact_id")
         .and_then(|value| value.as_i64())
-        .unwrap_or(0)
-        != 0
+        .is_none()
+        || group
+            .get("delete_flag")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(1)
+            != 0
     {
         return Err(GroupMemberQueryError::NotMember);
     }
@@ -164,7 +168,7 @@ pub fn list_group_members(
         None => String::new(),
     };
     let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 100);
-    let rows = query_wechat_db(
+    let rows = query_wechat_db_checked(
         &contact_db,
         contact_key,
         &format!(
@@ -173,11 +177,13 @@ pub fn list_group_members(
              JOIN contact c ON c.id = m.member_id
              JOIN chat_room r ON r.id = m.room_id
              WHERE m.room_id = {room_id}
-               AND c.username != ''{cursor_clause}
+               AND c.username != ''
+               AND c.username NOT LIKE '%@chatroom'{cursor_clause}
              ORDER BY c.username ASC
              LIMIT {safe_limit};"
         ),
-    );
+    )
+    .map_err(|_| GroupMemberQueryError::MissingDatabase)?;
 
     let room_aliases = rows
         .iter()
@@ -227,5 +233,35 @@ mod tests {
             list_group_members("account", &HashMap::new(), "wxid_friend", 10, None),
             Err(GroupMemberQueryError::NotGroup)
         );
+    }
+
+    fn length_delimited(field: u8, value: &[u8]) -> Vec<u8> {
+        let mut encoded = vec![field << 3 | 2, value.len() as u8];
+        encoded.extend_from_slice(value);
+        encoded
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn aliases_preserve_unicode_and_ignore_empty_values() {
+        let mut unicode_member = length_delimited(1, b"wxid_a");
+        unicode_member.extend(length_delimited(2, "群昵称😀".as_bytes()));
+        let mut empty_member = length_delimited(1, b"wxid_b");
+        empty_member.extend(length_delimited(2, b""));
+        let mut outer = length_delimited(1, &unicode_member);
+        outer.extend(length_delimited(1, &empty_member));
+
+        let aliases = group_aliases_from_ext_buffer(&hex(&outer));
+        assert_eq!(aliases.get("wxid_a").map(String::as_str), Some("群昵称😀"));
+        assert!(!aliases.contains_key("wxid_b"));
+    }
+
+    #[test]
+    fn malformed_or_truncated_alias_buffers_fail_closed() {
+        assert!(group_aliases_from_ext_buffer("not-hex").is_empty());
+        assert!(group_aliases_from_ext_buffer("0a10ff").is_empty());
     }
 }

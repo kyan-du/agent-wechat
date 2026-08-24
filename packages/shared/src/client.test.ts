@@ -120,6 +120,16 @@ test("listGroupMembersPage exposes explicit API errors", async () => {
   });
 });
 
+test("listGroupMembersPage rejects malformed successful payloads", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ schemaVersion: 1, items: [{ memberId: 7, displayName: "invalid" }], nextCursor: null }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    await assert.rejects(() => client.listGroupMembersPage("room@chatroom"));
+  });
+});
+
 test("sendMessage exposes IDEMPOTENCY_CAPACITY on 429", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () =>

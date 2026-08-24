@@ -1,4 +1,4 @@
-import { sendParamsSchema, sendResultSchema } from "./schemas/index.js";
+import { groupMembersPageSchema, sendParamsSchema, sendResultSchema } from "./schemas/index.js";
 import type {
   Chat,
   Contact,
@@ -212,11 +212,11 @@ export class WeChatClient {
     limit?: number,
     cursor?: string,
   ): Promise<CursorPage<GroupMember>> {
-    const page = await this.get<CursorPage<GroupMember>>(
+    const page = groupMembersPageSchema.parse(await this.get<unknown>(
       `/api/groups/${encodeURIComponent(groupId)}/members${qs({ limit, cursor })}`,
-    );
+    ));
     if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
-    return page;
+    return { ...page, nextCursor: page.nextCursor ?? undefined };
   }
 
   // ---- Contacts ----
