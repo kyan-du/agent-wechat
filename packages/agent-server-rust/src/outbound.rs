@@ -4165,6 +4165,7 @@ mod tests {
         let mut plan_state = crate::plans::send_message::SendMessagePlanState {
             phase: crate::plans::send_message::SendMessagePhase::Confirming,
             open_result: None,
+            focus_attempts: 0,
             confirm_attempts: 0,
             send_action_executed: true,
             diagnostic_error: None,
@@ -5079,6 +5080,7 @@ mod p0c_tests {
         let mut plan_state = crate::plans::send_message::SendMessagePlanState {
             phase: crate::plans::send_message::SendMessagePhase::Confirming,
             open_result: None,
+            focus_attempts: 0,
             confirm_attempts: 0,
             send_action_executed: true,
             diagnostic_error: None,
