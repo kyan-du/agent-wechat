@@ -57,6 +57,14 @@ test("send requires a target and one payload before contacting service", () => {
   assert.match(JSON.parse(duplicate.stdout).error, /exactly one/);
 });
 
+test("group members command is explicit, paginated, and read-only", () => {
+  const result = run(["chats", "members", "--help"]);
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /bounded page of group members read-only/);
+  assert.match(result.stdout, /--limit/);
+  assert.match(result.stdout, /--cursor/);
+});
+
 test("packed CLI can run without a workspace checkout", () => {
   assert.equal(fs.existsSync(cli), true, "build the CLI before this test");
   const result = run(["messages", "--help"]);

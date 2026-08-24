@@ -74,6 +74,19 @@ export const chatSchema = z.object({
   isGroup: z.boolean(),
 });
 
+export const groupMemberSchema = z.object({
+  memberId: z.string().min(1),
+  displayName: z.string().min(1),
+  groupAlias: z.string().optional(),
+  nickName: z.string().optional(),
+});
+
+export const listGroupMembersParamsSchema = z.object({
+  groupId: z.string().endsWith("@chatroom"),
+  limit: z.number().int().positive().max(100).optional().default(50),
+  cursor: z.string().optional(),
+});
+
 export const listChatsParamsSchema = z.object({
   limit: z.number().int().positive().max(100).optional().default(50),
   offset: z.number().int().nonnegative().optional().default(0),
@@ -190,6 +203,8 @@ export type Status = z.infer<typeof statusSchema>;
 export type LoginState = z.infer<typeof loginStateSchema>;
 export type LoginResult = z.infer<typeof loginResultSchema>;
 export type Chat = z.infer<typeof chatSchema>;
+export type GroupMember = z.infer<typeof groupMemberSchema>;
+export type ListGroupMembersParams = z.infer<typeof listGroupMembersParamsSchema>;
 export type ListChatsParams = z.infer<typeof listChatsParamsSchema>;
 export type FindChatParams = z.infer<typeof findChatParamsSchema>;
 export type GetChatParams = z.infer<typeof getChatParamsSchema>;

@@ -52,6 +52,46 @@ export function createWeChatConfirmedSendTool(account: ResolvedWeChatAccount) {
   };
 }
 
+export function createWeChatGroupMembersTool(account: ResolvedWeChatAccount) {
+  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
+  return {
+    label: "WeChat Group Members",
+    name: "wechat_group_members",
+    description: "Read one bounded page of group members by stable group id. This returns personal information; call only when the user explicitly asks for a specific group, and do not echo more fields than needed.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", description: "Stable group id ending in @chatroom" },
+        limit: { type: "number", minimum: 1, maximum: 50 },
+        cursor: { type: "string" },
+      },
+      required: ["groupId"],
+    },
+    execute: async (_toolCallId: string, params: unknown) => {
+      const args = params as Record<string, unknown>;
+      const groupId = String(args.groupId ?? "").trim();
+      const limit = typeof args.limit === "number" ? Math.trunc(args.limit) : 25;
+      try {
+        const page = await client.listGroupMembersPage(
+          groupId,
+          Math.min(50, Math.max(1, limit)),
+          typeof args.cursor === "string" ? args.cursor : undefined,
+        );
+        return {
+          content: [{ type: "text" as const, text: `Retrieved ${page.items.length} group member(s).` }],
+          details: page,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text" as const, text: "Group member lookup failed." }],
+          details: { error: true, code: error instanceof Error ? error.name : "GROUP_MEMBERS_FAILED" },
+        };
+      }
+    },
+  };
+}
+
 export function createWeChatLoginTool(account: ResolvedWeChatAccount) {
   const client = new WeChatClient({
     baseUrl: account.serverUrl,

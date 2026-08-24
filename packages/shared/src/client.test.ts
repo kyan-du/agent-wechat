@@ -88,6 +88,38 @@ test("sendMessage still throws for unrelated HTTP failures", async () => {
   });
 });
 
+test("listGroupMembersPage encodes a stable group id and preserves pagination", async () => {
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/api/groups/room%40chatroom/members?limit=2&cursor=next_page");
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      schemaVersion: 1,
+      items: [{ memberId: "wxid_a", displayName: "群昵称😀", groupAlias: "群昵称😀" }],
+      nextCursor: "after",
+    }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    const page = await client.listGroupMembersPage("room@chatroom", 2, "next_page");
+    assert.equal(page.items[0]?.memberId, "wxid_a");
+    assert.equal(page.items[0]?.displayName, "群昵称😀");
+    assert.equal(page.nextCursor, "after");
+  });
+});
+
+test("listGroupMembersPage exposes explicit API errors", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ errorCode: "NOT_GROUP_CHAT" }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    await assert.rejects(
+      () => client.listGroupMembersPage("wxid_friend"),
+      (error: unknown) => error instanceof WeChatHttpError && error.errorCode === "NOT_GROUP_CHAT",
+    );
+  });
+});
+
 test("sendMessage exposes IDEMPOTENCY_CAPACITY on 429", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () =>
