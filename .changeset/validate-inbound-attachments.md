@@ -4,4 +4,4 @@
 "@kyan-du/agent-wechat-shared": patch
 ---
 
-Validate inbound PDF and file payloads, preserve safe Unicode filenames, expose stable media diagnostics and image provenance, and report quoted-image resource limitations without dropping message text.
+Validate supported inbound PDF payloads while rejecting unverified file formats, preserve safe Unicode filenames, expose stable media diagnostics and image provenance, and report quoted-image resource limitations without dropping message text.

@@ -247,7 +247,7 @@ test("accepts valid PDF with Chinese filename and preserves the safe basename", 
   assert.equal(savedName, "报告 2026.pdf");
 });
 
-test("rejects spoofed, oversized, and path-shaped file attachments", async () => {
+test("rejects spoofed, unsupported, oversized, and path-shaped file attachments", async () => {
   const file = (bytes: Buffer, filename = "report.pdf") => ({
     type: "file" as const,
     data: bytes.toString("base64"),
@@ -258,6 +258,18 @@ test("rejects spoofed, oversized, and path-shaped file attachments", async () =>
     await validateInboundMedia(file(Buffer.from("not a pdf"))),
     { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" },
   );
+  for (const format of ["docx", "zip", "txt", "exe"]) {
+    assert.deepEqual(
+      await validateInboundMedia({
+        type: "file",
+        data: Buffer.from(format === "zip" || format === "docx" ? "PK\u0003\u0004payload" : "arbitrary bytes").toString("base64"),
+        format,
+        filename: `fixture.${format}`,
+      }),
+      { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" },
+      format,
+    );
+  }
   assert.deepEqual(
     await validateInboundMedia(file(Buffer.alloc(25 * 1024 * 1024 + 1))),
     { ok: false, code: "MEDIA_FILE_TOO_LARGE" },

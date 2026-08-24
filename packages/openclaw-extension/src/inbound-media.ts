@@ -61,11 +61,10 @@ function safeInboundFilename(raw: string): string | undefined {
   return cleaned || undefined;
 }
 
+const SUPPORTED_FILE_FORMATS = new Set(["pdf"]);
+
 function documentMimeFromMagic(buf: Buffer): string | undefined {
   if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
-  if (buf.length >= 4 && buf.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
-    return "application/zip";
-  }
   return undefined;
 }
 
@@ -358,11 +357,8 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
   } else if (result.type === "file") {
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
     if (!safeInboundFilename(result.filename)) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
-    const detected = documentMimeFromMagic(buffer);
-    if (detected && format !== "pdf" && format !== "zip") {
-      return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
-    }
-    if (format === "pdf" && detected !== "application/pdf") {
+    if (!SUPPORTED_FILE_FORMATS.has(format)) return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
+    if (documentMimeFromMagic(buffer) !== "application/pdf") {
       return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
     }
   }
