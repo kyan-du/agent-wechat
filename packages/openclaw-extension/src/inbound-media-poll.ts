@@ -12,8 +12,8 @@ export async function pollMedia(
 ): Promise<MediaResult | null> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = await client.getMedia(chatId, localId);
-    if (result.type === "unsupported") return null;
-    if (result.data) return result;
+    if (result.type === "unsupported") return result;
+    if (result.data || result.errorCode && result.type !== "pending") return result;
     if (attempt < maxAttempts) {
       log?.info?.(`[wechat:media] pending attempt=${attempt}/${maxAttempts}`);
       await new Promise((resolve) => setTimeout(resolve, intervalMs));

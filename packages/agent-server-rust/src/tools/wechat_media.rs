@@ -16,24 +16,42 @@ struct ImageKeys {
     xor_byte: Option<u8>,
 }
 
-fn unsupported() -> MediaResult {
+fn media_result(
+    media_type: &str,
+    data: Option<String>,
+    format: impl Into<String>,
+    filename: impl Into<String>,
+) -> MediaResult {
     MediaResult {
-        media_type: "unsupported".into(),
-        data: None,
+        media_type: media_type.into(),
+        data,
         url: None,
-        format: String::new(),
-        filename: String::new(),
+        format: format.into(),
+        filename: filename.into(),
+        source: None,
+        error_code: None,
     }
 }
 
+fn unsupported() -> MediaResult {
+    let mut result = media_result("unsupported", None, "", "");
+    result.error_code = Some("MEDIA_UNSUPPORTED".into());
+    result
+}
+
+fn pending_with(
+    media_type: &str,
+    format: impl Into<String>,
+    filename: impl Into<String>,
+    code: &str,
+) -> MediaResult {
+    let mut result = media_result(media_type, None, format, filename);
+    result.error_code = Some(code.into());
+    result
+}
+
 fn pending() -> MediaResult {
-    MediaResult {
-        media_type: "pending".into(),
-        data: None,
-        url: None,
-        format: String::new(),
-        filename: String::new(),
-    }
+    pending_with("pending", "", "", "MEDIA_NOT_DOWNLOADED")
 }
 
 fn account_base_paths(account_dir: &str) -> [String; 2] {
@@ -140,6 +158,8 @@ fn get_image_thumbnail(
                     url: None,
                     format: "jpeg".into(),
                     filename: format!("msg_{local_id}.jpg"),
+                    source: None,
+                    error_code: None,
                 });
             }
         }
@@ -166,6 +186,8 @@ fn get_image_thumbnail(
                             url: None,
                             format: "jpeg".into(),
                             filename: format!("msg_{local_id}.jpg"),
+                            source: None,
+                            error_code: None,
                         });
                     }
                 }
@@ -546,6 +568,8 @@ fn get_video_data(
                         url: None,
                         format: "mp4".into(),
                         filename: format!("msg_{local_id}.mp4"),
+                        source: None,
+                        error_code: None,
                     };
                 }
             }
@@ -564,6 +588,8 @@ fn get_video_data(
                         url: None,
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_cover.jpg"),
+                        source: None,
+                        error_code: None,
                     };
                 }
             }
@@ -582,6 +608,8 @@ fn get_video_data(
                         url: None,
                         format: "jpeg".into(),
                         filename: format!("msg_{local_id}_thumb.jpg"),
+                        source: None,
+                        error_code: None,
                     };
                 }
             }
@@ -631,6 +659,8 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                source: None,
+                error_code: None,
             }
         }
     };
@@ -644,6 +674,8 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                source: None,
+                error_code: None,
             }
         }
     };
@@ -657,6 +689,8 @@ fn decrypt_and_return(
                 url: None,
                 format: "jpeg".into(),
                 filename: format!("msg_{local_id}.jpg"),
+                source: None,
+                error_code: None,
             }
         }
     };
@@ -680,6 +714,8 @@ fn decrypt_and_return(
                 url: None,
                 format: cfmt,
                 filename: format!("msg_{local_id}.{cext}"),
+                source: None,
+                error_code: None,
             };
         }
         // Try _t.dat thumbnail
@@ -700,6 +736,8 @@ fn decrypt_and_return(
                             url: None,
                             format: tf.into(),
                             filename: format!("msg_{local_id}.{te}"),
+                            source: Some("thumbnail".into()),
+                            error_code: None,
                         };
                     }
                 }
@@ -716,6 +754,8 @@ fn decrypt_and_return(
         url: None,
         format: format.into(),
         filename: format!("msg_{local_id}.{ext}"),
+        source: Some("original".into()),
+        error_code: None,
     }
 }
 
@@ -751,6 +791,8 @@ fn get_emoji_media(
                         url: Some(url.to_string()),
                         format: "gif".into(),
                         filename: format!("emoji_{md5_val}.gif"),
+                        source: None,
+                        error_code: None,
                     };
                 }
             }
@@ -766,6 +808,8 @@ fn get_emoji_media(
                 url: Some(url),
                 format: "gif".into(),
                 filename: format!("emoji_{md5_val}.gif"),
+                source: None,
+                error_code: None,
             };
         }
     }
@@ -776,6 +820,8 @@ fn get_emoji_media(
         url: None,
         format: "unknown".into(),
         filename: format!("emoji_{md5_val}"),
+        source: None,
+        error_code: None,
     }
 }
 
@@ -844,6 +890,8 @@ fn get_voice_data(
                 url: None,
                 format: "mp3".into(),
                 filename: format!("msg_{local_id}.mp3"),
+                source: None,
+                error_code: None,
             };
         }
 
@@ -857,13 +905,43 @@ fn get_voice_data(
             url: None,
             format: "silk".into(),
             filename: format!("msg_{local_id}.silk"),
+            source: None,
+            error_code: None,
         };
     }
 
-    pending()
+    pending_with("voice", "", format!("msg_{local_id}"), "VOICE_NOT_DOWNLOADED")
 }
 
 // ── File attachment ──────────────────────────────────────────────────────────
+
+const MAX_INBOUND_FILE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_INBOUND_FILENAME_CHARS: usize = 180;
+
+fn sanitize_inbound_filename(raw: &str, local_id: i64) -> String {
+    let normalized = raw.replace('\\', "/");
+    let basename = Path::new(&normalized)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let mut cleaned = String::new();
+    for ch in basename
+        .chars()
+        .filter(|ch| !ch.is_control() && *ch != '/' && *ch != '\\')
+        .take(MAX_INBOUND_FILENAME_CHARS)
+    {
+        if cleaned.len() + ch.len_utf8() > 240 {
+            break;
+        }
+        cleaned.push(ch);
+    }
+    let cleaned = cleaned.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
+    if cleaned.is_empty() {
+        format!("file_{local_id}")
+    } else {
+        cleaned.to_string()
+    }
+}
 
 fn get_file_attachment(
     account_dir: &str,
@@ -871,36 +949,52 @@ fn get_file_attachment(
     create_time: i64,
     local_id: i64,
 ) -> MediaResult {
-    let filename = extract_xml_tag(content, "title").unwrap_or_else(|| format!("file_{local_id}"));
-    let ext = extract_xml_tag(content, "fileext").unwrap_or_default();
-
-    // Files are stored at <account>/msg/file/YYYY-MM/<filename>
-    let dt = chrono::DateTime::from_timestamp(create_time, 0);
-    let year_month = dt.map(|d| d.format("%Y-%m").to_string()).unwrap_or_default();
+    let raw_filename = extract_xml_tag(content, "title").unwrap_or_default();
+    let filename = sanitize_inbound_filename(&raw_filename, local_id);
+    let ext = Path::new(&filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .or_else(|| extract_xml_tag(content, "fileext").map(|value| value.to_ascii_lowercase()))
+        .unwrap_or_default();
+    let Some(dt) = chrono::DateTime::from_timestamp(create_time, 0) else {
+        return pending_with("file", ext, filename, "FILE_TIMESTAMP_INVALID");
+    };
+    let year_month = dt.format("%Y-%m").to_string();
 
     for base in &account_base_paths(account_dir) {
         let file_path = Path::new(base)
             .join("msg/file")
             .join(&year_month)
             .join(&filename);
-        if file_path.exists() {
-            if let Ok(data) = fs::read(&file_path) {
-                return MediaResult {
-                    media_type: "file".into(),
-                    data: Some(base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data,
-                    )),
-                    url: None,
-                    format: ext,
-                    filename,
-                };
-            }
+        let Ok(metadata) = fs::metadata(&file_path) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
         }
+        if metadata.len() == 0 {
+            return pending_with("file", ext, filename, "FILE_EMPTY");
+        }
+        if metadata.len() > MAX_INBOUND_FILE_BYTES {
+            return pending_with("file", ext, filename, "FILE_TOO_LARGE");
+        }
+        return match fs::read(&file_path) {
+            Ok(data) => media_result(
+                "file",
+                Some(base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &data,
+                )),
+                ext,
+                filename,
+            ),
+            Err(_) => pending_with("file", ext, filename, "FILE_READ_FAILED"),
+        };
     }
 
-    // File not yet downloaded by WeChat
-    pending()
+    pending_with("file", ext, filename, "FILE_NOT_DOWNLOADED")
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
@@ -944,6 +1038,8 @@ pub fn get_message_media(
                 get_image_thumbnail(account_dir, chat_id, local_id, create_time)
             {
                 tracing::info!("[media] found thumbnail");
+                let mut thumb = thumb;
+                thumb.source = Some("thumbnail".into());
                 return thumb;
             }
             tracing::info!("[media] no thumbnail message_ref_present=true");
@@ -979,13 +1075,12 @@ pub fn get_message_media(
             }
 
             // Image exists but can't be retrieved
-            MediaResult {
-                media_type: "image".into(),
-                data: None,
-                url: None,
-                format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
-            }
+            pending_with(
+                "image",
+                "jpeg",
+                format!("msg_{local_id}.jpg"),
+                "IMAGE_RESOURCE_UNAVAILABLE",
+            )
         }
         43 => {
             // Video
@@ -1051,6 +1146,21 @@ mod tests {
         tracing::subscriber::with_default(subscriber, run);
         let bytes = buf.lock().expect("log buffer poisoned").clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn inbound_filenames_preserve_unicode_but_remove_paths() {
+        assert_eq!(
+            sanitize_inbound_filename("报告 2026.pdf", 7),
+            "报告 2026.pdf"
+        );
+        assert_eq!(sanitize_inbound_filename("../../秘密.pdf", 7), "秘密.pdf");
+        assert_eq!(
+            sanitize_inbound_filename(r"..\\..\\计划.pdf", 7),
+            "计划.pdf"
+        );
+        assert_eq!(sanitize_inbound_filename("...", 7), "file_7");
+        assert!(sanitize_inbound_filename(&"界".repeat(200), 7).len() <= 240);
     }
 
     #[test]

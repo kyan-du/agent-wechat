@@ -96,6 +96,8 @@ export interface MediaResult {
   url?: string;       // CDN URL for emoji
   format: string;
   filename: string;
+  source?: "original" | "thumbnail";
+  errorCode?: string;
 }
 
 // ============================================

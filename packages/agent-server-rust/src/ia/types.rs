@@ -424,6 +424,9 @@ pub struct ReplyInfo {
     #[ts(optional)]
     pub sender: Option<String>,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub media_error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -601,6 +604,12 @@ pub struct MediaResult {
     pub url: Option<String>,
     pub format: String,
     pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<String>,
 }
 
 // ============================================
