@@ -20,11 +20,11 @@ export type InboundMediaValidation =
 
 const MIME_BY_FORMAT: Record<string, string> = {
   jpeg: "image/jpeg", jpg: "image/jpeg", png: "image/png", webp: "image/webp",
-  gif: "image/gif", mp3: "audio/mpeg", pdf: "application/pdf", doc: "application/msword",
+  gif: "image/gif", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg", oga: "audio/ogg", pdf: "application/pdf", doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  zip: "application/zip", txt: "text/plain",
+  zip: "application/zip", txt: "text/plain", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
 };
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -65,6 +65,20 @@ const SUPPORTED_FILE_FORMATS = new Set(["pdf"]);
 
 function documentMimeFromMagic(buf: Buffer): string | undefined {
   if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  return undefined;
+}
+
+function binaryMimeFromMagic(buf: Buffer): string | undefined {
+  if (buf.length >= 3 && buf.subarray(0, 3).equals(Buffer.from("ID3", "ascii"))) return "audio/mpeg";
+  if (buf.length >= 2 && buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return "audio/mpeg";
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") return "audio/wav";
+  if (buf.length >= 4 && buf.toString("ascii", 0, 4) === "OggS") return "audio/ogg";
+  if (buf.length >= 12 && buf.toString("ascii", 4, 8) === "ftyp") {
+    const brand = buf.toString("ascii", 8, 12);
+    if (["isom", "iso2", "mp41", "mp42", "avc1"].includes(brand)) return "video/mp4";
+    if (brand === "qt  ") return "video/quicktime";
+  }
+  if (buf.length >= 4 && buf.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
   return undefined;
 }
 
@@ -354,6 +368,10 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
     if (!detected || detected !== declared) return { ok: false, code: "MEDIA_MAGIC_MISMATCH" };
     const invalidCode = await validateDecodedImage(buffer, detected);
     if (invalidCode) return { ok: false, code: invalidCode };
+  } else if (result.type === "voice" || result.type === "video") {
+    if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
+    const detected = binaryMimeFromMagic(buffer);
+    if (!detected || detected !== declared) return { ok: false, code: "MEDIA_MAGIC_MISMATCH" };
   } else if (result.type === "file") {
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
     if (!safeInboundFilename(result.filename)) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
