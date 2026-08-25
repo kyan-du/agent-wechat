@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DurableStoreError, quarantineDurableJson, readDurableJson, removeDurableJson, writeDurableJson } from "./durable-store.ts";
+import { DurableStoreError, MAX_DURABLE_JSON_BYTES, quarantineDurableJson, readDurableJson, removeDurableJson, updateDurableJson, writeDurableJson } from "./durable-store.ts";
 
 test("durable JSON writes are readable after atomic replacement", () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-durable-store-"));
@@ -31,6 +31,26 @@ test("quarantine preserves corrupt state and writes a blocker", () => {
   assert.equal(existsSync(path), false);
   assert.equal(existsSync(quarantine), true);
   assert.deepEqual(readDurableJson(blocker), { version: 1, quarantine });
+});
+
+test("locked updates serialize concurrent read-modify-write operations", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-durable-store-"));
+  const path = join(dir, "state.json");
+  writeDurableJson(path, { entries: [] as number[] });
+  await Promise.all(Array.from({ length: 8 }, (_, value) => new Promise<void>((resolve) => {
+    setTimeout(() => {
+      updateDurableJson<{ entries: number[] }>(path, (current) => ({ entries: [...(current?.entries ?? []), value] }));
+      resolve();
+    }, value % 3);
+  })));
+  assert.deepEqual(readDurableJson<{ entries: number[] }>(path)?.entries.sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7]);
+});
+
+test("serialized size is bounded and failed writes clean temporary files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-durable-store-"));
+  const path = join(dir, "state.json");
+  assert.throws(() => writeDurableJson(path, "x".repeat(MAX_DURABLE_JSON_BYTES + 1)), /exceeds/);
+  assert.equal(readdirSync(dir).some((name) => name.includes(".tmp-")), false);
 });
 
 test("remove is idempotent for an absent state", () => {
