@@ -133,6 +133,26 @@ export const idempotencyKeySchema = z.string()
   .max(128)
   .regex(/^[A-Za-z0-9._:-]+$/);
 
+const forwardedMessageNodeSchema: z.ZodType<{
+  sender?: string;
+  senderId?: string;
+  timestamp?: string;
+  text?: string;
+  messageType?: number;
+  media?: string;
+  children: z.infer<typeof forwardedMessageNodeSchema>[];
+  truncated: boolean;
+}> = z.lazy(() => z.object({
+  sender: z.string().optional(), senderId: z.string().optional(), timestamp: z.string().optional(),
+  text: z.string().optional(), messageType: z.number().int().optional(), media: z.string().optional(),
+  children: z.array(forwardedMessageNodeSchema), truncated: z.boolean(),
+}));
+
+export const forwardedMessageTreeSchema = z.object({
+  schemaVersion: z.number().int(), title: z.string().optional(),
+  nodes: z.array(forwardedMessageNodeSchema), truncated: z.boolean(),
+});
+
 export const messageSchema = z.object({
   localId: z.number().int(),
   serverId: z.number(),
@@ -142,6 +162,7 @@ export const messageSchema = z.object({
   type: z.number().int(),
   content: z.string(),
   timestamp: z.string(),
+  forwarded: forwardedMessageTreeSchema.optional(),
 });
 
 export const mediaReferenceSchema = z.object({

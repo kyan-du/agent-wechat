@@ -1,5 +1,5 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
-use crate::ia::types::{Message, ReplyInfo};
+use crate::ia::types::{ForwardedMessageNode, ForwardedMessageTree, Message, ReplyInfo};
 use crate::tools::wechat_message_type::normalize_local_type;
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -63,6 +63,63 @@ fn extract_group_sender(content: &str) -> (Option<String>, String) {
 
 /// Clean message content for display based on message type.
 /// Replaces verbose XML with concise summaries.
+const FORWARD_MAX_DEPTH: usize = 8;
+const FORWARD_MAX_NODES: usize = 500;
+const FORWARD_MAX_XML_BYTES: usize = 512 * 1024;
+
+fn xml_unescape(value: &str) -> String {
+    value.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<ForwardedMessageNode>, bool) {
+    if depth > FORWARD_MAX_DEPTH || xml.len() > FORWARD_MAX_XML_BYTES || *budget == 0 {
+        return (Vec::new(), true);
+    }
+    let mut nodes = Vec::new();
+    let mut truncated = false;
+    let mut cursor = 0;
+    while let Some(start) = xml[cursor..].find("<dataitem") {
+        if *budget == 0 { truncated = true; break; }
+        let start = cursor + start;
+        let Some(end) = xml[start..].find("</dataitem>") else { truncated = true; break; };
+        let end = start + end + "</dataitem>".len();
+        let item = &xml[start..end];
+        let content = extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
+        let nested = extract_xml_tag(item, "recorditem").map(|nested| xml_unescape(&nested));
+        let (children, child_truncated) = nested.map(|nested| parse_forward_nodes(&nested, depth + 1, budget)).unwrap_or_default();
+        let message_type = extract_xml_tag(item, "type").and_then(|value| value.parse::<i32>().ok());
+        let node = ForwardedMessageNode {
+            sender: extract_xml_tag(item, "sourcename").or_else(|| extract_xml_tag(item, "displayname")),
+            sender_id: extract_xml_tag(item, "fromusr"),
+            timestamp: extract_xml_tag(item, "createtime").or_else(|| extract_xml_tag(item, "timestamp")),
+            text: content,
+            message_type,
+            media: extract_xml_tag(item, "cdnthumburl").or_else(|| extract_xml_tag(item, "cdnurl")),
+            children,
+            truncated: child_truncated,
+        };
+        nodes.push(node);
+        *budget -= 1;
+        truncated |= child_truncated;
+        cursor = end;
+    }
+    (nodes, truncated)
+}
+
+fn parse_forwarded_tree(content: &str) -> Option<ForwardedMessageTree> {
+    let appmsg_type = extract_xml_tag(content, "type").and_then(|value| value.parse::<i32>().ok());
+    if appmsg_type != Some(19) { return None; }
+    let record = extract_xml_tag(content, "recorditem")?;
+    if record.len() > FORWARD_MAX_XML_BYTES { return Some(ForwardedMessageTree { schema_version: 1, title: extract_xml_tag(content, "title"), nodes: Vec::new(), truncated: true }); }
+    let mut budget = FORWARD_MAX_NODES;
+    let (nodes, truncated) = parse_forward_nodes(&xml_unescape(&record), 0, &mut budget);
+    Some(ForwardedMessageTree { schema_version: 1, title: extract_xml_tag(content, "title"), nodes, truncated })
+}
+
 fn clean_content(content: &str, local_type: i64) -> String {
     let base = normalize_local_type(local_type).base;
     match base {
@@ -446,7 +503,8 @@ fn list_messages_window(
                 raw_content
             };
 
-            // Extract reply info before cleaning (needs raw XML)
+            // Extract structured forwarded history before cleaning its display summary.
+            let forwarded = parse_forwarded_tree(&body);
             let reply = extract_reply_info(&body, msg_type);
 
             // Clean content for display (replace XML with summaries)
@@ -516,6 +574,7 @@ fn list_messages_window(
                 is_mentioned,
                 is_self,
                 reply,
+                forwarded,
             })
         })
         .collect()
@@ -549,6 +608,28 @@ mod merged_forward_tests {
             Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE")
         );
         assert!(!reply.content.is_empty());
+    }
+
+    #[test]
+    fn structured_forward_preserves_sender_time_and_nested_children() {
+        let xml = r#"<msg><appmsg><title>Thread</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;createtime&gt;1700000000&lt;/createtime&gt;&lt;datatitle&gt;Outer&lt;/datatitle&gt;&lt;recorditem&gt;&amp;lt;recordinfo&amp;gt;&amp;lt;dataitem&amp;gt;&amp;lt;displayname&amp;gt;Bob&amp;lt;/displayname&amp;gt;&amp;lt;datadesc&amp;gt;Inner&amp;lt;/datadesc&amp;gt;&amp;lt;/dataitem&amp;gt;&amp;lt;/recordinfo&amp;gt;</recorditem>&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        let tree = parse_forwarded_tree(xml).expect("tree");
+        assert_eq!(tree.title.as_deref(), Some("Thread"));
+        assert!(!tree.truncated);
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.nodes[0].sender.as_deref(), Some("Alice"));
+        assert_eq!(tree.nodes[0].timestamp.as_deref(), Some("1700000000"));
+        assert_eq!(tree.nodes[0].children[0].sender.as_deref(), Some("Bob"));
+        assert_eq!(tree.nodes[0].children[0].text.as_deref(), Some("Inner"));
+    }
+
+    #[test]
+    fn structured_forward_marks_oversized_input_truncated() {
+        let huge = "x".repeat(FORWARD_MAX_XML_BYTES + 1);
+        let xml = format!("<msg><appmsg><type>19</type><recorditem>{huge}</recorditem></appmsg></msg>");
+        let tree = parse_forwarded_tree(&xml).expect("tree");
+        assert!(tree.truncated);
+        assert!(tree.nodes.is_empty());
     }
 
     #[test]
