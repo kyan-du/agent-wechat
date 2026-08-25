@@ -123,6 +123,64 @@ fn next_xml_tag(xml: &str, mut cursor: usize) -> Result<Option<(usize, usize, Fo
     Ok(None)
 }
 
+fn next_named_tag(xml: &str, mut cursor: usize, wanted: &str) -> Result<Option<(usize, usize, bool, bool)>, ()> {
+    while cursor < xml.len() {
+        let Some(offset) = xml[cursor..].find('<') else { return Ok(None) };
+        let start = cursor + offset;
+        if xml[start..].starts_with("<!--") {
+            let Some(end_offset) = xml[start + 4..].find("-->") else { return Err(()) };
+            cursor = start + 4 + end_offset + 3;
+            continue;
+        }
+        if xml[start..].starts_with("<![CDATA[") {
+            let Some(end_offset) = xml[start + 9..].find("]]>") else { return Err(()) };
+            cursor = start + 9 + end_offset + 3;
+            continue;
+        }
+        let mut quote = None;
+        let mut end = start + 1;
+        while end < xml.len() {
+            let byte = xml.as_bytes()[end];
+            if let Some(active) = quote {
+                if byte == active { quote = None; }
+            } else if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= xml.len() || quote.is_some() { return Err(()) }
+        let raw = &xml[start + 1..end];
+        let closing = raw.starts_with('/');
+        let name = raw.trim_start_matches('/').trim_start();
+        let name_end = name.find(|char: char| char.is_ascii_whitespace() || char == '/').unwrap_or(name.len());
+        let exact = &name[..name_end] == wanted;
+        let boundary = name_end == name.len() || matches!(name.as_bytes().get(name_end), Some(b'/' | b'>' | b' ' | b'\t' | b'\n' | b'\r'));
+        if exact && boundary {
+            return Ok(Some((start, end + 1, closing, !closing && name.trim_end().ends_with('/'))));
+        }
+        cursor = end + 1;
+    }
+    Ok(None)
+}
+
+fn find_named_element_end(xml: &str, start: usize, wanted: &str) -> Option<usize> {
+    let Some((first_start, mut cursor, false, false)) = next_named_tag(xml, start, wanted).ok().flatten() else { return None };
+    if first_start != start { return None; }
+    let mut depth = 1usize;
+    while let Ok(Some((_tag_start, tag_end, closing, self_closing))) = next_named_tag(xml, cursor, wanted) {
+        cursor = tag_end;
+        if !closing && !self_closing {
+            depth += 1;
+        } else if closing && depth > 0 {
+            depth -= 1;
+            if depth == 0 { return Some(tag_end); }
+        }
+    }
+    None
+}
+
 fn find_element_end(xml: &str, start: usize) -> Option<usize> {
     let Some((first_start, mut cursor, ForwardTag::Open { self_closing: false })) = next_xml_tag(xml, start).ok().flatten() else { return None };
     if first_start != start || !is_dataitem_open(xml, start) { return None; }
@@ -172,7 +230,10 @@ fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<Forw
         let Some(end) = find_element_end(xml, start) else { truncated = true; break; };
         let item = &xml[start..end];
         let content = extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
-        let nested = extract_xml_tag(item, "recorditem").map(|nested| xml_unescape(&nested));
+        let nested = item.find("<recorditem").and_then(|nested_start| {
+            let nested_end = find_named_element_end(item, nested_start, "recorditem")?;
+            Some(xml_unescape(&item[nested_start + "<recorditem>".len()..nested_end - "</recorditem>".len()]))
+        });
         let (children, child_truncated) = nested.map(|nested| parse_forward_nodes(&nested, depth + 1, budget)).unwrap_or_default();
         let message_type = extract_xml_tag(item, "type").and_then(|value| value.parse::<i32>().ok());
         let node = ForwardedMessageNode {
@@ -196,7 +257,9 @@ fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<Forw
 fn parse_forwarded_tree(content: &str) -> Option<ForwardedMessageTree> {
     let appmsg_type = extract_xml_tag(content, "type").and_then(|value| value.parse::<i32>().ok());
     if appmsg_type != Some(19) { return None; }
-    let record = extract_xml_tag(content, "recorditem")?;
+    let record_start = content.find("<recorditem")?;
+    let record_end = find_named_element_end(content, record_start, "recorditem")?;
+    let record = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
     if record.len() > FORWARD_MAX_XML_BYTES { return Some(ForwardedMessageTree { schema_version: 1, title: extract_xml_tag(content, "title"), nodes: Vec::new(), truncated: true }); }
     let mut budget = FORWARD_MAX_NODES;
     let (nodes, truncated) = parse_forward_nodes(&xml_unescape(&record), 0, &mut budget);
@@ -239,8 +302,10 @@ fn clean_content(content: &str, local_type: i64) -> String {
                     let mut parts = Vec::new();
                     parts.push(format!("[Chat History] {title}"));
                     // recorditem is XML-escaped inside the appmsg
-                    if let Some(record_raw) = extract_xml_tag(content, "recorditem") {
-                        let record = xml_unescape(&record_raw);
+                    if let Some(record_start) = content.find("<recorditem") {
+                        if let Some(record_end) = find_named_element_end(content, record_start, "recorditem") {
+                            let record_raw = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
+                            let record = xml_unescape(record_raw);
                         // Extract each <dataitem> block
                         let mut search_from = 0usize;
                                             while search_from < record.len() {
@@ -265,6 +330,7 @@ fn clean_content(content: &str, local_type: i64) -> String {
                             } else {
                                 break;
                             }
+                        }
                         }
                     }
                     if parts.len() == 1 {
