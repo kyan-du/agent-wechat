@@ -758,7 +758,7 @@ mod merged_forward_tests {
 
     #[test]
     fn structured_forward_preserves_sender_time_and_nested_children() {
-        let xml = r#"<msg><appmsg><title>Thread</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;createtime&gt;1700000000&lt;/createtime&gt;&lt;datatitle&gt;Outer&lt;/datatitle&gt;&lt;recorditem&gt;&amp;lt;recordinfo&amp;gt;&amp;lt;dataitem&amp;gt;&amp;lt;displayname&amp;gt;Bob&amp;lt;/displayname&amp;gt;&amp;lt;datadesc&amp;gt;Inner&amp;lt;/datadesc&amp;gt;&amp;lt;/dataitem&amp;gt;&amp;lt;/recordinfo&amp;gt;</recorditem>&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        let xml = r#"<msg><appmsg><title>Thread</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;createtime&gt;1700000000&lt;/createtime&gt;&lt;datatitle&gt;Outer&lt;/datatitle&gt;&lt;recorditem&gt;&amp;lt;recordinfo&amp;gt;&amp;lt;dataitem&amp;gt;&amp;lt;displayname&amp;gt;Bob&amp;lt;/displayname&amp;gt;&amp;lt;datadesc&amp;gt;Inner&amp;lt;/datadesc&amp;gt;&amp;lt;/dataitem&amp;gt;&amp;lt;/recordinfo&amp;gt;&lt;/recorditem&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
         let tree = parse_forwarded_tree(xml).expect("tree");
         assert_eq!(tree.title.as_deref(), Some("Thread"));
         assert!(!tree.truncated);
