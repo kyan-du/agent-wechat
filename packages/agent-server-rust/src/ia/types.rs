@@ -480,6 +480,39 @@ pub struct Message {
     pub reply: Option<ReplyInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MediaReference {
+    pub local_id: i64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SyncReadState {
+    pub unread_count: i32,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ChatSyncPage {
+    pub schema_version: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chat: Option<Chat>,
+    pub items: Vec<Message>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_cursor: Option<String>,
+    pub sync_token: String,
+    pub read_state: SyncReadState,
+    pub media: Vec<MediaReference>,
+}
+
 // ============================================
 // Settings types (shared — generates TypeScript)
 // ============================================

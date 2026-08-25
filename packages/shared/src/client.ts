@@ -1,4 +1,4 @@
-import { groupMembersPageSchema, sendParamsSchema, sendResultSchema } from "./schemas/index.js";
+import { chatSyncPageSchema, groupMembersPageSchema, sendParamsSchema, sendResultSchema } from "./schemas/index.js";
 import type {
   Chat,
   Contact,
@@ -6,6 +6,7 @@ import type {
   Message,
   SendResult,
   MediaResult,
+  ChatSyncPage,
   LoginResult,
   LoginSubscriptionEvent,
   OpenChatResult,
@@ -251,6 +252,22 @@ export class WeChatClient {
 
   async listMessages(chatId: string, limit?: number): Promise<Message[]> {
     return (await this.listMessagesPage(chatId, limit)).items;
+  }
+
+  async syncChat(
+    chatId: string,
+    options: { limit?: number; cursor?: string; since?: string; from?: string; to?: string } = {},
+  ): Promise<ChatSyncPage> {
+    const raw = await this.get<unknown>(
+      `/api/sync/${encodeURIComponent(chatId)}${qs({ limit: options.limit, cursor: options.cursor, since: options.since, from: options.from, to: options.to })}`,
+    );
+    if (raw && typeof raw === "object" && typeof (raw as { errorCode?: unknown }).errorCode === "string") {
+      const errorCode = (raw as { errorCode: string }).errorCode;
+      throw new WeChatHttpError(400, "Bad Request", errorCode, errorCode);
+    }
+    const page = chatSyncPageSchema.parse(raw);
+    if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
+    return { ...page, nextCursor: page.nextCursor ?? undefined };
   }
 
   async getMedia(

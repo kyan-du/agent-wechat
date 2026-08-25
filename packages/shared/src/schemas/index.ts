@@ -144,6 +144,27 @@ export const messageSchema = z.object({
   timestamp: z.string(),
 });
 
+export const mediaReferenceSchema = z.object({
+  localId: z.number().int(),
+  url: z.string().min(1),
+});
+
+export const syncReadStateSchema = z.object({
+  unreadCount: z.number().int().nonnegative(),
+  observedAt: z.string().min(1),
+});
+
+export const chatSyncPageSchema = z.object({
+  schemaVersion: z.literal(1),
+  chat: chatSchema.optional(),
+  items: z.array(messageSchema),
+  nextCursor: z.string().optional().nullable(),
+  syncToken: z.string(),
+  readState: syncReadStateSchema,
+  media: z.array(mediaReferenceSchema),
+  errorCode: z.string().optional(),
+});
+
 export const listMessagesParamsSchema = z.object({
   chatId: z.string().min(1),
   limit: z.number().int().positive().max(200).optional().default(50),

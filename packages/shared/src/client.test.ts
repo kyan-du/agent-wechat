@@ -88,6 +88,68 @@ test("sendMessage still throws for unrelated HTTP failures", async () => {
   });
 });
 
+test("syncChat exposes server validation codes before success-schema parsing", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ schemaVersion: 1, errorCode: "INVALID_LIMIT", items: [], nextCursor: null }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    await assert.rejects(
+      () => client.syncChat("chat", { limit: 0 }),
+      (error: unknown) => error instanceof WeChatHttpError && error.errorCode === "INVALID_LIMIT",
+    );
+  });
+});
+
+test("syncChat rejects malformed pages instead of exposing partial sync state", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ schemaVersion: 1, items: [], syncToken: "bad", media: [] }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    await assert.rejects(() => client.syncChat("chat"));
+  });
+});
+
+test("syncChat preserves the returned cursor for a subsequent page", async () => {
+  let seen = "";
+  await withServer((request, response) => {
+    seen = request.url ?? "";
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      schemaVersion: 1,
+      chat: { id: "chat", username: "chat", name: "Chat", unreadCount: 0, isGroup: false },
+      items: [], nextCursor: "page-2", syncToken: "sync-1", media: [],
+      readState: { unreadCount: 0, observedAt: "2026-01-01T00:00:00Z" },
+    }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    const page = await client.syncChat("chat");
+    assert.equal(page.nextCursor, "page-2");
+    await client.syncChat("chat", { cursor: page.nextCursor });
+    assert.equal(seen, "/api/sync/chat?cursor=page-2");
+  });
+});
+
+test("syncChat encodes chat, time range, and opaque token", async () => {
+  await withServer((request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.url, "/api/sync/room%40chatroom?limit=2&since=token%2B1&from=2026-01-01T00%3A00%3A00Z&to=2026-01-02T00%3A00%3A00Z");
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      schemaVersion: 1,
+      chat: { id: "room@chatroom", username: "room@chatroom", name: "Room", unreadCount: 2, isGroup: true },
+      items: [], nextCursor: null, syncToken: "next", media: [],
+      readState: { unreadCount: 2, observedAt: "2026-01-01T00:00:00Z" },
+    }));
+  }, async (baseUrl) => {
+    const client = new WeChatClient({ baseUrl });
+    const page = await client.syncChat("room@chatroom", { limit: 2, since: "token+1", from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z" });
+    assert.equal(page.syncToken, "next");
+    assert.equal(page.readState.unreadCount, 2);
+  });
+});
+
 test("listGroupMembersPage encodes a stable group id and preserves pagination", async () => {
   await withServer((request, response) => {
     assert.equal(request.method, "GET");
