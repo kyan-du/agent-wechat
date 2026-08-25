@@ -1,6 +1,16 @@
 // Export types from types module
 export * from "./types/index.js";
 
+export {
+  MESSAGE_DOMAIN_SCHEMA_VERSION,
+  compareMessageCursor,
+  messageCursor,
+  messageEnvelopes,
+  messageIdentityKey,
+  type MessageCursor,
+  type MessageEnvelope,
+} from "./message-domain.js";
+
 // Export HTTP client
 export {
   WeChatClient,
