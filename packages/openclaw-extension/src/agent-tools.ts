@@ -2,6 +2,7 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import { loginStart, getActiveLoginState } from "./login.js";
 import { buildOpenClawConfirmedSend } from "./confirmed-send.js";
+import { groupMemberErrorCode, hasExplicitGroupMemberConsent } from "./group-members-consent.js";
 
 export function createWeChatConfirmedSendTool(account: ResolvedWeChatAccount) {
   const client = new WeChatClient({
@@ -48,6 +49,53 @@ export function createWeChatConfirmedSendTool(account: ResolvedWeChatAccount) {
         }],
         details: result,
       };
+    },
+  };
+}
+
+export function createWeChatGroupMembersTool(account: ResolvedWeChatAccount) {
+  const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
+  return {
+    label: "WeChat Group Members",
+    name: "wechat_group_members",
+    description: "Read one bounded page of group members by stable group id. This returns personal information; call only when the user explicitly asks for a specific group, and do not echo more fields than needed.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        groupId: { type: "string", description: "Stable group id ending in @chatroom" },
+        limit: { type: "number", minimum: 1, maximum: 50 },
+        cursor: { type: "string" },
+        confirmed: { type: "boolean", description: "Must be true after the user explicitly requests this group's personal member data." },
+      },
+      required: ["groupId", "confirmed"],
+    },
+    execute: async (_toolCallId: string, params: unknown) => {
+      const args = params as Record<string, unknown>;
+      const groupId = String(args.groupId ?? "").trim();
+      if (!hasExplicitGroupMemberConsent(args)) {
+        return {
+          content: [{ type: "text" as const, text: "Explicit user confirmation is required before reading group member personal data." }],
+          details: { success: false, errorCode: "EXPLICIT_CONFIRMATION_REQUIRED" },
+        };
+      }
+      const limit = typeof args.limit === "number" ? Math.trunc(args.limit) : 25;
+      try {
+        const page = await client.listGroupMembersPage(
+          groupId,
+          Math.min(50, Math.max(1, limit)),
+          typeof args.cursor === "string" ? args.cursor : undefined,
+        );
+        return {
+          content: [{ type: "text" as const, text: `Retrieved ${page.items.length} group member(s).` }],
+          details: page,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text" as const, text: "Group member lookup failed." }],
+          details: { error: true, code: groupMemberErrorCode(error) },
+        };
+      }
     },
   };
 }

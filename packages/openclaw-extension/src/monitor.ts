@@ -408,6 +408,8 @@ async function prepareMessage(
   // Attempt media download for supported types
   let mediaPath: string | undefined;
   let mediaMime: string | undefined;
+  let mediaSource: string | undefined;
+  let mediaErrorCode: string | undefined;
   let hasMedia = false;
 
   const baseType = msg.type & 0x7fffffff;
@@ -421,23 +423,27 @@ async function prepareMessage(
       const result = await pollMedia(client, chatId, msg.localId, log);
       if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;
+        mediaSource = result.source;
         log?.info?.(`[wechat:media] inbound media received type=${result.type} format=${result.format}`);
         const saved = await saveValidatedInboundMedia(result, async (buffer, mime, filename) =>
           core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
         );
         if (!saved.ok) {
+          mediaErrorCode = saved.code;
           log?.error?.(`[wechat:media] inbound media rejected code=${saved.code}`);
         } else {
           mediaMime = saved.mime;
           mediaPath = saved.path;
           log?.info?.("[wechat:media] inbound media saved");
         }
-      } else if (MEDIA_TYPES.has(baseType)) {
-        // Image/voice expected media but got nothing
+      } else if (result?.errorCode || result && result.type !== "unsupported" || MEDIA_TYPES.has(baseType)) {
         hasMedia = true;
-        log?.info?.("[wechat:media] inbound media unavailable after retries");
+        mediaErrorCode = result?.errorCode ?? "MEDIA_DOWNLOAD_UNAVAILABLE";
+        log?.info?.(`[wechat:media] inbound media unavailable code=${mediaErrorCode}`);
       }
     } catch (err) {
+      hasMedia = true;
+      mediaErrorCode = "MEDIA_DOWNLOAD_FAILED";
       log?.error?.("[wechat:media] inbound media failed code=MEDIA_DOWNLOAD_FAILED");
     }
   }
@@ -457,6 +463,12 @@ async function prepareMessage(
       // For file attachments, content is the filename — annotate it
       rawBody = `[File: ${rawBody}]`;
     }
+  } else if (mediaErrorCode && baseType === 49) {
+    const text = msg.content || "File attachment";
+    rawBody = `${text}\n[Attachment unavailable: ${mediaErrorCode}]`;
+  }
+  if (mediaSource === "thumbnail") {
+    rawBody = rawBody ? `${rawBody}\n[Image source: thumbnail]` : "[Image source: thumbnail]";
   }
 
   // Append reply context for quote/reply messages
@@ -465,7 +477,10 @@ async function prepareMessage(
     const quotedBody = msg.reply.content.length > 50
       ? msg.reply.content.slice(0, 50) + "..."
       : msg.reply.content;
-    const replyBlock = `[Replying to ${replySender}]\n${quotedBody}\n[/Replying]`;
+    const replyMedia = msg.reply.mediaErrorCode
+      ? `\n[Quoted attachment unavailable: ${msg.reply.mediaErrorCode}]`
+      : "";
+    const replyBlock = `[Replying to ${replySender}]\n${quotedBody}${replyMedia}\n[/Replying]`;
     rawBody = rawBody ? `${rawBody}\n\n${replyBlock}` : replyBlock;
   }
 

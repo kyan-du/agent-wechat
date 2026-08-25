@@ -325,6 +325,10 @@ const chats = program.command("chats").description("List chats without changing 
 }));
 chats.command("show <chat-id>").action((chatId) => action(async () => { const result = await client().getChat(chatId); if (!result) throw new CliError("TARGET_NOT_FOUND", "chat was not found", EXIT.TARGET); output(result, () => console.log(JSON.stringify(result, null, 2))); }));
 chats.command("mark-read <chat-id>").action((chatId) => action(async () => { const result = await client().markChatRead(chatId); if (!result.ok) throw new CliError(result.errorCode || "MARK_READ_FAILED", result.error || "mark-read was not verified", EXIT.SERVICE); output(result, () => console.log(`${chatId}: ${result.beforeUnread} -> ${result.afterUnread}`)); }));
+chats.command("members <group-id>").description("List a bounded page of group members read-only").option("--limit <number>", "page size", "50").option("--cursor <cursor>", "opaque next-page cursor").action((groupId, options) => action(async () => {
+  const page = await client().listGroupMembersPage(groupId, integer(options.limit, "limit", 1, 100), options.cursor);
+  output(page, () => { for (const member of page.items) console.log(`${member.memberId}\t${member.displayName}\t${member.groupAlias ?? ""}`); if (page.nextCursor) console.error(`next cursor: ${page.nextCursor}`); });
+}));
 
 const contacts = program.command("contacts").description("List contacts read-only").option("--limit <number>", "page size", "200").option("--cursor <cursor>", "opaque next-page cursor").action((options) => action(async () => {
   const page = await client().listContactsPage(integer(options.limit, "limit", 1, 200), options.cursor);

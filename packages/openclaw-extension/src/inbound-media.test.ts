@@ -225,6 +225,64 @@ test("rejects image payloads above the bounded validation size", async () => {
   assert.deepEqual(await validateInboundMedia(media("jpeg", hugeJpegLike)), { ok: false, code: "MEDIA_IMAGE_TOO_LARGE" });
 });
 
+test("accepts valid PDF with Chinese filename and preserves the safe basename", async () => {
+  const pdf = Buffer.from("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n");
+  const result = {
+    type: "file" as const,
+    data: pdf.toString("base64"),
+    format: "pdf",
+    filename: "报告 2026.pdf",
+  };
+  const validated = await validateInboundMedia(result);
+  assert.equal(validated.ok && validated.value.mime, "application/pdf");
+  const { saveValidatedInboundMedia } = await import("./inbound-media.ts");
+  let savedName = "";
+  assert.deepEqual(
+    await saveValidatedInboundMedia(result, async (_buffer, _mime, filename) => {
+      savedName = filename;
+      return { path: "/opaque/media" };
+    }),
+    { ok: true, path: "/opaque/media", mime: "application/pdf" },
+  );
+  assert.equal(savedName, "报告 2026.pdf");
+});
+
+test("rejects spoofed, unsupported, oversized, and path-shaped file attachments", async () => {
+  const file = (bytes: Buffer, filename = "report.pdf") => ({
+    type: "file" as const,
+    data: bytes.toString("base64"),
+    format: "pdf",
+    filename,
+  });
+  assert.deepEqual(
+    await validateInboundMedia(file(Buffer.from("not a pdf"))),
+    { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" },
+  );
+  for (const format of ["docx", "zip", "txt", "exe"]) {
+    assert.deepEqual(
+      await validateInboundMedia({
+        type: "file",
+        data: Buffer.from(format === "zip" || format === "docx" ? "PK\u0003\u0004payload" : "arbitrary bytes").toString("base64"),
+        format,
+        filename: `fixture.${format}`,
+      }),
+      { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" },
+      format,
+    );
+  }
+  assert.deepEqual(
+    await validateInboundMedia(file(Buffer.alloc(25 * 1024 * 1024 + 1))),
+    { ok: false, code: "MEDIA_FILE_TOO_LARGE" },
+  );
+  const { saveValidatedInboundMedia } = await import("./inbound-media.ts");
+  let savedName = "";
+  await saveValidatedInboundMedia(file(Buffer.from("%PDF-1.4\n%%EOF"), "../../秘密.pdf"), async (_b, _m, filename) => {
+    savedName = filename;
+    return { path: "/opaque/media" };
+  });
+  assert.equal(savedName, "秘密.pdf");
+});
+
 test("known image failure never exposes original XML", () => {
   const xml = '<msg><img aeskey="secret" cdnmidimgurl="secret"/></msg>';
   assert.equal(safeBodyAfterKnownMediaFailure(3, xml), "[Image unavailable]");

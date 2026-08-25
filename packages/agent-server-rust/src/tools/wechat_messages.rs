@@ -171,6 +171,12 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
         .replace("&amp;", "&")
         .replace("&quot;", "\"");
 
+    let media_error_code = if unescaped.contains("<img") {
+        Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE".to_string())
+    } else {
+        None
+    };
+
     // The referred content may itself be XML — clean it to a short text
     let clean = if unescaped.contains("<msg>") {
         extract_xml_tag(&unescaped, "title").unwrap_or(unescaped)
@@ -180,6 +186,7 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
     Some(ReplyInfo {
         sender,
         content: clean,
+        media_error_code,
     })
 }
 
@@ -476,6 +483,17 @@ mod merged_forward_tests {
     fn merged_forward_without_items_falls_back_to_title() {
         let xml = r#"<msg><appmsg><title>Empty history</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
         assert_eq!(clean_content(xml, 49), "Empty history");
+    }
+
+    #[test]
+    fn quoted_image_reports_stable_resource_limitation() {
+        let xml = r#"<msg><appmsg><refermsg><displayname>Alice</displayname><content>&lt;msg&gt;&lt;img md5=&quot;redacted&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+        let reply = extract_reply_info(xml, 49).expect("reply");
+        assert_eq!(
+            reply.media_error_code.as_deref(),
+            Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE")
+        );
+        assert!(!reply.content.is_empty());
     }
 
     #[test]

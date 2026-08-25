@@ -412,6 +412,26 @@ pub struct Contact {
     pub contact_type: String,
 }
 
+/// Minimal, read-only identity exposed for an explicit group-member query.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct GroupMember {
+    /// Stable WeChat username (wxid/openim id). This is personal information.
+    pub member_id: String,
+    /// Group alias when present, otherwise contact nickname, otherwise member_id.
+    pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub nick_name: Option<String>,
+    #[serde(skip_serializing)]
+    #[ts(skip)]
+    pub sort_id: i64,
+}
+
 // ============================================
 // Message types (shared — generates TypeScript)
 // ============================================
@@ -424,6 +444,9 @@ pub struct ReplyInfo {
     #[ts(optional)]
     pub sender: Option<String>,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub media_error_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -601,6 +624,12 @@ pub struct MediaResult {
     pub url: Option<String>,
     pub format: String,
     pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_code: Option<String>,
 }
 
 // ============================================
