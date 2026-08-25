@@ -173,6 +173,10 @@ pub enum DatabaseCapability {
     Unknown,
 }
 
+fn validate_db_component(value: &str) {
+    assert!(!value.is_empty() && value != "." && value != ".." && !value.contains('/') && !value.contains('\\') && !value.contains('\0'), "invalid WeChat DB path component");
+}
+
 pub fn database_capability(db_name: &str) -> DatabaseCapability {
     match db_name {
         "session.db" => DatabaseCapability::Session,
@@ -185,6 +189,8 @@ pub fn database_capability(db_name: &str) -> DatabaseCapability {
 
 /// Get the full path to a WeChat database file.
 pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
+    validate_db_component(account_dir);
+    validate_db_component(db_name);
     let sub_dir_map: &[(&str, &str)] = &[
         ("contact.db", "contact"),
         ("contact_fts.db", "contact"),
@@ -247,6 +253,13 @@ mod tests {
         assert_eq!(database_capability("message_0.db"), DatabaseCapability::Message);
         assert_eq!(database_capability("media_0.db"), DatabaseCapability::Media);
         assert_eq!(database_capability("other.db"), DatabaseCapability::Unknown);
+    }
+
+    #[test]
+    #[test]
+    fn db_path_rejects_traversal_components() {
+        assert!(std::panic::catch_unwind(|| super::get_db_path("../outside", "session.db")).is_err());
+        assert!(std::panic::catch_unwind(|| super::get_db_path("account", "../outside.db")).is_err());
     }
 
     #[test]
