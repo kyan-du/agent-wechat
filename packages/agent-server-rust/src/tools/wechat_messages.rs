@@ -75,6 +75,31 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+fn find_element_end(xml: &str, start: usize, tag: &str) -> Option<usize> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut depth = 0usize;
+    let mut cursor = start;
+    while cursor < xml.len() {
+        let next_open = xml[cursor..].find(&open).map(|offset| cursor + offset);
+        let next_close = xml[cursor..].find(&close).map(|offset| cursor + offset);
+        match (next_open, next_close) {
+            (Some(open_at), Some(close_at)) if open_at < close_at => {
+                depth += 1;
+                cursor = open_at + open.len();
+            }
+            (_, Some(close_at)) if depth > 0 => {
+                depth -= 1;
+                let end = close_at + close.len();
+                if depth == 0 { return Some(end); }
+                cursor = end;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<ForwardedMessageNode>, bool) {
     if depth > FORWARD_MAX_DEPTH || xml.len() > FORWARD_MAX_XML_BYTES || *budget == 0 {
         return (Vec::new(), true);
@@ -85,8 +110,7 @@ fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<Forw
     while let Some(start) = xml[cursor..].find("<dataitem") {
         if *budget == 0 { truncated = true; break; }
         let start = cursor + start;
-        let Some(end) = xml[start..].find("</dataitem>") else { truncated = true; break; };
-        let end = start + end + "</dataitem>".len();
+        let Some(end) = find_element_end(xml, start, "dataitem") else { truncated = true; break; };
         let item = &xml[start..end];
         let content = extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
         let nested = extract_xml_tag(item, "recorditem").map(|nested| xml_unescape(&nested));
