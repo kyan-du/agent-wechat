@@ -124,9 +124,10 @@ fn next_xml_tag(xml: &str, mut cursor: usize) -> Result<Option<(usize, usize, Fo
 }
 
 fn find_element_end(xml: &str, start: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut cursor = start;
-    while let Ok(Some((tag_start, tag_end, tag))) = next_xml_tag(xml, cursor) {
+    let Some((first_start, mut cursor, ForwardTag::Open { self_closing: false })) = next_xml_tag(xml, start).ok().flatten() else { return None };
+    if first_start != start || !is_dataitem_open(xml, start) { return None; }
+    let mut depth = 1usize;
+    while let Ok(Some((_tag_start, tag_end, tag))) = next_xml_tag(xml, cursor) {
         cursor = tag_end;
         match tag {
             ForwardTag::Open { self_closing: false } => depth += 1,
@@ -239,15 +240,11 @@ fn clean_content(content: &str, local_type: i64) -> String {
                     parts.push(format!("[Chat History] {title}"));
                     // recorditem is XML-escaped inside the appmsg
                     if let Some(record_raw) = extract_xml_tag(content, "recorditem") {
-                        let record = record_raw
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&amp;", "&")
-                            .replace("&quot;", "\"");
+                        let record = xml_unescape(&record_raw);
                         // Extract each <dataitem> block
                         let mut search_from = 0usize;
                                             while search_from < record.len() {
-                            let Some((abs_start, _, ForwardTag::Open { .. })) = next_xml_tag(&record, search_from).ok().flatten() else { break };
+                            let Some((abs_start, _, _)) = next_xml_tag(&record, search_from).ok().flatten() else { break };
                             if !is_dataitem_open(&record, abs_start) { search_from = abs_start + 1; continue; }
                             if let Some(end) = find_element_end(&record, abs_start) {
                                 let item = &record[abs_start..end];
@@ -707,13 +704,12 @@ mod merged_forward_tests {
     }
 
     #[test]
-    #[test]
     fn fake_dataitem_tags_and_cdata_do_not_change_tree_boundaries() {
         let xml = r#"<msg><appmsg><title>Safe</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitemevil&gt;fake&lt;/dataitemevil&gt;&lt;dataitem&gt;&lt;datadesc&gt;&lt;![CDATA[&lt;/dataitem&gt;]]&gt;&lt;/datadesc&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
         let tree = parse_forwarded_tree(xml).expect("tree");
         assert!(!tree.truncated);
         assert_eq!(tree.nodes.len(), 1);
-        assert_eq!(tree.nodes[0].text.as_deref(), Some("<![CDATA[</dataitem>]]>"));
+        assert_eq!(tree.nodes[0].text.as_deref(), Some("</dataitem>"));
     }
 
     #[test]
@@ -731,7 +727,6 @@ mod merged_forward_tests {
         assert!(tree.nodes.is_empty());
     }
 
-    #[test]
     #[test]
     fn node_budget_and_depth_limits_mark_truncation() {
         let repeated = (0..FORWARD_MAX_NODES + 1).map(|_| "<dataitem><datadesc>x</datadesc></dataitem>").collect::<String>();
