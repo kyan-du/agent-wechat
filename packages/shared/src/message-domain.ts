@@ -22,8 +22,14 @@ export function messageCursor(message: Pick<Message, "timestamp" | "localId">): 
   return { timestamp: message.timestamp, localId: message.localId };
 }
 
+function timestampEpochMs(value: string): number {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new Error("INVALID_MESSAGE_TIMESTAMP");
+  return parsed;
+}
+
 export function compareMessageCursor(left: MessageCursor, right: MessageCursor): number {
-  const timestamp = left.timestamp.localeCompare(right.timestamp);
+  const timestamp = timestampEpochMs(left.timestamp) - timestampEpochMs(right.timestamp);
   return timestamp || left.localId - right.localId;
 }
 
