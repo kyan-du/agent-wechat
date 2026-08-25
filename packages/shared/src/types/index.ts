@@ -12,6 +12,9 @@ export type { SendParams } from "./generated/SendParams.js";
 export type { ImageData } from "./generated/ImageData.js";
 export type { FileData } from "./generated/FileData.js";
 export type { OpenChatResult } from "./generated/OpenChatResult.js";
+export type { ChatSyncPage } from "./generated/ChatSyncPage.js";
+export type { MediaReference } from "./generated/MediaReference.js";
+export type { SyncReadState } from "./generated/SyncReadState.js";
 
 // ============================================
 // CONTAINER LIFECYCLE

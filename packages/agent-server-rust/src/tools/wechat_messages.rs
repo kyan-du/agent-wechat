@@ -274,6 +274,46 @@ pub fn list_messages(
     limit: i64,
     cursor: Option<&str>,
 ) -> Vec<Message> {
+    list_messages_in_range(account_dir, keys, chat_id, limit, cursor, None, None)
+}
+
+/// Read a stable message page with optional inclusive RFC3339 time bounds.
+/// Bounds are applied in SQL before the lookahead query so a narrow range cannot
+/// accidentally consume an entire page of out-of-range rows.
+pub fn list_messages_in_range(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    limit: i64,
+    cursor: Option<&str>,
+    from_timestamp: Option<&str>,
+    to_timestamp: Option<&str>,
+) -> Vec<Message> {
+    list_messages_window(account_dir, keys, chat_id, limit, cursor, from_timestamp, to_timestamp, None)
+}
+
+/// Read messages newer than an opaque sync watermark.
+pub fn list_messages_since(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    limit: i64,
+    since_timestamp: i64,
+    since_local_id: i64,
+) -> Vec<Message> {
+    list_messages_window(account_dir, keys, chat_id, limit, None, None, None, Some((since_timestamp, since_local_id)))
+}
+
+fn list_messages_window(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    limit: i64,
+    cursor: Option<&str>,
+    from_timestamp: Option<&str>,
+    to_timestamp: Option<&str>,
+    since: Option<(i64, i64)>,
+) -> Vec<Message> {
     let table_name = get_msg_table_name(chat_id);
     let is_group = chat_id.contains("@chatroom");
 
@@ -283,18 +323,33 @@ pub fn list_messages(
     };
     let db_path = get_db_path(account_dir, &db_name);
 
-    let cursor_clause = match cursor {
-        Some(raw) => {
-            let kind = format!("messages:{chat_id}");
-            let Ok((timestamp, local_id)) = crate::tools::page_cursor::decode::<(String, i64)>(&kind, raw) else {
-                return Vec::new();
-            };
-            let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&timestamp) else {
-                return Vec::new();
-            };
-            format!(" WHERE (m.create_time < {} OR (m.create_time = {} AND m.local_id < {}))", parsed.timestamp(), parsed.timestamp(), local_id)
-        }
-        None => String::new(),
+    let mut predicates = Vec::new();
+    if let Some(raw) = cursor {
+        let kind = format!("messages:{chat_id}");
+        let Ok((timestamp, local_id)) = crate::tools::page_cursor::decode::<(String, i64)>(&kind, raw) else {
+            return Vec::new();
+        };
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&timestamp) else {
+            return Vec::new();
+        };
+        let timestamp = parsed.timestamp();
+        predicates.push(format!("(m.create_time < {timestamp} OR (m.create_time = {timestamp} AND m.local_id < {local_id}))"));
+    }
+    if let Some((timestamp, local_id)) = since {
+        predicates.push(format!("(m.create_time > {timestamp} OR (m.create_time = {timestamp} AND m.local_id > {local_id}))"));
+    }
+    for (column, value, operator) in [
+        ("m.create_time", from_timestamp, ">="),
+        ("m.create_time", to_timestamp, "<="),
+    ] {
+        let Some(value) = value else { continue };
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) else { return Vec::new() };
+        predicates.push(format!("{column} {operator} {}", parsed.timestamp()));
+    }
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
     };
     let safe_limit = crate::tools::page_cursor::lookahead_query_limit(limit, 200);
     // Stable keyset pagination prevents inserts from shifting subsequent pages.
@@ -309,7 +364,7 @@ pub fn list_messages(
                     m.WCDB_CT_source as source_compressed,
                     n.user_name as sender_name
              FROM \"{table_name}\" m
-             LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid{cursor_clause}
+             LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid{where_clause}
              ORDER BY m.create_time DESC, m.local_id DESC
              LIMIT {safe_limit};"
         ),

@@ -5,6 +5,7 @@ mod debug;
 mod events;
 mod group_members;
 mod messages;
+mod sync;
 mod status;
 mod vnc;
 
@@ -62,6 +63,7 @@ pub fn build_router() -> Router {
         .route("/api/contacts/find", get(contacts::find_contacts))
         // Messages
         .route("/api/messages/{chat_id}", get(messages::list_messages))
+        .route("/api/sync/{chat_id}", get(sync::sync_chat))
         .route(
             "/api/messages/{chat_id}/media/{local_id}",
             get(messages::get_media),
@@ -630,6 +632,7 @@ mod tests {
             include_str!("chats.rs"),
             include_str!("contacts.rs"),
             include_str!("messages.rs"),
+            include_str!("sync.rs"),
         ];
         for source in sources {
             assert!(!source.contains("extract_keys_async"));
