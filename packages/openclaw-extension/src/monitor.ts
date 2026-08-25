@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wechat-shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
@@ -42,9 +43,10 @@ import {
   type WeChatPolicyContext,
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
-import { safeBodyAfterKnownMediaFailure, saveValidatedInboundMedia } from "./inbound-media.js";
+import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import { pollMedia } from "./inbound-media-poll.js";
-import { InboundEventLedger, loadInboundEventLedger } from "./monitor-ledger.js";
+import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
+import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -68,6 +70,8 @@ type ProcessedMessage = {
   commandBody: string;
   mediaPath?: string;
   mediaMime?: string;
+  mediaHash?: string;
+  mediaPreviewPath?: string;
   senderName: string;
   senderId: string;
   isGroup: boolean;
@@ -117,6 +121,14 @@ export async function startWeChatMonitor(
   const chatScanState: ChatScanState = { initialScanComplete: false };
   const pendingMessageScans = loadPendingResetRetries(account.accountId);
   const inboundLedger = loadInboundEventLedger(account.accountId);
+  const mediaPipeline = loadMediaPipeline(account.accountId);
+  const cleanupMedia = async () => {
+    await mediaPipeline.cleanup({
+      olderThanMs: MEDIA_RETENTION_MS,
+      remove: async (path) => unlink(path),
+    }).catch((err) => log?.error?.(`[wechat:${account.accountId}] Media cleanup failed: ${err}`));
+  };
+  let lastMediaCleanup = 0;
   for (const [chatId, pending] of pendingMessageScans) {
     const cursor = pending.messages.reduce(
       (max, message) => Math.max(max, message.localId),
@@ -154,6 +166,10 @@ export async function startWeChatMonitor(
 
       // ---- Auth polling (every authPollIntervalMs) ----
       const now = Date.now();
+      if (now - lastMediaCleanup >= MEDIA_RETENTION_MS / 4) {
+        lastMediaCleanup = now;
+        await cleanupMedia();
+      }
       if (now - lastAuthCheck >= account.authPollIntervalMs) {
         lastAuthCheck = now;
         try {
@@ -281,6 +297,7 @@ export async function startWeChatMonitor(
             pendingMessageScans,
             retryState.persist,
             inboundLedger,
+            mediaPipeline,
             account,
             cfg,
             log,
@@ -325,6 +342,7 @@ export async function startWeChatMonitor(
           pendingMessageScans,
           retryState.persist,
           inboundLedger,
+          mediaPipeline,
           account,
           cfg,
           log,
@@ -365,6 +383,7 @@ export async function startWeChatMonitor(
     await sleep(account.pollIntervalMs, abortSignal);
   }
 
+  await cleanupMedia();
   setStatus({
     accountId: account.accountId,
     running: false,
@@ -377,6 +396,7 @@ export async function startWeChatMonitor(
  */
 async function prepareMessage(
   client: WeChatClient,
+  mediaPipeline: MediaPipeline,
   msg: Message,
   chatId: string,
   chat: Chat,
@@ -412,6 +432,8 @@ async function prepareMessage(
   // Attempt media download for supported types
   let mediaPath: string | undefined;
   let mediaMime: string | undefined;
+  let mediaHash: string | undefined;
+  let mediaPreviewPath: string | undefined;
   let mediaSource: string | undefined;
   let mediaErrorCode: string | undefined;
   let hasMedia = false;
@@ -429,16 +451,22 @@ async function prepareMessage(
         hasMedia = true;
         mediaSource = result.source;
         log?.info?.(`[wechat:media] inbound media received type=${result.type} format=${result.format}`);
-        const saved = await saveValidatedInboundMedia(result, async (buffer, mime, filename) =>
-          core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+        const saved = await mediaPipeline.process(
+          result,
+          { eventId: inboundEventIdForMedia(liveAccount.accountId, chatId, msg), chatId, localId: msg.localId },
+          async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+          async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+          async (path) => unlink(path),
         );
         if (!saved.ok) {
           mediaErrorCode = saved.code;
           log?.error?.(`[wechat:media] inbound media rejected code=${saved.code}`);
         } else {
           mediaMime = saved.mime;
-          mediaPath = saved.path;
-          log?.info?.("[wechat:media] inbound media saved");
+          mediaPath = saved.originalPath;
+          mediaHash = saved.hash;
+          mediaPreviewPath = saved.previewPath;
+          log?.info?.(`[wechat:media] inbound media saved hash=${saved.hash}${saved.previewPath ? " preview=present" : ""}`);
         }
       } else if (result?.errorCode || result && result.type !== "unsupported" || MEDIA_TYPES.has(baseType)) {
         hasMedia = true;
@@ -497,6 +525,8 @@ async function prepareMessage(
     }),
     mediaPath,
     mediaMime,
+    mediaHash,
+    mediaPreviewPath,
     senderName,
     senderId,
     isGroup,
@@ -716,7 +746,13 @@ async function dispatchSegment(
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: OPENCLAW_CHANNEL_ID,
       OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
-      ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
+      ...(mediaPath ? {
+        MediaPath: mediaPath,
+        MediaUrl: mediaPath,
+        MediaType: mediaMime,
+        ...(mediaMsg?.mediaHash ? { MediaHash: mediaMsg.mediaHash } : {}),
+        ...(mediaMsg?.mediaPreviewPath ? { MediaPreviewPath: mediaMsg.mediaPreviewPath } : {}),
+      } : {}),
       ...(msg.reply ? {
         ReplyToBody: msg.reply.content.length > 50 ? msg.reply.content.slice(0, 50) + "..." : msg.reply.content,
         ReplyToSender: msg.reply.sender,
@@ -881,6 +917,7 @@ async function processUnreadChat(
   pendingMessageScans: Map<string, MessageScanContinuation>,
   persistRetryState: () => void,
   inboundLedger: InboundEventLedger,
+  mediaPipeline: MediaPipeline,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -1114,7 +1151,7 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
     );
-    const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
+    const pm = await prepareMessage(client, mediaPipeline, msg, chatId, chat, liveAccount, policy, log);
     if (pm) {
       processed.push(pm);
     } else {
