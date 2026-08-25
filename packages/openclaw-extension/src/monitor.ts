@@ -1229,6 +1229,13 @@ async function processUnreadChat(
     );
     let allDispatched = true;
     const successfulSegmentLastLocalIds: number[] = [];
+    const segmentEventIds = (segment: ProcessedMessage[]): string[] => {
+      const keys = new Set(segment.map((pm) => pm.msg.localId));
+      return eventIds.filter((eventId) => {
+        const record = inboundLedger.get(eventId);
+        return record !== undefined && keys.has(record.localId);
+      });
+    };
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
       const dispatched = await dispatchSegment(
@@ -1246,17 +1253,18 @@ async function processUnreadChat(
       );
       if (!dispatched) {
         allDispatched = false;
+        inboundLedger.markFailedBatch(segmentEventIds(segments[i]), "DISPATCH_FAILED");
+        const remainingIds = segments.slice(i + 1).flatMap(segmentEventIds);
+        inboundLedger.markFailedBatch(remainingIds, "DISPATCH_NOT_ATTEMPTED");
         break;
       }
+      inboundLedger.markProcessedBatch(segmentEventIds(segments[i]), "dispatched");
       successfulSegmentLastLocalIds.push(
         Math.max(...segments[i].map((pm) => pm.msg.localId)),
       );
     }
     if (allDispatched) {
-      const outcome = isRecovery ? "dispatched" : "dispatched";
-      for (const eventId of eventIds) inboundLedger.markProcessed(eventId, outcome);
-    } else {
-      for (const eventId of eventIds) inboundLedger.markFailed(eventId, "DISPATCH_FAILED");
+      for (const eventId of eventIds) inboundLedger.markProcessed(eventId, "dispatched");
     }
     if (clearBufferedHistory && allDispatched && groupHistory) {
       groupHistory.set(chatId, []);

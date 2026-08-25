@@ -57,6 +57,19 @@ test("failed events back off and dead-letter after bounded attempts", () => {
   assert.equal(ledger.shouldProcess(id, Number.MAX_SAFE_INTEGER), true);
 });
 
+test("successful prefix stays processed when later batch segment fails", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-ledger-"));
+  const ledger = new InboundEventLedger("default", dir);
+  const first = ledger.ensure("default", "wxid_chat", message(1), 0);
+  const second = ledger.ensure("default", "wxid_chat", message(2), 0);
+  ledger.markProcessing(first, 0);
+  ledger.markProcessing(second, 0);
+  ledger.markProcessedBatch([first], "dispatched", 1);
+  ledger.markFailedBatch([second], "DISPATCH_FAILED", 1);
+  assert.equal(ledger.shouldProcess(first, Number.MAX_SAFE_INTEGER), false);
+  assert.equal(ledger.shouldProcess(second, Number.MAX_SAFE_INTEGER), true);
+});
+
 test("corrupt ledger is quarantined and blocks startup", () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-ledger-"));
   mkdirSync(join(dir, "wechat"), { recursive: true });

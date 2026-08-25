@@ -218,6 +218,14 @@ export class InboundEventLedger {
       .map((entry) => ({ ...entry }));
   }
 
+  markProcessedBatch(eventIds: string[], outcome: InboundEventOutcome, now = Date.now()): void {
+    for (const eventId of eventIds) this.markProcessed(eventId, outcome, now);
+  }
+
+  markFailedBatch(eventIds: string[], errorCode: string, now = Date.now()): void {
+    for (const eventId of eventIds) this.markFailed(eventId, errorCode, now);
+  }
+
   replay(eventId: string, now = Date.now()): boolean {
     const entry = this.entries.get(eventId);
     if (!entry || entry.status === "processed") return false;
