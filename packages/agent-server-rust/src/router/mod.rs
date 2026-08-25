@@ -316,6 +316,11 @@ mod tests {
             .unwrap();
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
+        for uri in ["/api/events", "/api/ws/events"] {
+            let response = build_router().oneshot(Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        }
+
         let authed_response = app
             .oneshot(authed(
                 "GET",
