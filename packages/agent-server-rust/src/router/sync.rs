@@ -47,7 +47,7 @@ fn empty_page(code: &str) -> Response {
     })).into_response()
 }
 
-type SyncCursor = (String, i64, Option<(i64, i64)>);
+type SyncCursor = (String, i64);
 
 fn sync_token(chat_id: &str, chat: &crate::ia::types::Chat, newest: Option<&crate::ia::types::Message>) -> String {
     let watermark = newest.map(|message| {
@@ -86,9 +86,7 @@ pub async fn sync_chat(Path(chat_id): Path<String>, Query(params): Query<SyncPar
             Ok(value) => Some(value),
             Err(_) => return error_page("INVALID_SYNC_TOKEN"),
         }
-    } else {
-        decoded_cursor.as_ref().and_then(|cursor| cursor.2)
-    };
+    } else { None };
     for value in [params.from_timestamp.as_deref(), params.to_timestamp.as_deref()].into_iter().flatten() {
         if chrono::DateTime::parse_from_rfc3339(value).is_err() {
             return error_page("INVALID_TIMESTAMP");
@@ -113,8 +111,8 @@ pub async fn sync_chat(Path(chat_id): Path<String>, Query(params): Query<SyncPar
 
     // The existing message reader owns SQLCipher access and stable keyset pagination.
     // Sync keeps that ordering and applies the optional time window after decoding.
-    let message_cursor = decoded_cursor.as_ref().map(|cursor| (cursor.0.clone(), cursor.1)).and_then(|value| {
-        crate::tools::page_cursor::encode(&format!("messages:{chat_id}"), value).ok()
+    let message_cursor = decoded_cursor.as_ref().and_then(|value| {
+        crate::tools::page_cursor::encode(&format!("messages:{chat_id}"), value.clone()).ok()
     });
     let mut items = if let Some((since_timestamp, since_local_id)) = since {
         wechat_messages::list_messages_since(&logged_in_user, &keys, &chat_id, params.limit + 1, since_timestamp, since_local_id)
@@ -132,10 +130,7 @@ pub async fn sync_chat(Path(chat_id): Path<String>, Query(params): Query<SyncPar
     let has_more = crate::tools::page_cursor::truncate_lookahead(&mut items, params.limit);
     let last = items.last();
     let next_cursor = has_more.then(|| last).flatten().and_then(|message| {
-        let watermark = chrono::DateTime::parse_from_rfc3339(&message.timestamp)
-            .ok()
-            .map(|parsed| (parsed.timestamp(), message.local_id));
-        crate::tools::page_cursor::encode(&kind, (message.timestamp.clone(), message.local_id, watermark)).ok()
+        crate::tools::page_cursor::encode(&kind, (message.timestamp.clone(), message.local_id)).ok()
     });
     let media = items.iter().filter(|message| matches!(message.msg_type, 3 | 34 | 43 | 49)).map(|message| MediaReference {
         local_id: message.local_id,
@@ -160,7 +155,7 @@ mod tests {
 
     #[test]
     fn sync_token_is_bound_to_chat_and_cursor_kind() {
-        let cursor = crate::tools::page_cursor::encode("sync:one", ("2026-01-01T00:00:00Z".to_string(), 4_i64, Some((1_i64, 4_i64)))).unwrap();
+        let cursor = crate::tools::page_cursor::encode("sync:one", ("2026-01-01T00:00:00Z".to_string(), 4_i64)).unwrap();
         assert!(crate::tools::page_cursor::decode::<SyncCursor>("sync:two", &cursor).is_err());
     }
 

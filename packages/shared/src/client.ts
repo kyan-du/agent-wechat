@@ -258,9 +258,14 @@ export class WeChatClient {
     chatId: string,
     options: { limit?: number; cursor?: string; since?: string; from?: string; to?: string } = {},
   ): Promise<ChatSyncPage> {
-    const page = chatSyncPageSchema.parse(await this.get<unknown>(
+    const raw = await this.get<unknown>(
       `/api/sync/${encodeURIComponent(chatId)}${qs({ limit: options.limit, cursor: options.cursor, since: options.since, from: options.from, to: options.to })}`,
-    ));
+    );
+    if (raw && typeof raw === "object" && typeof (raw as { errorCode?: unknown }).errorCode === "string") {
+      const errorCode = (raw as { errorCode: string }).errorCode;
+      throw new WeChatHttpError(400, "Bad Request", errorCode, errorCode);
+    }
+    const page = chatSyncPageSchema.parse(raw);
     if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
     return { ...page, nextCursor: page.nextCursor ?? undefined };
   }
