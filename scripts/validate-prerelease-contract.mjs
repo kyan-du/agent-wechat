@@ -119,6 +119,7 @@ if (forbidden.length) fail(`workflow publication capability detected:\n${forbidd
 const agentReleaseContract = readJson("release/agent-release-contract.json");
 if (agentReleaseContract.deploymentEnabled !== true) fail("Agent-operated release must remain active");
 const npmText = readFileSync(join(workflowDir, "npm-release.yml"), "utf8");
+const npmReleaseUtilsText = readFileSync(join(root, "scripts", "npm-release-utils.mjs"), "utf8");
 const npmWorkflow = parseYaml(npmText);
 const npmTriggers = npmWorkflow.on ?? npmWorkflow.true ?? {};
 if (JSON.stringify(Object.keys(npmTriggers)) !== JSON.stringify(["workflow_dispatch"])) fail("npm-release.yml: only explicit dispatch is allowed");
@@ -143,14 +144,17 @@ for (const required of [
   "upload-artifact@",
   "include-hidden-files: true",
   "environment: npm-production",
-  "npm publish \".release-pack/kyan-du-agent-wechat-cli-",
-  "npm publish \".release-pack/kyan-du-agent-wechat-openclaw-",
-  "npm publish \".release-pack/kyan-du-agent-wechat-wechaty-puppet-",
-  "--provenance",
+  "npm-release-utils.mjs publish-existing-safe",
   "verify-published-npm-release.mjs",
   "refs/tags/$tag",
   "gh release create",
 ]) if (!npmText.includes(required)) fail(`npm-release.yml: missing ${required}`);
+for (const required of [
+  "npm publish",
+  "--provenance",
+  "verifyTarballIntegrity",
+  "already exists on npm with different content",
+]) if (!npmReleaseUtilsText.includes(required)) fail(`npm-release-utils.mjs: missing ${required}`);
 const rootManifest = readJson("package.json");
 if (rootManifest.scripts?.release) fail("validation-only repository must not expose a release/publish script");
 if (!existsSync(join(root, "docs", "release", "P1-B1-RUNBOOK.md")) || !existsSync(join(root, "docs", "release", "AGENT-OPERATED-RELEASE.md"))) fail("release runbook is missing");

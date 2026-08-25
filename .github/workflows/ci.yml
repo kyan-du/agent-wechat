@@ -56,6 +56,8 @@ jobs:
               - 'scripts/test-prerelease-contract.sh'
               - 'scripts/test-prerelease-manifest.sh'
               - 'scripts/check-npm-production-release.mjs'
+              - 'scripts/npm-release-utils.mjs'
+              - 'scripts/npm-release-utils.test.mjs'
               - 'scripts/verify-published-npm-release.mjs'
               - 'scripts/smoke-npm-packages.mjs'
               - 'scripts/test-packed-cli.sh'
