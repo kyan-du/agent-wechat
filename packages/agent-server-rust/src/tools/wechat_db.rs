@@ -164,6 +164,25 @@ pub fn list_account_dbs(account_dir: &str) -> Vec<String> {
     Vec::new()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseCapability {
+    Session,
+    Contact,
+    Message,
+    Media,
+    Unknown,
+}
+
+pub fn database_capability(db_name: &str) -> DatabaseCapability {
+    match db_name {
+        "session.db" => DatabaseCapability::Session,
+        "contact.db" | "contact_fts.db" => DatabaseCapability::Contact,
+        name if name.starts_with("message_") || name == "message_resource.db" => DatabaseCapability::Message,
+        name if name.starts_with("media_") || name == "hardlink.db" => DatabaseCapability::Media,
+        _ => DatabaseCapability::Unknown,
+    }
+}
+
 /// Get the full path to a WeChat database file.
 pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
     let sub_dir_map: &[(&str, &str)] = &[
@@ -206,7 +225,7 @@ pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
         }
     }
 
-    // Default to first path
+    // Default to first path; callers must use query_checked to distinguish absent DBs.
     Path::new(&base_paths[0])
         .join("db_storage")
         .join(sub_dir)
@@ -217,10 +236,18 @@ pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::query_wechat_db_checked;
+    use super::{database_capability, query_wechat_db_checked, DatabaseCapability};
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn database_capability_classifies_known_storage_roles() {
+        assert_eq!(database_capability("session.db"), DatabaseCapability::Session);
+        assert_eq!(database_capability("message_0.db"), DatabaseCapability::Message);
+        assert_eq!(database_capability("media_0.db"), DatabaseCapability::Media);
+        assert_eq!(database_capability("other.db"), DatabaseCapability::Unknown);
+    }
 
     #[test]
     fn checked_queries_distinguish_unavailable_databases_from_empty_results() {
