@@ -44,6 +44,7 @@ import {
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 import { safeBodyAfterKnownMediaFailure, saveValidatedInboundMedia } from "./inbound-media.js";
 import { pollMedia } from "./inbound-media-poll.js";
+import { InboundEventLedger, loadInboundEventLedger } from "./monitor-ledger.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -115,6 +116,7 @@ export async function startWeChatMonitor(
   const startupBaselines = new Map<string, StartupBaseline>();
   const chatScanState: ChatScanState = { initialScanComplete: false };
   const pendingMessageScans = loadPendingResetRetries(account.accountId);
+  const inboundLedger = loadInboundEventLedger(account.accountId);
   for (const [chatId, pending] of pendingMessageScans) {
     const cursor = pending.messages.reduce(
       (max, message) => Math.max(max, message.localId),
@@ -278,6 +280,7 @@ export async function startWeChatMonitor(
             startupBaselines,
             pendingMessageScans,
             retryState.persist,
+            inboundLedger,
             account,
             cfg,
             log,
@@ -321,6 +324,7 @@ export async function startWeChatMonitor(
           startupBaselines,
           pendingMessageScans,
           retryState.persist,
+          inboundLedger,
           account,
           cfg,
           log,
@@ -876,6 +880,7 @@ async function processUnreadChat(
   startupBaselines: Map<string, StartupBaseline>,
   pendingMessageScans: Map<string, MessageScanContinuation>,
   persistRetryState: () => void,
+  inboundLedger: InboundEventLedger,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -1100,13 +1105,20 @@ async function processUnreadChat(
 
   // Pre-process all messages (filter, download media, build rawBody)
   const processed: ProcessedMessage[] = [];
+  const eventIds: string[] = [];
   for (const msg of newMessages) {
+    const eventId = inboundLedger.ensure(account.accountId, chatId, msg);
+    if (!inboundLedger.shouldProcess(eventId)) continue;
+    inboundLedger.markProcessing(eventId);
+    eventIds.push(eventId);
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
     );
     const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
     if (pm) {
       processed.push(pm);
+    } else {
+      inboundLedger.markProcessed(eventId, "filtered");
     }
   }
 
@@ -1128,6 +1140,7 @@ async function processUnreadChat(
         log?.info?.(`[wechat:${liveAccount.accountId}] Buffered ${processed.length} msg(s) for group history in ${chatId}`);
         const maxId = Math.max(...newMessages.map((m) => m.localId));
         advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
+        for (const eventId of eventIds) inboundLedger.markProcessed(eventId, "buffered");
         return "skipped";
       }
 
@@ -1201,6 +1214,7 @@ async function processUnreadChat(
       );
       const maxId = Math.max(...newMessages.map((m) => m.localId));
       advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
+      for (const eventId of eventIds) inboundLedger.markProcessed(eventId, "stale");
       return "skipped";
     }
 
@@ -1215,6 +1229,13 @@ async function processUnreadChat(
     );
     let allDispatched = true;
     const successfulSegmentLastLocalIds: number[] = [];
+    const segmentEventIds = (segment: ProcessedMessage[]): string[] => {
+      const keys = new Set(segment.map((pm) => pm.msg.localId));
+      return eventIds.filter((eventId) => {
+        const record = inboundLedger.get(eventId);
+        return record !== undefined && keys.has(record.localId);
+      });
+    };
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
       const dispatched = await dispatchSegment(
@@ -1232,11 +1253,18 @@ async function processUnreadChat(
       );
       if (!dispatched) {
         allDispatched = false;
+        inboundLedger.markFailedBatch(segmentEventIds(segments[i]), "DISPATCH_FAILED");
+        const remainingIds = segments.slice(i + 1).flatMap(segmentEventIds);
+        inboundLedger.markFailedBatch(remainingIds, "DISPATCH_NOT_ATTEMPTED");
         break;
       }
+      inboundLedger.markProcessedBatch(segmentEventIds(segments[i]), "dispatched");
       successfulSegmentLastLocalIds.push(
         Math.max(...segments[i].map((pm) => pm.msg.localId)),
       );
+    }
+    if (allDispatched) {
+      for (const eventId of eventIds) inboundLedger.markProcessed(eventId, "dispatched");
     }
     if (clearBufferedHistory && allDispatched && groupHistory) {
       groupHistory.set(chatId, []);
