@@ -164,8 +164,40 @@ pub fn list_account_dbs(account_dir: &str) -> Vec<String> {
     Vec::new()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseCapability {
+    Session,
+    Contact,
+    Message,
+    Media,
+    Unknown,
+}
+
+fn validate_db_component(value: &str) -> Result<(), String> {
+    if value.is_empty() || value == "." || value == ".." || value.contains('/') || value.contains('\\') || value.contains('\0') {
+        return Err("invalid WeChat DB path component".to_string());
+    }
+    Ok(())
+}
+
+pub fn database_capability(db_name: &str) -> DatabaseCapability {
+    match db_name {
+        "session.db" => DatabaseCapability::Session,
+        "contact.db" | "contact_fts.db" => DatabaseCapability::Contact,
+        name if name.starts_with("message_") || name == "message_resource.db" => DatabaseCapability::Message,
+        name if name.starts_with("media_") || name == "hardlink.db" => DatabaseCapability::Media,
+        _ => DatabaseCapability::Unknown,
+    }
+}
+
 /// Get the full path to a WeChat database file.
 pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
+    get_db_path_checked(account_dir, db_name).unwrap_or_else(|_| String::new())
+}
+
+pub fn get_db_path_checked(account_dir: &str, db_name: &str) -> Result<String, String> {
+    validate_db_component(account_dir)?;
+    validate_db_component(db_name)?;
     let sub_dir_map: &[(&str, &str)] = &[
         ("contact.db", "contact"),
         ("contact_fts.db", "contact"),
@@ -202,25 +234,40 @@ pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
             .join(sub_dir)
             .join(db_name);
         if full_path.exists() {
-            return full_path.to_string_lossy().to_string();
+            return Ok(full_path.to_string_lossy().to_string());
         }
     }
 
-    // Default to first path
-    Path::new(&base_paths[0])
+    // Default to first path; callers must use query_checked to distinguish absent DBs.
+    Ok(Path::new(&base_paths[0])
         .join("db_storage")
         .join(sub_dir)
         .join(db_name)
         .to_string_lossy()
-        .to_string()
+        .to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::query_wechat_db_checked;
+    use super::{database_capability, query_wechat_db_checked, DatabaseCapability};
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn database_capability_classifies_known_storage_roles() {
+        assert_eq!(database_capability("session.db"), DatabaseCapability::Session);
+        assert_eq!(database_capability("message_0.db"), DatabaseCapability::Message);
+        assert_eq!(database_capability("media_0.db"), DatabaseCapability::Media);
+        assert_eq!(database_capability("other.db"), DatabaseCapability::Unknown);
+    }
+
+    #[test]
+    fn db_path_rejects_traversal_components_without_panicking() {
+        assert!(super::get_db_path_checked("../outside", "session.db").is_err());
+        assert!(super::get_db_path_checked("account", "../outside.db").is_err());
+        assert_eq!(super::get_db_path("../outside", "session.db"), "");
+    }
 
     #[test]
     fn checked_queries_distinguish_unavailable_databases_from_empty_results() {

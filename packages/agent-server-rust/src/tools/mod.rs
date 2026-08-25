@@ -4,6 +4,7 @@ pub mod exec;
 pub mod page_cursor;
 pub mod qr;
 pub mod screenshot;
+pub mod temp_file;
 pub mod wechat_chats;
 pub mod wechat_contacts;
 pub mod wechat_db;
