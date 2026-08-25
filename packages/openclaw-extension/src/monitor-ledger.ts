@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { cursorMessageKey } from "./monitor-cursor.ts";
+import { quarantineDurableJson, readDurableJson, removeDurableJson, writeDurableJson } from "./durable-store.ts";
 
 export type InboundEventStatus = "pending" | "processing" | "processed" | "failed" | "dead_letter";
 export type InboundEventOutcome = "dispatched" | "filtered" | "buffered" | "read_only" | "stale";
@@ -94,15 +95,13 @@ function loadFile(path: string): LedgerFile {
   }
   if (!existsSync(path)) return { version: 1, entries: [] };
   try {
-    return validateFile(JSON.parse(readFileSync(path, "utf8")));
+    const parsed = readDurableJson<unknown>(path);
+    if (parsed === undefined) return { version: 1, entries: [] };
+    return validateFile(parsed);
   } catch (error) {
     const quarantine = quarantinePath(path);
     try {
-      rmSync(quarantine, { force: true });
-      renameSync(path, quarantine);
-      writeFileSync(blockerPath(path), JSON.stringify({ version: 1, quarantine }), { mode: 0o600 });
-      syncFile(blockerPath(path));
-      syncParent(path);
+      quarantineDurableJson(path, blockerPath(path));
     } catch (quarantineError) {
       throw new InboundLedgerStateError(`inbound ledger quarantine failed: ${String(quarantineError)}`);
     }
@@ -111,12 +110,7 @@ function loadFile(path: string): LedgerFile {
 }
 
 function writeFile(path: string, file: LedgerFile): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temp = `${path}.tmp-${process.pid}`;
-  writeFileSync(temp, JSON.stringify(file), { mode: 0o600 });
-  syncFile(temp);
-  renameSync(temp, path);
-  syncParent(path);
+  writeDurableJson(path, file);
 }
 
 export function inboundEventId(accountId: string, chatId: string, message: Message): string {
@@ -144,7 +138,7 @@ export class InboundEventLedger {
       for (const entry of retained) this.entries.set(entry.eventId, entry);
     }
     if (this.entries.size === 0) {
-      if (existsSync(this.path)) { rmSync(this.path, { force: true }); syncParent(this.path); }
+      removeDurableJson(this.path);
       return;
     }
     writeFile(this.path, { version: 1, entries: [...this.entries.values()] });
