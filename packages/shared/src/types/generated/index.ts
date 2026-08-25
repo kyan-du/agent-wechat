@@ -10,6 +10,8 @@ export type { ImageData } from "./ImageData.js";
 export type { LoginSubscriptionEvent } from "./LoginSubscriptionEvent.js";
 export type { MediaResult } from "./MediaResult.js";
 export type { Message } from "./Message.js";
+export type { ForwardedMessageNode } from "./ForwardedMessageNode.js";
+export type { ForwardedMessageTree } from "./ForwardedMessageTree.js";
 export type { ChatSyncPage } from "./ChatSyncPage.js";
 export type { MediaReference } from "./MediaReference.js";
 export type { SyncReadState } from "./SyncReadState.js";

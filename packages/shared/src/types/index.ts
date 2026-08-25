@@ -7,6 +7,8 @@ export type { Chat } from "./generated/Chat.js";
 export type { Contact } from "./generated/Contact.js";
 export type { GroupMember } from "./generated/GroupMember.js";
 export type { Message } from "./generated/Message.js";
+export type { ForwardedMessageNode } from "./generated/ForwardedMessageNode.js";
+export type { ForwardedMessageTree } from "./generated/ForwardedMessageTree.js";
 export type { LoginSubscriptionEvent } from "./generated/LoginSubscriptionEvent.js";
 export type { SendParams } from "./generated/SendParams.js";
 export type { ImageData } from "./generated/ImageData.js";

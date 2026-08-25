@@ -1,5 +1,5 @@
 use super::wechat_db::{get_db_path, query_wechat_db};
-use crate::ia::types::{Message, ReplyInfo};
+use crate::ia::types::{ForwardedMessageNode, ForwardedMessageTree, Message, ReplyInfo};
 use crate::tools::wechat_message_type::normalize_local_type;
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -63,6 +63,209 @@ fn extract_group_sender(content: &str) -> (Option<String>, String) {
 
 /// Clean message content for display based on message type.
 /// Replaces verbose XML with concise summaries.
+const FORWARD_MAX_DEPTH: usize = 8;
+const FORWARD_MAX_NODES: usize = 500;
+const FORWARD_MAX_XML_BYTES: usize = 512 * 1024;
+
+fn xml_unescape(value: &str) -> String {
+    value.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+}
+
+#[derive(Clone, Copy)]
+enum ForwardTag {
+    Open { self_closing: bool },
+    Close,
+    Other,
+}
+
+fn next_xml_tag(xml: &str, mut cursor: usize) -> Result<Option<(usize, usize, ForwardTag)>, ()> {
+    while cursor < xml.len() {
+        let Some(offset) = xml[cursor..].find('<') else { return Ok(None) };
+        let start = cursor + offset;
+        if xml[start..].starts_with("<!--") {
+            let Some(end_offset) = xml[start + 4..].find("-->") else { return Err(()) };
+            cursor = start + 4 + end_offset + 3;
+            continue;
+        }
+        if xml[start..].starts_with("<![CDATA[") {
+            let Some(end_offset) = xml[start + 9..].find("]]>") else { return Err(()) };
+            cursor = start + 9 + end_offset + 3;
+            continue;
+        }
+        let mut quote = None;
+        let mut end = start + 1;
+        while end < xml.len() {
+            let byte = xml.as_bytes()[end];
+            if let Some(active) = quote {
+                if byte == active { quote = None; }
+            } else if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= xml.len() || quote.is_some() { return Err(()) }
+        let raw = &xml[start + 1..end];
+        let closing = raw.starts_with('/');
+        let name = raw.trim_start_matches('/').trim_start();
+        let name_end = name.find(|char: char| char.is_ascii_whitespace() || char == '/' ).unwrap_or(name.len());
+        let tag_name = &name[..name_end];
+        let tag = if tag_name == "dataitem" {
+            if closing { ForwardTag::Close } else { ForwardTag::Open { self_closing: name.trim_end().ends_with('/') } }
+        } else { ForwardTag::Other };
+        return Ok(Some((start, end + 1, tag)));
+    }
+    Ok(None)
+}
+
+fn next_named_tag(xml: &str, mut cursor: usize, wanted: &str) -> Result<Option<(usize, usize, bool, bool)>, ()> {
+    while cursor < xml.len() {
+        let Some(offset) = xml[cursor..].find('<') else { return Ok(None) };
+        let start = cursor + offset;
+        if xml[start..].starts_with("<!--") {
+            let Some(end_offset) = xml[start + 4..].find("-->") else { return Err(()) };
+            cursor = start + 4 + end_offset + 3;
+            continue;
+        }
+        if xml[start..].starts_with("<![CDATA[") {
+            let Some(end_offset) = xml[start + 9..].find("]]>") else { return Err(()) };
+            cursor = start + 9 + end_offset + 3;
+            continue;
+        }
+        let mut quote = None;
+        let mut end = start + 1;
+        while end < xml.len() {
+            let byte = xml.as_bytes()[end];
+            if let Some(active) = quote {
+                if byte == active { quote = None; }
+            } else if byte == b'\'' || byte == b'"' {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= xml.len() || quote.is_some() { return Err(()) }
+        let raw = &xml[start + 1..end];
+        let closing = raw.starts_with('/');
+        let name = raw.trim_start_matches('/').trim_start();
+        let name_end = name.find(|char: char| char.is_ascii_whitespace() || char == '/').unwrap_or(name.len());
+        let exact = &name[..name_end] == wanted;
+        let boundary = name_end == name.len() || matches!(name.as_bytes().get(name_end), Some(b'/' | b'>' | b' ' | b'\t' | b'\n' | b'\r'));
+        if exact && boundary {
+            return Ok(Some((start, end + 1, closing, !closing && name.trim_end().ends_with('/'))));
+        }
+        cursor = end + 1;
+    }
+    Ok(None)
+}
+
+fn find_named_element_end(xml: &str, start: usize, wanted: &str) -> Option<usize> {
+    let Some((first_start, mut cursor, false, false)) = next_named_tag(xml, start, wanted).ok().flatten() else { return None };
+    if first_start != start { return None; }
+    let mut depth = 1usize;
+    while let Ok(Some((_tag_start, tag_end, closing, self_closing))) = next_named_tag(xml, cursor, wanted) {
+        cursor = tag_end;
+        if !closing && !self_closing {
+            depth += 1;
+        } else if closing && depth > 0 {
+            depth -= 1;
+            if depth == 0 { return Some(tag_end); }
+        }
+    }
+    None
+}
+
+fn find_element_end(xml: &str, start: usize) -> Option<usize> {
+    let Some((first_start, mut cursor, ForwardTag::Open { self_closing: false })) = next_xml_tag(xml, start).ok().flatten() else { return None };
+    if first_start != start || !is_dataitem_open(xml, start) { return None; }
+    let mut depth = 1usize;
+    while let Ok(Some((_tag_start, tag_end, tag))) = next_xml_tag(xml, cursor) {
+        cursor = tag_end;
+        match tag {
+            ForwardTag::Open { self_closing: false } => depth += 1,
+            ForwardTag::Open { self_closing: true } => {}
+            ForwardTag::Close if depth > 0 => {
+                depth -= 1;
+                if depth == 0 { return Some(tag_end); }
+            }
+            ForwardTag::Close => return None,
+            ForwardTag::Other => {}
+        }
+    }
+    None
+}
+
+fn is_dataitem_open(xml: &str, start: usize) -> bool {
+    let prefix = "<dataitem";
+    if !xml[start..].starts_with(prefix) { return false; }
+    matches!(xml.as_bytes().get(start + prefix.len()), Some(b'>' | b'/' | b'\t' | b'\n' | b'\r' | b' '))
+}
+
+fn bounded_url(value: Option<String>) -> Option<String> {
+    value.filter(|url| url.len() <= 2048 && (url.starts_with("http://") || url.starts_with("https://")))
+}
+
+fn parse_forward_nodes(xml: &str, depth: usize, budget: &mut usize) -> (Vec<ForwardedMessageNode>, bool) {
+    if depth > FORWARD_MAX_DEPTH || xml.len() > FORWARD_MAX_XML_BYTES || *budget == 0 {
+        return (Vec::new(), true);
+    }
+    let mut nodes = Vec::new();
+    let mut truncated = false;
+    let mut cursor = 0;
+    while cursor < xml.len() {
+        let next = match next_xml_tag(xml, cursor) {
+            Ok(Some((start, end, ForwardTag::Open { .. }))) if is_dataitem_open(xml, start) => (start, end),
+            Ok(Some((_, end, _))) => { cursor = end; continue; }
+            Ok(None) => break,
+            Err(()) => { truncated = true; break; }
+        };
+        if *budget == 0 { truncated = true; break; }
+        let (start, _) = next;
+        let Some(end) = find_element_end(xml, start) else { truncated = true; break; };
+        let item = &xml[start..end];
+        let content = extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
+        let nested = item.find("<recorditem").and_then(|nested_start| {
+            let nested_end = find_named_element_end(item, nested_start, "recorditem")?;
+            Some(xml_unescape(&item[nested_start + "<recorditem>".len()..nested_end - "</recorditem>".len()]))
+        });
+        let (children, child_truncated) = nested.map(|nested| parse_forward_nodes(&nested, depth + 1, budget)).unwrap_or_default();
+        let message_type = extract_xml_tag(item, "type").and_then(|value| value.parse::<i32>().ok());
+        let node = ForwardedMessageNode {
+            sender: extract_xml_tag(item, "sourcename").or_else(|| extract_xml_tag(item, "displayname")),
+            sender_id: extract_xml_tag(item, "fromusr"),
+            timestamp: extract_xml_tag(item, "createtime").or_else(|| extract_xml_tag(item, "timestamp")),
+            text: content,
+            message_type,
+            media: bounded_url(extract_xml_tag(item, "cdnthumburl").or_else(|| extract_xml_tag(item, "cdnurl"))),
+            children,
+            truncated: child_truncated,
+        };
+        nodes.push(node);
+        *budget -= 1;
+        truncated |= child_truncated;
+        cursor = end;
+    }
+    (nodes, truncated)
+}
+
+fn parse_forwarded_tree(content: &str) -> Option<ForwardedMessageTree> {
+    let appmsg_type = extract_xml_tag(content, "type").and_then(|value| value.parse::<i32>().ok());
+    if appmsg_type != Some(19) { return None; }
+    let record_start = content.find("<recorditem")?;
+    let record_end = find_named_element_end(content, record_start, "recorditem")?;
+    let record = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
+    if record.len() > FORWARD_MAX_XML_BYTES { return Some(ForwardedMessageTree { schema_version: 1, title: extract_xml_tag(content, "title"), nodes: Vec::new(), truncated: true }); }
+    let mut budget = FORWARD_MAX_NODES;
+    let (nodes, truncated) = parse_forward_nodes(&xml_unescape(&record), 0, &mut budget);
+    Some(ForwardedMessageTree { schema_version: 1, title: extract_xml_tag(content, "title"), nodes, truncated })
+}
+
 fn clean_content(content: &str, local_type: i64) -> String {
     let base = normalize_local_type(local_type).base;
     match base {
@@ -99,18 +302,17 @@ fn clean_content(content: &str, local_type: i64) -> String {
                     let mut parts = Vec::new();
                     parts.push(format!("[Chat History] {title}"));
                     // recorditem is XML-escaped inside the appmsg
-                    if let Some(record_raw) = extract_xml_tag(content, "recorditem") {
-                        let record = record_raw
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&amp;", "&")
-                            .replace("&quot;", "\"");
+                    if let Some(record_start) = content.find("<recorditem") {
+                        if let Some(record_end) = find_named_element_end(content, record_start, "recorditem") {
+                            let record_raw = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
+                            let record = xml_unescape(record_raw);
                         // Extract each <dataitem> block
                         let mut search_from = 0usize;
-                        while let Some(start) = record[search_from..].find("<dataitem") {
-                            let abs_start = search_from + start;
-                            if let Some(end_offset) = record[abs_start..].find("</dataitem>") {
-                                let item = &record[abs_start..abs_start + end_offset + "</dataitem>".len()];
+                                            while search_from < record.len() {
+                            let Some((abs_start, _, _)) = next_xml_tag(&record, search_from).ok().flatten() else { break };
+                            if !is_dataitem_open(&record, abs_start) { search_from = abs_start + 1; continue; }
+                            if let Some(end) = find_element_end(&record, abs_start) {
+                                let item = &record[abs_start..end];
                                 let sender_name = extract_xml_tag(item, "sourcename")
                                     .or_else(|| extract_xml_tag(item, "displayname"))
                                     .map(|value| value.replace("&amp;", "&"))
@@ -124,10 +326,11 @@ fn clean_content(content: &str, local_type: i64) -> String {
                                 } else {
                                     parts.push(data_title);
                                 }
-                                search_from = abs_start + end_offset + "</dataitem>".len();
+                                search_from = end;
                             } else {
                                 break;
                             }
+                        }
                         }
                     }
                     if parts.len() == 1 {
@@ -446,7 +649,8 @@ fn list_messages_window(
                 raw_content
             };
 
-            // Extract reply info before cleaning (needs raw XML)
+            // Extract structured forwarded history before cleaning its display summary.
+            let forwarded = parse_forwarded_tree(&body);
             let reply = extract_reply_info(&body, msg_type);
 
             // Clean content for display (replace XML with summaries)
@@ -516,6 +720,7 @@ fn list_messages_window(
                 is_mentioned,
                 is_self,
                 reply,
+                forwarded,
             })
         })
         .collect()
@@ -549,6 +754,52 @@ mod merged_forward_tests {
             Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE")
         );
         assert!(!reply.content.is_empty());
+    }
+
+    #[test]
+    fn structured_forward_preserves_sender_time_and_nested_children() {
+        let xml = r#"<msg><appmsg><title>Thread</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;&lt;createtime&gt;1700000000&lt;/createtime&gt;&lt;datatitle&gt;Outer&lt;/datatitle&gt;&lt;recorditem&gt;&amp;lt;recordinfo&amp;gt;&amp;lt;dataitem&amp;gt;&amp;lt;displayname&amp;gt;Bob&amp;lt;/displayname&amp;gt;&amp;lt;datadesc&amp;gt;Inner&amp;lt;/datadesc&amp;gt;&amp;lt;/dataitem&amp;gt;&amp;lt;/recordinfo&amp;gt;&lt;/recorditem&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        let tree = parse_forwarded_tree(xml).expect("tree");
+        assert_eq!(tree.title.as_deref(), Some("Thread"));
+        assert!(!tree.truncated);
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.nodes[0].sender.as_deref(), Some("Alice"));
+        assert_eq!(tree.nodes[0].timestamp.as_deref(), Some("1700000000"));
+        assert_eq!(tree.nodes[0].children[0].sender.as_deref(), Some("Bob"));
+        assert_eq!(tree.nodes[0].children[0].text.as_deref(), Some("Inner"));
+    }
+
+    #[test]
+    fn fake_dataitem_tags_and_cdata_do_not_change_tree_boundaries() {
+        let xml = r#"<msg><appmsg><title>Safe</title><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitemevil&gt;fake&lt;/dataitemevil&gt;&lt;dataitem&gt;&lt;datadesc&gt;&lt;![CDATA[&lt;/dataitem&gt;]]&gt;&lt;/datadesc&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        let tree = parse_forwarded_tree(xml).expect("tree");
+        assert!(!tree.truncated);
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.nodes[0].text.as_deref(), Some("</dataitem>"));
+    }
+
+    #[test]
+    fn malformed_nested_forward_is_truncated_fail_closed() {
+        let xml = r#"<msg><appmsg><type>19</type><recorditem>&lt;recordinfo&gt;&lt;dataitem&gt;&lt;datadesc&gt;broken&lt;/recordinfo&gt;</recorditem></appmsg></msg>"#;
+        assert!(parse_forwarded_tree(xml).expect("tree").truncated);
+    }
+
+    #[test]
+    fn structured_forward_marks_oversized_input_truncated() {
+        let huge = "x".repeat(FORWARD_MAX_XML_BYTES + 1);
+        let xml = format!("<msg><appmsg><type>19</type><recorditem>{huge}</recorditem></appmsg></msg>");
+        let tree = parse_forwarded_tree(&xml).expect("tree");
+        assert!(tree.truncated);
+        assert!(tree.nodes.is_empty());
+    }
+
+    #[test]
+    fn node_budget_and_depth_limits_mark_truncation() {
+        let repeated = (0..FORWARD_MAX_NODES + 1).map(|_| "<dataitem><datadesc>x</datadesc></dataitem>").collect::<String>();
+        let xml = format!("<msg><appmsg><type>19</type><recorditem>&lt;recordinfo&gt;{repeated}&lt;/recordinfo&gt;</recorditem></appmsg></msg>");
+        let tree = parse_forwarded_tree(&xml).expect("tree");
+        assert!(tree.truncated);
+        assert_eq!(tree.nodes.len(), FORWARD_MAX_NODES);
     }
 
     #[test]
