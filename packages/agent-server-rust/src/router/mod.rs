@@ -75,6 +75,7 @@ pub fn build_router() -> Router {
         // WebSocket for login subscription
         .route("/api/ws/login", get(status::login_ws))
         // Events WebSocket
+        .route("/api/events", get(events::list_events))
         .route("/api/ws/events", get(events::events_ws))
         // VNC: WebSocket proxy + static files (behind auth)
         .route("/vnc/websockify", get(vnc::vnc_ws))
