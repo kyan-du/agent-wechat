@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import sharp from "sharp";
 import { MediaPipeline } from "./media-pipeline.ts";
 import { validateInboundMedia } from "./inbound-media.ts";
 
@@ -20,7 +21,7 @@ test("pipeline validates, hashes, saves, previews, and persists", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-media-pipeline-"));
   const calls: string[] = [];
   const pipeline = new MediaPipeline("default", dir);
-  const result = await pipeline.process(image(), { eventId: "a".repeat(64), chatId: "chat", localId: 1 }, saver(dir, calls), saver(dir, calls), 10);
+  const result = await pipeline.process(image(), { eventId: "a".repeat(64), chatId: "chat", localId: 1 }, saver(dir, calls), saver(dir, calls), undefined, 10);
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.equal(result.hash.length, 64);
@@ -44,15 +45,74 @@ test("duplicate content reuses the durable original and preview", async () => {
   if (first.ok && second.ok) assert.equal(second.originalPath, first.originalPath);
 });
 
+test("cleanup removes expired bytes while retaining current bindings for audit", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-media-pipeline-"));
+  const pipeline = new MediaPipeline("default", dir);
+  const oldResult = await pipeline.process(image(), { eventId: "e".repeat(64), chatId: "old-chat", localId: 1 }, saver(dir, []), saver(dir, []), undefined, 10);
+  const currentPng = await sharp(png).resize(3, 3).png().toBuffer();
+  const currentResult = await pipeline.process(image(currentPng), { eventId: "h".repeat(64), chatId: "current-chat", localId: 2 }, saver(dir, []), saver(dir, []), undefined, 190);
+  assert.equal(oldResult.ok, true);
+  assert.equal(currentResult.ok, true);
+  const removed: string[] = [];
+  assert.equal(await pipeline.cleanup({ olderThanMs: 50, now: 200, remove: async (path) => { removed.push(path); } }), 1);
+  assert.equal(removed.length, 2);
+  if (oldResult.ok && currentResult.ok) {
+    assert.equal(pipeline.get(oldResult.hash)?.originalPath, undefined);
+    const retained = pipeline.get(currentResult.hash);
+    assert.equal(retained?.originalPath, currentResult.originalPath);
+    assert.deepEqual(retained?.bindings.map((binding) => binding.eventId), ["h".repeat(64)]);
+  }
+});
+
 test("cleanup removes expired records and both stored paths", async () => {
   const dir = mkdtempSync(join(tmpdir(), "wechat-media-pipeline-"));
   const pipeline = new MediaPipeline("default", dir);
-  const result = await pipeline.process(image(), { eventId: "e".repeat(64), chatId: "chat", localId: 1 }, saver(dir, []), saver(dir, []), 10);
+  const result = await pipeline.process(image(), { eventId: "e".repeat(64), chatId: "chat", localId: 1 }, saver(dir, []), saver(dir, []), undefined, 10);
   assert.equal(result.ok, true);
   const removed: string[] = [];
   assert.equal(await pipeline.cleanup({ olderThanMs: 1, now: 20, remove: async (path) => { removed.push(path); } }), 1);
   assert.equal(removed.length, 2);
-  if (result.ok) assert.equal(pipeline.get(result.hash), undefined);
+  if (result.ok) {
+    const retained = pipeline.get(result.hash);
+    assert.equal(retained?.originalPath, undefined);
+    assert.equal(retained?.previewPath, undefined);
+    assert.deepEqual(retained?.bindings.map((binding) => binding.eventId), ["e".repeat(64)]);
+  }
+});
+
+test("preview failure removes the saved original and records the failed stage", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-media-pipeline-"));
+  const pipeline = new MediaPipeline("default", dir);
+  const saved: string[] = [];
+  const result = await pipeline.process(
+    image(),
+    { eventId: "f".repeat(64), chatId: "chat", localId: 1 },
+    async (_buffer, _mime, filename) => { const path = join(dir, filename); saved.push(path); return { path }; },
+    async () => undefined,
+    async (path) => { saved.push(`removed:${path}`); },
+  );
+  assert.deepEqual(result, { ok: false, code: "MEDIA_PREVIEW_FAILED" });
+  const record = pipeline.list()[0];
+  assert.deepEqual(record?.stages, ["validated", "deduplicated", "original_saved", "preview_failed"]);
+  assert.equal(record?.originalPath, undefined);
+  assert.equal(saved.some((path) => path.startsWith("removed:")), true);
+});
+
+test("missing preview path records a failed stage and removes the original", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-media-pipeline-"));
+  const pipeline = new MediaPipeline("default", dir);
+  const removed: string[] = [];
+  const result = await pipeline.process(
+    image(),
+    { eventId: "g".repeat(64), chatId: "chat", localId: 1 },
+    saver(dir, []),
+    async () => undefined,
+    async (path) => { removed.push(path); },
+  );
+  assert.deepEqual(result, { ok: false, code: "MEDIA_PREVIEW_FAILED" });
+  assert.equal(removed.length, 1);
+  assert.deepEqual(pipeline.list()[0]?.stages, ["validated", "deduplicated", "original_saved", "preview_failed"]);
+  assert.equal(pipeline.list()[0]?.originalPath, undefined);
 });
 
 test("preview failure is durable and does not expose an untracked success", async () => {

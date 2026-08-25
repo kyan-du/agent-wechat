@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wechat-shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
@@ -45,7 +46,7 @@ import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup
 import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import { pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
-import { loadMediaPipeline, type MediaPipeline } from "./media-pipeline.js";
+import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -121,6 +122,13 @@ export async function startWeChatMonitor(
   const pendingMessageScans = loadPendingResetRetries(account.accountId);
   const inboundLedger = loadInboundEventLedger(account.accountId);
   const mediaPipeline = loadMediaPipeline(account.accountId);
+  const cleanupMedia = async () => {
+    await mediaPipeline.cleanup({
+      olderThanMs: MEDIA_RETENTION_MS,
+      remove: async (path) => unlink(path),
+    }).catch((err) => log?.error?.(`[wechat:${account.accountId}] Media cleanup failed: ${err}`));
+  };
+  let lastMediaCleanup = 0;
   for (const [chatId, pending] of pendingMessageScans) {
     const cursor = pending.messages.reduce(
       (max, message) => Math.max(max, message.localId),
@@ -158,6 +166,10 @@ export async function startWeChatMonitor(
 
       // ---- Auth polling (every authPollIntervalMs) ----
       const now = Date.now();
+      if (now - lastMediaCleanup >= MEDIA_RETENTION_MS / 4) {
+        lastMediaCleanup = now;
+        await cleanupMedia();
+      }
       if (now - lastAuthCheck >= account.authPollIntervalMs) {
         lastAuthCheck = now;
         try {
@@ -371,6 +383,7 @@ export async function startWeChatMonitor(
     await sleep(account.pollIntervalMs, abortSignal);
   }
 
+  await cleanupMedia();
   setStatus({
     accountId: account.accountId,
     running: false,
@@ -443,6 +456,7 @@ async function prepareMessage(
           { eventId: inboundEventIdForMedia(liveAccount.accountId, chatId, msg), chatId, localId: msg.localId },
           async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
           async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+          async (path) => unlink(path),
         );
         if (!saved.ok) {
           mediaErrorCode = saved.code;

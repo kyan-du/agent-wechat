@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import sharp from "sharp";
 import { validateInboundMedia, type InboundMediaFailureCode } from "./inbound-media.ts";
 
-export type MediaStage = "validated" | "deduplicated" | "original_saved" | "preview_generated" | "extraction_skipped";
+export type MediaStage = "validated" | "deduplicated" | "original_saved" | "preview_generated" | "preview_failed" | "extraction_skipped";
 export type MediaPipelineStatus = "processed" | "failed";
 export type MediaExtractionStatus = "not_configured" | "not_applicable";
 
@@ -33,6 +33,7 @@ export const MAX_MEDIA_PIPELINE_ENTRIES = 5_000;
 export type MediaSave = (buffer: Buffer, mime: string, filename: string) => Promise<{ path?: string } | undefined>;
 export type MediaRemove = (path: string) => Promise<void>;
 export type MediaCleanupOptions = { olderThanMs: number; now?: number; remove?: MediaRemove };
+export const MEDIA_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 function pipelinePath(accountId: string, stateDir?: string): string {
   const root = stateDir ?? process.env.OPENCLAW_STATE_DIR?.trim() ?? join(homedir(), ".openclaw");
@@ -63,7 +64,7 @@ function validRecord(value: unknown): value is MediaPipelineRecord {
     (row.status === "processed" || row.status === "failed") &&
     typeof row.type === "string" && typeof row.mime === "string" &&
     Array.isArray(row.stages) && row.stages.every((stage) =>
-      ["validated", "deduplicated", "original_saved", "preview_generated", "extraction_skipped"].includes(String(stage))) &&
+      ["validated", "deduplicated", "original_saved", "preview_generated", "preview_failed", "extraction_skipped"].includes(String(stage))) &&
     Array.isArray(row.bindings) && row.bindings.length <= 1_000 && row.bindings.every((binding) => {
       if (!binding || typeof binding !== "object") return false;
       const item = binding as Record<string, unknown>;
@@ -120,6 +121,16 @@ export class MediaPipeline {
     writeState(this.path, { version: 1, entries });
   }
 
+  private async removePath(removeMedia: MediaRemove | undefined, path: string | undefined): Promise<boolean> {
+    if (!removeMedia || !path) return false;
+    try {
+      await removeMedia(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private copy(row: MediaPipelineRecord): MediaPipelineRecord {
     return { ...row, stages: [...row.stages], bindings: row.bindings.map((binding) => ({ ...binding })) };
   }
@@ -138,16 +149,22 @@ export class MediaPipeline {
 
   async cleanup(options: MediaCleanupOptions): Promise<number> {
     const cutoff = (options.now ?? Date.now()) - Math.max(0, options.olderThanMs);
-    const expired = [...this.entries.values()].filter((entry) => entry.updatedAt < cutoff);
-    if (options.remove) {
-      for (const entry of expired) {
-        if (entry.originalPath) await options.remove(entry.originalPath);
-        if (entry.previewPath) await options.remove(entry.previewPath);
+    const expired = [...this.entries.values()].filter((entry) =>
+      entry.updatedAt < cutoff && (entry.originalPath !== undefined || entry.previewPath !== undefined));
+    let changed = 0;
+    for (const entry of expired) {
+      const originalRemoved = await this.removePath(options.remove, entry.originalPath);
+      const previewRemoved = await this.removePath(options.remove, entry.previewPath);
+      if (originalRemoved) entry.originalPath = undefined;
+      if (previewRemoved) entry.previewPath = undefined;
+      if (originalRemoved || previewRemoved) {
+        // Keep the binding ledger after deleting bytes so message provenance remains auditable.
+        entry.updatedAt = options.now ?? Date.now();
+        changed += 1;
       }
     }
-    for (const entry of expired) this.entries.delete(entry.hash);
-    if (expired.length > 0) this.persist();
-    return expired.length;
+    if (changed > 0) this.persist();
+    return changed;
   }
 
   async process(
@@ -155,6 +172,7 @@ export class MediaPipeline {
     binding: Omit<MediaBinding, "observedAt">,
     saveOriginal: MediaSave,
     savePreview?: MediaSave,
+    removeMedia?: MediaRemove,
     now = Date.now(),
   ): Promise<MediaPipelineResult> {
     const validated = await validateInboundMedia(result);
@@ -188,18 +206,27 @@ export class MediaPipeline {
     record.originalPath = original.path;
     record.stages.push("original_saved");
 
-    if (savePreview && result.type === "image") {
+    if (result.type === "image") {
+      if (!savePreview) {
+        if (await this.removePath(removeMedia, record.originalPath)) record.originalPath = undefined;
+        record.errorCode = "MEDIA_PREVIEW_FAILED";
+        record.stages.push("preview_failed");
+        this.entries.set(hash, record); this.persist();
+        return { ok: false, code: "MEDIA_PREVIEW_FAILED" };
+      }
       try {
         const preview = await sharp(buffer, { failOn: "warning", limitInputPixels: 40_000_000 })
           .rotate().resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
           .jpeg({ quality: 82, progressive: true }).toBuffer();
         const savedPreview = await savePreview(preview, "image/jpeg", previewFilename(result.filename));
-        if (savedPreview?.path?.trim()) {
-          record.previewPath = savedPreview.path;
-          record.stages.push("preview_generated");
-        }
+        if (!savedPreview?.path?.trim()) throw new Error("preview save returned no path");
+        record.previewPath = savedPreview.path;
+        record.stages.push("preview_generated");
       } catch {
+        if (await this.removePath(removeMedia, record.originalPath)) record.originalPath = undefined;
+        if (await this.removePath(removeMedia, record.previewPath)) record.previewPath = undefined;
         record.errorCode = "MEDIA_PREVIEW_FAILED";
+        record.stages.push("preview_failed");
         this.entries.set(hash, record); this.persist();
         return { ok: false, code: "MEDIA_PREVIEW_FAILED" };
       }
