@@ -7,7 +7,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::db::get_db;
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::wechat_group_members::{self, GroupMemberQueryError};
 use crate::tools::wechat_keys::get_stored_keys;
 
@@ -51,7 +51,7 @@ pub async fn list_group_members(
     if !(1..=100).contains(&params.limit) {
         return error(StatusCode::BAD_REQUEST, "INVALID_LIMIT");
     }
-    let Some(session) = get_session("default") else {
+    let Some(session) = current_session() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "SESSION_NOT_FOUND");
     };
     let Some(logged_in_user) = session.logged_in_user.as_ref() else {

@@ -38,7 +38,7 @@ use crate::{
     execution::run_execution_loop,
     ia::types::{SendResult, SubscriptionEvent},
     plans::send_message::{SendMessageParams, SendMessagePlan},
-    sessions::manager::get_session,
+    sessions::manager::current_session,
 };
 
 const DEFAULT_QUEUE_CAPACITY: usize = 20;
@@ -1774,7 +1774,7 @@ fn task_expired(task: &OutboundTask, now: Instant, task_ttl: Duration) -> bool {
 }
 
 async fn execute_send(params: &SendMessageParams) -> SendResult {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return send_error("SESSION_UNAVAILABLE"),
     };

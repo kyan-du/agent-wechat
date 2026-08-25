@@ -25,6 +25,24 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     })
 }
 
+/// Single-instance compatibility value. All production selection goes through `current_session`.
+pub const DEFAULT_SESSION_NAME: &str = "default";
+
+pub fn current_session() -> Option<Session> {
+    let configured = std::env::var("AGENT_WECHAT_SESSION").ok();
+    get_session(configured.as_deref().unwrap_or(DEFAULT_SESSION_NAME))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_SESSION_NAME;
+
+    #[test]
+    fn default_session_policy_is_explicit_and_stable() {
+        assert_eq!(DEFAULT_SESSION_NAME, "default");
+    }
+}
+
 /// Get a session by ID or name.
 pub fn get_session(id_or_name: &str) -> Option<Session> {
     let db = get_db();
@@ -38,13 +56,13 @@ pub fn get_session(id_or_name: &str) -> Option<Session> {
 
 /// Get or create default session.
 pub async fn get_or_create_default_session() -> Result<Session, String> {
-    if let Some(session) = get_session("default") {
+    if let Some(session) = get_session(DEFAULT_SESSION_NAME) {
         if session.display == ":99" {
             return Ok(session);
         }
         // Wrong display — delete and recreate
         let db = get_db();
-        db.execute("DELETE FROM sessions WHERE name = 'default'", [])
+        db.execute("DELETE FROM sessions WHERE name = ?1", [DEFAULT_SESSION_NAME])
             .ok();
     }
 
@@ -57,8 +75,8 @@ pub async fn get_or_create_default_session() -> Result<Session, String> {
 
         db.execute(
             "INSERT INTO sessions (id, name, linux_user, display, dbus_address, vnc_port, status, login_state, created_at, updated_at)
-             VALUES (?1, 'default', 'wechat', ':99', ?2, 5900, 'running', 'logged_out', ?3, ?3)",
-            params![id, dbus_address, now],
+             VALUES (?1, ?2, 'wechat', ':99', ?3, 5900, 'running', 'logged_out', ?4, ?4)",
+            params![id, DEFAULT_SESSION_NAME, dbus_address, now],
         )
         .map_err(|e| format!("Failed to create default session: {e}"))?;
 

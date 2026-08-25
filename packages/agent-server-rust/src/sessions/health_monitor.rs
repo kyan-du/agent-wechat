@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
@@ -212,7 +212,7 @@ pub fn spawn_health_monitor() {
             }
 
             // Only monitor the default session
-            let session = match get_session("default") {
+            let session = match current_session() {
                 Some(s) if s.status == "running" => s,
                 _ => {
                     last_identified = Instant::now();
@@ -334,7 +334,7 @@ pub fn spawn_health_monitor() {
                 continue;
             };
 
-            let session = match get_session("default") {
+            let session = match current_session() {
                 Some(s) if s.status == "running" => s,
                 _ => continue,
             };
