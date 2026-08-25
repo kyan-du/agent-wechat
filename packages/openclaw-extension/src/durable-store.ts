@@ -26,9 +26,23 @@ export class DurableStoreError extends Error {
   }
 }
 
-function assertTrustedPath(path: string): void {
+function assertTrustedPath(path: string, root?: string): void {
   if (!isAbsolute(path) || path.includes("\0")) {
     throw new DurableStoreError("durable store paths must be absolute and contain no null bytes");
+  }
+  if (root) {
+    if (!isAbsolute(root) || path !== root && !path.startsWith(`${root}/`)) {
+      throw new DurableStoreError("durable store path is outside the approved state root");
+    }
+    for (const part of path.slice(root.length).split("/")) {
+      if (!part) continue;
+      const candidate = path.slice(0, path.indexOf(part) + part.length);
+      try {
+        if (statSync(candidate).isSymbolicLink()) throw new DurableStoreError("durable store path contains a symlink");
+      } catch (error) {
+        if (error instanceof DurableStoreError) throw error;
+      }
+    }
   }
 }
 
@@ -107,8 +121,8 @@ export function writeDurableJsonLocked(path: string, value: unknown): void {
 function writeUnlocked(path: string, value: unknown): void { writeDurableJsonLocked(path, value); }
 
 /** Write a complete JSON snapshot before replacing the visible state file. */
-export function writeDurableJson(path: string, value: unknown): void {
-  assertTrustedPath(path);
+export function writeDurableJson(path: string, value: unknown, root?: string): void {
+  assertTrustedPath(path, root);
   try {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     withDurableJsonLock(path, () => writeUnlocked(path, value));
@@ -119,8 +133,8 @@ export function writeDurableJson(path: string, value: unknown): void {
 }
 
 /** Atomically read, transform, and replace one snapshot under the path lock. */
-export function updateDurableJson<T>(path: string, update: (current: T | undefined) => T): T {
-  assertTrustedPath(path);
+export function updateDurableJson<T>(path: string, update: (current: T | undefined) => T, root?: string): T {
+  assertTrustedPath(path, root);
   try {
     return withDurableJsonLock(path, () => {
       const current = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as T : undefined;
@@ -157,19 +171,40 @@ export function removeDurableJson(path: string): void {
   }
 }
 
-/** Preserve unreadable state and atomically publish a durable blocker marker. */
+/** Publish a recoverable marker before moving unreadable state. */
 export function quarantineDurableJson(path: string, blockerPath: string): string {
   assertTrustedPath(path);
   assertTrustedPath(blockerPath);
   const quarantinePath = `${path}.corrupt-${Date.now()}-${randomUUID()}`;
+  const markerPath = `${path}.quarantine`;
   try {
     withDurableJsonLock(path, () => {
+      writeDurableJsonLocked(markerPath, { version: 1, quarantine: quarantinePath, blocker: blockerPath });
       renameSync(path, quarantinePath);
       syncPath(dirname(path));
       writeDurableJsonLocked(blockerPath, { version: 1, quarantine: quarantinePath });
+      rmSync(markerPath, { force: true });
+      syncPath(dirname(path));
     });
     return quarantinePath;
   } catch (error) {
     throw new DurableStoreError(`durable store quarantine failed: ${path}`, { cause: error });
+  }
+}
+
+export function recoverDurableQuarantine(path: string): void {
+  const markerPath = `${path}.quarantine`;
+  if (!existsSync(markerPath)) return;
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { quarantine?: string; blocker?: string };
+    if (typeof marker.quarantine !== "string" || typeof marker.blocker !== "string") throw new Error("invalid quarantine marker");
+    withDurableJsonLock(path, () => {
+      if (existsSync(path)) renameSync(path, marker.quarantine!);
+      writeDurableJsonLocked(marker.blocker!, { version: 1, quarantine: marker.quarantine });
+      rmSync(markerPath, { force: true });
+      syncPath(dirname(path));
+    });
+  } catch (error) {
+    throw new DurableStoreError(`durable store quarantine recovery failed: ${path}`, { cause: error });
   }
 }

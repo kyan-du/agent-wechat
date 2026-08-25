@@ -14,7 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { cursorMessageKey } from "./monitor-cursor.ts";
-import { quarantineDurableJson, readDurableJson, removeDurableJson, writeDurableJson } from "./durable-store.ts";
+import { quarantineDurableJson, readDurableJson, recoverDurableQuarantine, removeDurableJson, updateDurableJson, writeDurableJson } from "./durable-store.ts";
 
 export type InboundEventStatus = "pending" | "processing" | "processed" | "failed" | "dead_letter";
 export type InboundEventOutcome = "dispatched" | "filtered" | "buffered" | "read_only" | "stale";
@@ -125,23 +125,25 @@ export class InboundEventLedger {
 
   constructor(accountId: string, stateDir?: string) {
     this.path = statePath(accountId, stateDir);
+    recoverDurableQuarantine(this.path);
     for (const entry of loadFile(this.path).entries) this.entries.set(entry.eventId, entry);
   }
 
   private persist(): void {
-    const entries = [...this.entries.values()]
-      .sort((a, b) => a.updatedAt - b.updatedAt || a.eventId.localeCompare(b.eventId));
-    if (entries.length > MAX_INBOUND_LEDGER_ENTRIES) {
-      const retained = entries.filter((entry) => entry.status !== "processed");
-      if (retained.length > MAX_INBOUND_LEDGER_ENTRIES) throw new InboundLedgerStateError("inbound ledger capacity exceeded");
-      this.entries.clear();
-      for (const entry of retained) this.entries.set(entry.eventId, entry);
-    }
-    if (this.entries.size === 0) {
-      removeDurableJson(this.path);
-      return;
-    }
-    writeFile(this.path, { version: 1, entries: [...this.entries.values()] });
+    const localEntries = [...this.entries.values()];
+    const next = updateDurableJson<LedgerFile>(this.path, (current) => {
+      const merged = new Map((current?.entries ?? []).map((entry) => [entry.eventId, entry]));
+      for (const entry of localEntries) merged.set(entry.eventId, entry);
+      const entries = [...merged.values()].sort((a, b) => a.updatedAt - b.updatedAt || a.eventId.localeCompare(b.eventId));
+      if (entries.length > MAX_INBOUND_LEDGER_ENTRIES) {
+        const retained = entries.filter((entry) => entry.status !== "processed");
+        if (retained.length > MAX_INBOUND_LEDGER_ENTRIES) throw new InboundLedgerStateError("inbound ledger capacity exceeded");
+        return { version: 1, entries: retained };
+      }
+      return { version: 1, entries };
+    });
+    this.entries.clear();
+    for (const entry of next.entries) this.entries.set(entry.eventId, entry);
   }
 
   get(eventId: string): InboundEventRecord | undefined {
