@@ -29,17 +29,30 @@ fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
 pub fn current_session() -> Option<Session> {
-    let configured = std::env::var("AGENT_WECHAT_SESSION").ok();
-    get_session(configured.as_deref().unwrap_or(DEFAULT_SESSION_NAME))
+    match std::env::var("AGENT_WECHAT_SESSION") {
+        Ok(value) if value.trim().is_empty() || value.trim() == DEFAULT_SESSION_NAME => {
+            get_session(DEFAULT_SESSION_NAME)
+        }
+        Ok(_) => None,
+        Err(_) => get_session(DEFAULT_SESSION_NAME),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DEFAULT_SESSION_NAME;
+    use super::{DEFAULT_SESSION_NAME, current_session};
 
     #[test]
     fn default_session_policy_is_explicit_and_stable() {
         assert_eq!(DEFAULT_SESSION_NAME, "default");
+    }
+
+    #[test]
+    fn unsupported_session_override_is_fail_closed_without_database_access() {
+        std::env::set_var("AGENT_WECHAT_SESSION", "other");
+        assert!(current_session().is_none());
+        std::env::set_var("AGENT_WECHAT_SESSION", "   ");
+        std::env::remove_var("AGENT_WECHAT_SESSION");
     }
 }
 
