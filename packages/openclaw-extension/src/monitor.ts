@@ -68,6 +68,7 @@ type ProcessedMessage = {
   commandBody: string;
   mediaPath?: string;
   mediaMime?: string;
+  mediaProcessError?: string;
   senderName: string;
   senderId: string;
   isGroup: boolean;
@@ -415,6 +416,7 @@ async function prepareMessage(
   let mediaSource: string | undefined;
   let mediaErrorCode: string | undefined;
   let hasMedia = false;
+  let mediaProcessError: string | undefined;
 
   const baseType = msg.type & 0x7fffffff;
   // Type 49 (appmsg) may contain file attachments — the server resolves subtypes
@@ -434,6 +436,7 @@ async function prepareMessage(
         );
         if (!saved.ok) {
           mediaErrorCode = saved.code;
+          mediaProcessError = saved.code;
           log?.error?.(`[wechat:media] inbound media rejected code=${saved.code}`);
         } else {
           mediaMime = saved.mime;
@@ -717,6 +720,7 @@ async function dispatchSegment(
       OriginatingChannel: OPENCLAW_CHANNEL_ID,
       OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
+      ...(lastMsg.mediaProcessError ? { MediaErrorCode: lastMsg.mediaProcessError } : {}),
       ...(msg.reply ? {
         ReplyToBody: msg.reply.content.length > 50 ? msg.reply.content.slice(0, 50) + "..." : msg.reply.content,
         ReplyToSender: msg.reply.sender,
