@@ -10,7 +10,7 @@ import { collectWeChatStatusIssues } from "./status.js";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import { loginStart, loginWait, loginTerminal } from "./login.js";
 // loginWait still used by gateway.loginWithQrWait
-import { createWeChatConfirmedSendTool, createWeChatLoginTool } from "./agent-tools.js";
+import { createWeChatConfirmedSendTool, createWeChatGroupMembersTool, createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 import { sendLogicalMediaTask } from "./outbound.js";
 
@@ -448,7 +448,11 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
   agentTools: (({ cfg }: { cfg?: any }) => {
     const account = resolveWeChatAccount(cfg as Record<string, unknown>);
     if (!account?.serverUrl) return [];
-    return [createWeChatLoginTool(account), createWeChatConfirmedSendTool(account)];
+    return [
+      createWeChatLoginTool(account),
+      createWeChatConfirmedSendTool(account),
+      createWeChatGroupMembersTool(account),
+    ];
   }) as any,
 
   // ---- Directory adapter ----

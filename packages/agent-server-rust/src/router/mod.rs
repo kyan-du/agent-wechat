@@ -3,6 +3,7 @@ mod chats;
 mod contacts;
 mod debug;
 mod events;
+mod group_members;
 mod messages;
 mod status;
 mod vnc;
@@ -52,6 +53,10 @@ pub fn build_router() -> Router {
         .route("/api/chats/find", get(chats::find_chats))
         .route("/api/chats/{id}/open", post(chats::open_chat))
         .route("/api/chats/{id}/mark-read", post(chats::mark_read))
+        .route(
+            "/api/groups/{id}/members",
+            get(group_members::list_group_members),
+        )
         // Contacts
         .route("/api/contacts", get(contacts::list_contacts))
         .route("/api/contacts/find", get(contacts::find_contacts))
@@ -645,19 +650,36 @@ mod tests {
             "/api/messages/chat?limit=-1",
             "/api/messages/chat?cursor=not-a-cursor",
         ] {
-            let response = app.clone().oneshot(authed("GET", uri, Body::empty())).await.unwrap();
+            let response = app
+                .clone()
+                .oneshot(authed("GET", uri, Body::empty()))
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
             let body = json_response(response).await;
-            assert!(matches!(body["errorCode"].as_str(), Some("INVALID_LIMIT" | "INVALID_CURSOR")), "{uri}: {body}");
+            assert!(
+                matches!(
+                    body["errorCode"].as_str(),
+                    Some("INVALID_LIMIT" | "INVALID_CURSOR")
+                ),
+                "{uri}: {body}"
+            );
         }
     }
 
     #[tokio::test]
     async fn message_cursor_is_bound_to_its_chat() {
         let _idempotency_lock = init_test_server_state().await;
-        let cursor = crate::tools::page_cursor::encode("messages:first", ("2026-01-01T00:00:00+00:00", 7_i64)).unwrap();
+        let cursor = crate::tools::page_cursor::encode(
+            "messages:first",
+            ("2026-01-01T00:00:00+00:00", 7_i64),
+        )
+        .unwrap();
         let uri = format!("/api/messages/second?cursor={cursor}");
-        let response = build_router().oneshot(authed("GET", &uri, Body::empty())).await.unwrap();
+        let response = build_router()
+            .oneshot(authed("GET", &uri, Body::empty()))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_response(response).await["errorCode"], "INVALID_CURSOR");
     }

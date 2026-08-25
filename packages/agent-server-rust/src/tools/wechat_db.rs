@@ -15,81 +15,61 @@ fn sqlite_failure_code(error: &rusqlite::Error) -> String {
 /// that could interfere with WeChat's own writes. Since we open a fresh
 /// connection per query and drop it immediately, immutable mode is safe —
 /// we always see the latest committed state at open time.
-pub fn query_wechat_db(
+pub fn query_wechat_db(db_path: &str, hex_key: &str, sql: &str) -> Vec<Value> {
+    query_wechat_db_checked(db_path, hex_key, sql).unwrap_or_default()
+}
+
+/// Checked query for APIs that must distinguish an empty result from an
+/// unavailable/incompatible database. Errors contain SQLite classifications
+/// only; SQL text and row data are never included.
+pub fn query_wechat_db_checked(
     db_path: &str,
     hex_key: &str,
     sql: &str,
-) -> Vec<Value> {
+) -> Result<Vec<Value>, String> {
     let uri = format!("file:{}?immutable=1", db_path);
-    let conn = match Connection::open_with_flags(
+    let conn = Connection::open_with_flags(
         &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("[wechat-db] open failed code={}", sqlite_failure_code(&e));
-            return Vec::new();
-        }
-    };
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ).map_err(|e| {
+        let code = sqlite_failure_code(&e);
+        tracing::warn!("[wechat-db] open failed code={code}");
+        code
+    })?;
 
-    if let Err(e) = conn.execute_batch(&format!(
-        "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"
-    )) {
-        tracing::warn!("[wechat-db] pragma failed code={}", sqlite_failure_code(&e));
-        return Vec::new();
-    }
+    conn.execute_batch(&format!("PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"))
+        .map_err(|e| {
+            let code = sqlite_failure_code(&e);
+            tracing::warn!("[wechat-db] pragma failed code={code}");
+            code
+        })?;
 
-    let mut stmt = match conn.prepare(sql) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("[wechat-db] prepare failed code={}", sqlite_failure_code(&e));
-            return Vec::new();
-        }
-    };
-
-    let col_names: Vec<String> = stmt
-        .column_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-
+    let mut stmt = conn.prepare(sql).map_err(|e| {
+        let code = sqlite_failure_code(&e);
+        tracing::warn!("[wechat-db] prepare failed code={code}");
+        code
+    })?;
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let rows = stmt.query_map([], |row| {
         let mut map = Map::new();
         for (i, name) in col_names.iter().enumerate() {
-            let val: Value = match row.get_ref(i) {
+            let val = match row.get_ref(i) {
                 Ok(rusqlite::types::ValueRef::Null) => Value::Null,
                 Ok(rusqlite::types::ValueRef::Integer(n)) => Value::Number(n.into()),
-                Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::Number::from_f64(f)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-                Ok(rusqlite::types::ValueRef::Text(s)) => {
-                    Value::String(String::from_utf8_lossy(s).into_owned())
-                }
-                Ok(rusqlite::types::ValueRef::Blob(b)) => {
-                    // Hex-encode blobs (safety net — callers typically use hex() in SQL)
-                    let mut hex = String::with_capacity(b.len() * 2);
-                    for byte in b {
-                        use std::fmt::Write;
-                        let _ = write!(hex, "{byte:02X}");
-                    }
-                    Value::String(hex)
-                }
+                Ok(rusqlite::types::ValueRef::Real(f)) => serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null),
+                Ok(rusqlite::types::ValueRef::Text(s)) => Value::String(String::from_utf8_lossy(s).into_owned()),
+                Ok(rusqlite::types::ValueRef::Blob(b)) => Value::String(b.iter().map(|byte| format!("{byte:02X}")).collect()),
                 Err(_) => Value::Null,
             };
             map.insert(name.clone(), val);
         }
         Ok(Value::Object(map))
-    });
-
-    match rows {
-        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
-        Err(e) => {
-            tracing::warn!("[wechat-db] query failed code={}", sqlite_failure_code(&e));
-            Vec::new()
-        }
-    }
+    }).map_err(|e| {
+        let code = sqlite_failure_code(&e);
+        tracing::warn!("[wechat-db] query failed code={code}");
+        code
+    })?;
+    Ok(rows.filter_map(Result::ok).collect())
 }
 
 /// Find the WeChat process PID.
@@ -237,9 +217,15 @@ pub fn get_db_path(account_dir: &str, db_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::query_wechat_db_checked;
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn checked_queries_distinguish_unavailable_databases_from_empty_results() {
+        assert!(query_wechat_db_checked("/definitely/missing/contact.db", "00", "SELECT 1").is_err());
+    }
 
     /// Create a temp DB that simulates WeChat's encrypted DB pattern.
     /// Uses plaintext SQLite (no encryption) since we're testing lock behavior,
