@@ -100,6 +100,8 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                source: None,
+                error_code: Some("SESSION_UNAVAILABLE".to_string()),
             })
         }
     };
@@ -112,6 +114,8 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                source: None,
+                error_code: Some("NOT_LOGGED_IN".to_string()),
             })
         }
     };

@@ -8,6 +8,9 @@ export type InboundMediaFailureCode =
   | "MEDIA_MAGIC_MISMATCH"
   | "MEDIA_IMAGE_INVALID"
   | "MEDIA_IMAGE_TOO_LARGE"
+  | "MEDIA_FILE_TOO_LARGE"
+  | "MEDIA_FILE_TYPE_MISMATCH"
+  | "MEDIA_FILENAME_INVALID"
   | "MEDIA_SAVE_FAILED";
 
 export type ValidatedInboundMedia = { buffer: Buffer; mime: string };
@@ -25,6 +28,8 @@ const MIME_BY_FORMAT: Record<string, string> = {
 };
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+const MAX_FILENAME_CHARS = 180;
 const MAX_IMAGE_PIXELS = 40_000_000;
 const MAX_IMAGE_DIMENSION = 32_768;
 const MAX_DECODED_IMAGE_BYTES = MAX_IMAGE_PIXELS * 4;
@@ -45,6 +50,23 @@ const SHARP_INPUT_OPTIONS: SharpOptions = {
 
 sharp.cache({ files: 0, items: 0, memory: 32 });
 sharp.concurrency(1);
+
+function safeInboundFilename(raw: string): string | undefined {
+  const base = raw.replace(/\\/g, "/").split("/").pop() ?? "";
+  const cleaned = [...base]
+    .filter((char) => char >= " " && char !== "\u007f" && char !== "/" && char !== "\\")
+    .slice(0, MAX_FILENAME_CHARS)
+    .join("")
+    .replace(/^[.\s]+|[.\s]+$/g, "");
+  return cleaned || undefined;
+}
+
+const SUPPORTED_FILE_FORMATS = new Set(["pdf"]);
+
+function documentMimeFromMagic(buf: Buffer): string | undefined {
+  if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  return undefined;
+}
 
 function imageMimeFromMagic(buf: Buffer): string | undefined {
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
@@ -325,12 +347,20 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
   }
   const buffer = Buffer.from(normalized, "base64");
   if (buffer.length === 0) return { ok: false, code: "MEDIA_EMPTY_DATA" };
-  const declared = MIME_BY_FORMAT[result.format.toLowerCase()] ?? `application/${result.format || "octet-stream"}`;
+  const format = result.format.toLowerCase();
+  const declared = MIME_BY_FORMAT[format] ?? "application/octet-stream";
   if (result.type === "image") {
     const detected = imageMimeFromMagic(buffer);
     if (!detected || detected !== declared) return { ok: false, code: "MEDIA_MAGIC_MISMATCH" };
     const invalidCode = await validateDecodedImage(buffer, detected);
     if (invalidCode) return { ok: false, code: invalidCode };
+  } else if (result.type === "file") {
+    if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
+    if (!safeInboundFilename(result.filename)) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
+    if (!SUPPORTED_FILE_FORMATS.has(format)) return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
+    if (documentMimeFromMagic(buffer) !== "application/pdf") {
+      return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
+    }
   }
   return { ok: true, value: { buffer, mime: declared } };
 }
@@ -346,7 +376,9 @@ export async function saveValidatedInboundMedia(
   const validated = await validateInboundMedia(result);
   if (!validated.ok) return validated;
   try {
-    const saved = await save(validated.value.buffer, validated.value.mime, result.filename);
+    const filename = safeInboundFilename(result.filename);
+    if (!filename) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
+    const saved = await save(validated.value.buffer, validated.value.mime, filename);
     if (!saved?.path || typeof saved.path !== "string" || !saved.path.trim()) {
       return { ok: false, code: "MEDIA_SAVE_FAILED" };
     }
