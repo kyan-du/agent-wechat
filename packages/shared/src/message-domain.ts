@@ -22,14 +22,18 @@ export function messageCursor(message: Pick<Message, "timestamp" | "localId">): 
   return { timestamp: message.timestamp, localId: message.localId };
 }
 
-function timestampEpochMs(value: string): number {
+const RFC3339_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function timestampEpochSeconds(value: string): number {
+  if (!RFC3339_INSTANT.test(value)) throw new Error("INVALID_MESSAGE_TIMESTAMP");
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) throw new Error("INVALID_MESSAGE_TIMESTAMP");
-  return parsed;
+  return Math.trunc(parsed / 1_000);
 }
 
+
 export function compareMessageCursor(left: MessageCursor, right: MessageCursor): number {
-  const timestamp = timestampEpochMs(left.timestamp) - timestampEpochMs(right.timestamp);
+  const timestamp = timestampEpochSeconds(left.timestamp) - timestampEpochSeconds(right.timestamp);
   return timestamp || left.localId - right.localId;
 }
 

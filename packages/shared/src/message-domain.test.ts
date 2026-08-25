@@ -27,11 +27,20 @@ test("message cursor comparison normalizes RFC3339 offsets", () => {
   assert.equal(compareMessageCursor({ ...equivalentA, localId: 2 }, { ...equivalentB, localId: 2 }), 0);
 });
 
-test("message cursor comparison rejects malformed timestamps explicitly", () => {
-  assert.throws(
-    () => compareMessageCursor({ timestamp: "not-a-timestamp", localId: 1 }, { timestamp: "2026-01-01T00:00:00Z", localId: 1 }),
-    /INVALID_MESSAGE_TIMESTAMP/,
-  );
+test("message cursor comparison uses wire-second precision for fractional timestamps", () => {
+  assert.equal(compareMessageCursor(
+    { timestamp: "2026-01-01T00:00:00.100Z", localId: 1 },
+    { timestamp: "2026-01-01T00:00:00.900Z", localId: 2 },
+  ), -1);
+});
+
+test("message cursor comparison rejects non-RFC3339 timestamps explicitly", () => {
+  for (const timestamp of ["not-a-timestamp", "2026-01-01", "2026-01-01T00:00:00"]) {
+    assert.throws(
+      () => compareMessageCursor({ timestamp, localId: 1 }, { timestamp: "2026-01-01T00:00:00Z", localId: 1 }),
+      /INVALID_MESSAGE_TIMESTAMP/,
+    );
+  }
 });
 
 test("message envelopes attach only media belonging to each local ID", () => {
