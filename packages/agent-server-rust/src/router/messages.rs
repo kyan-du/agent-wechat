@@ -13,7 +13,7 @@ use crate::outbound::{
     OutboundError, OutboundSendResponse,
 };
 use crate::plans::send_message::SendMessageParams;
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::wechat_keys::{get_image_keys, get_stored_keys};
 use crate::tools::wechat_media::get_message_media;
 use crate::tools::wechat_messages;
@@ -50,7 +50,7 @@ pub async fn list_messages(
             return error_page("INVALID_CURSOR");
         }
     }
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return empty_page(),
     };
@@ -91,7 +91,7 @@ pub async fn list_messages(
 }
 
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => {
             return Json(MediaResult {

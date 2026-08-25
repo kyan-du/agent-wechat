@@ -5,7 +5,7 @@ use crate::ia::actions;
 use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
 use crate::tools::wechat_keys::get_stored_keys;
 
@@ -125,7 +125,7 @@ fn confirm_from_a11y_db(state: &AppState, chat_id: &str) -> Option<OpenChatResul
 
 fn load_matching_usernames(opened_name: Option<&str>) -> Option<Vec<String>> {
     let name = opened_name.map(str::trim).filter(|s| !s.is_empty())?;
-    let session = get_session("default")?;
+    let session = current_session()?;
     let user = session.logged_in_user.as_ref()?;
     let keys = {
         let db = get_db();

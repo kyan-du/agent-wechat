@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::db::get_db;
 use crate::ia::types::Contact;
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::wechat_contacts;
 use crate::tools::wechat_keys::get_stored_keys;
 
@@ -35,7 +35,7 @@ pub async fn list_contacts(Query(params): Query<ListParams>) -> Response {
             return error_page("INVALID_CURSOR");
         }
     }
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return empty_page(),
     };
@@ -73,7 +73,7 @@ pub struct FindParams {
 }
 
 pub async fn find_contacts(Query(params): Query<FindParams>) -> Json<Vec<Contact>> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return Json(Vec::new()),
     };

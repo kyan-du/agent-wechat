@@ -12,7 +12,7 @@ use crate::db::get_db;
 use crate::execution::run_execution_loop;
 use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan, COMPOSER_UNAVAILABLE};
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
 
@@ -46,7 +46,7 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Response {
             return error_page("INVALID_CURSOR");
         }
     }
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return empty_page(),
     };
@@ -81,7 +81,7 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Response {
 }
 
 pub async fn get_chat(Path(id): Path<String>) -> Json<Option<Chat>> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return Json(None),
     };
@@ -108,7 +108,7 @@ pub struct FindParams {
 }
 
 pub async fn find_chats(Query(params): Query<FindParams>) -> Json<Vec<Chat>> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => return Json(Vec::new()),
     };
@@ -159,7 +159,7 @@ fn mark_read_error_code(plan_error: Option<&str>) -> &'static str {
 }
 
 pub async fn mark_read(Path(chat_id): Path<String>) -> Json<serde_json::Value> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(session) => session,
         None => {
             return Json(
@@ -240,7 +240,7 @@ pub async fn open_chat(
     Query(params): Query<OpenChatParams>,
 ) -> Json<serde_json::Value> {
     let clear_unreads = params.clear_unreads;
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => {
             return Json(serde_json::json!({

@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::db::get_db;
 use crate::ia::types::{ChatSyncPage, MediaReference, SyncReadState};
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
 use crate::tools::wechat_messages;
@@ -93,7 +93,7 @@ pub async fn sync_chat(Path(chat_id): Path<String>, Query(params): Query<SyncPar
         }
     }
 
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(session) => session,
         None => return empty_page("SESSION_UNAVAILABLE"),
     };

@@ -19,7 +19,7 @@ use crate::ia::{find_state_by_id, identify_states};
 use crate::outbound::outbound_sender;
 use crate::plans::login::{LoginParams, LoginPlan};
 use crate::plans::logout::{LogoutParams, LogoutPlan};
-use crate::sessions::manager::get_session;
+use crate::sessions::manager::current_session;
 use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::qr::{decode_qr_from_base64, to_data_url};
@@ -27,7 +27,7 @@ use crate::tools::screenshot::capture_screenshot;
 use base64::Engine;
 
 pub async fn get_status() -> Json<serde_json::Value> {
-    let session = get_session("default");
+    let session = current_session();
     let login_status = session
         .as_ref()
         .and_then(|s| s.logged_in_user.as_ref())
@@ -140,7 +140,7 @@ pub async fn resume_outbound() -> Json<crate::outbound::OutboundStatus> {
 /// Gets the a11y tree, identifies the current state, and runs
 /// the reducer. Chat states set `is_logged_in = true`.
 pub async fn auth_status() -> Json<serde_json::Value> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => {
             return Json(serde_json::json!({
@@ -238,7 +238,7 @@ pub async fn auth_status() -> Json<serde_json::Value> {
 
 /// Log out of WeChat via FSM execution loop.
 pub async fn logout() -> Json<serde_json::Value> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => {
             return Json(serde_json::json!({
@@ -316,7 +316,7 @@ pub async fn logout() -> Json<serde_json::Value> {
 }
 
 pub async fn reset_auth() -> Json<serde_json::Value> {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(session) => session,
         None => {
             return Json(
@@ -388,7 +388,7 @@ pub async fn login_ws(
 }
 
 async fn handle_login_ws(mut socket: WebSocket, params: LoginWsParams) {
-    let session = match get_session("default") {
+    let session = match current_session() {
         Some(s) => s,
         None => {
             let msg = serde_json::to_string(&LoginSubscriptionEvent::Error {
