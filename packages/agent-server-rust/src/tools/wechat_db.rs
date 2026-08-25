@@ -234,17 +234,17 @@ pub fn get_db_path_checked(account_dir: &str, db_name: &str) -> Result<String, S
             .join(sub_dir)
             .join(db_name);
         if full_path.exists() {
-            return full_path.to_string_lossy().to_string();
+            return Ok(full_path.to_string_lossy().to_string());
         }
     }
 
     // Default to first path; callers must use query_checked to distinguish absent DBs.
-    Path::new(&base_paths[0])
+    Ok(Path::new(&base_paths[0])
         .join("db_storage")
         .join(sub_dir)
         .join(db_name)
         .to_string_lossy()
-        .to_string()
+        .to_string())
 }
 
 #[cfg(test)]
