@@ -11,6 +11,17 @@ export {
   type MessageEnvelope,
 } from "./message-domain.js";
 
+export {
+  DELIVERY_DOMAIN_SCHEMA_VERSION,
+  canAdvanceDelivery,
+  deliveryAfterSend,
+  observeDelivery,
+  payloadDigest,
+  type DeliveryAttempt,
+  type DeliveryObservation,
+  type DeliveryState,
+} from "./delivery-domain.js";
+
 // Export HTTP client
 export {
   WeChatClient,
