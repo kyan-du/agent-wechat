@@ -37,21 +37,21 @@ test("wrong target or payload is uncertain and never retried automatically", asy
 
 test("advanceDelivery records allowed edges and rejects skipped/backward edges", async () => {
   const queued = {
-    ...(await deliveryAfterSend({ success: true, commitAttempted: false }, "chat", "hello")),
+    ...(await deliveryAfterSend({ success: true, commitAttempted: false }, "chat", "hello", new Date(), undefined, "wxid_self")),
     state: "queued" as const,
     transitions: [],
   };
-  const composing = advanceDelivery(queued, "composing");
+  const composing = advanceDelivery(queued, "composing", "send_accepted");
   assert.equal(composing.state, "composing");
-  assert.equal(advanceDelivery(composing, "confirmed").state, "composing");
-  const submitted = advanceDelivery(composing, "submitted");
-  const observed = advanceDelivery(submitted, "observed_in_chat");
+  assert.equal(advanceDelivery(composing, "confirmed", "observation_confirmed").state, "composing");
+  const submitted = advanceDelivery(composing, "submitted", "send_accepted");
+  const observed = advanceDelivery(submitted, "observed_in_chat", "target_sender_and_payload_match");
   assert.equal(observed.state, "observed_in_chat");
-  assert.equal(advanceDelivery(observed, "confirmed").state, "confirmed");
+  assert.equal(advanceDelivery(observed, "confirmed", "observation_confirmed").state, "confirmed");
 });
 
 test("terminal outcomes cannot advance", () => {
-  assert.equal(canAdvanceDelivery("confirmed", "submitted"), false);
-  assert.equal(canAdvanceDelivery("uncertain", "confirmed"), false);
-  assert.equal(canAdvanceDelivery("submitted", "observed_in_chat"), true);
+  assert.equal(canAdvanceDelivery("confirmed", "submitted", "send_accepted"), false);
+  assert.equal(canAdvanceDelivery("uncertain", "confirmed", "observation_confirmed"), false);
+  assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "target_sender_and_payload_match"), true);
 });
