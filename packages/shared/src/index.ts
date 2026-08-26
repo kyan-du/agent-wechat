@@ -56,6 +56,9 @@ export {
   sendResultSchema,
   getMediaParamsSchema,
   mediaResultSchema,
+  deliveryStateSchema,
+  deliveryTransitionSchema,
+  deliveryAttemptSchema,
   // Agent config schema
   agentConfigSchema,
 } from "./schemas/index.js";

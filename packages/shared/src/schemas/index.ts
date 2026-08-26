@@ -213,6 +213,16 @@ export const sendParamsSchema = z.object({
   similarityConfirmed: z.boolean().optional(),
 });
 
+export const deliveryStateSchema = z.enum(["queued", "composing", "submitted", "observed_in_chat", "confirmed", "uncertain", "failed"]);
+export const deliveryTransitionSchema = z.object({ from: deliveryStateSchema, to: deliveryStateSchema, at: z.string().datetime(), reason: z.string().max(128).optional() });
+export const deliveryAttemptSchema = z.object({
+  schemaVersion: z.literal(1), idempotencyKey: idempotencyKeySchema.optional(),
+  senderId: z.string().trim().min(1).max(512), targetChatId: z.string().trim().min(1).max(512),
+  payloadDigest: z.string().regex(/^[a-f0-9]{64}$/), state: deliveryStateSchema,
+  commitAttempted: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  observedLocalId: z.number().int().optional(), transitions: z.array(deliveryTransitionSchema).max(32),
+});
+
 export const sendResultSchema = z.object({
   success: z.boolean(),
   messageId: z.string().optional(),
