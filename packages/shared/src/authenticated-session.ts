@@ -1,14 +1,14 @@
 import type { AuthenticatedSenderIdentity } from "./delivery-domain.js";
 
 declare const authenticatedSessionCapabilityBrand: unique symbol;
+declare const authenticatedSessionStoreBrand: unique symbol;
 export type AuthenticatedSessionCapability = {
   readonly [authenticatedSessionCapabilityBrand]: never;
 };
 
-export type AuthenticatedSessionKeyState = {
-  readonly version: 1;
-  readonly keyId: string;
-  readonly integrityKey: string;
+/** Opaque handle implemented by the authenticated adapter's protected durable store. */
+export type AuthenticatedSessionStore = {
+  readonly [authenticatedSessionStoreBrand]: never;
 };
 
 export type AuthenticatedSessionRecord = {
@@ -20,59 +20,121 @@ export type AuthenticatedSessionRecord = {
 
 export type AuthenticatedSessionAdapter = {
   readonly capability: AuthenticatedSessionCapability;
-  readonly keyState: AuthenticatedSessionKeyState;
+  readonly store: AuthenticatedSessionStore;
   readonly revoke: () => void;
+  /** Atomically revokes this generation and returns the next generation. */
+  readonly rotate: () => AuthenticatedSessionAdapter;
+};
+
+type PersistedKey = Readonly<{
+  keyId: string;
+  integrityKey: Uint8Array;
+  accountId: string;
+  sessionId: string;
+  generation: number;
+}>;
+type StoreRecord = {
+  current?: PersistedKey;
+  activeToken?: object;
+  readonly revokedKeyIds: Set<string>;
+  generation: number;
 };
 
 const CAPABILITIES = new WeakMap<object, AuthenticatedSessionRecord>();
-const HEX = /^[a-f0-9]+$/;
+const STORES = new WeakMap<object, StoreRecord>();
 
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function bytes(value: string, expectedLength: number): Uint8Array {
-  if (value.length !== expectedLength * 2 || !HEX.test(value)) throw new Error("INVALID_AUTHENTICATED_SESSION_KEY_STATE");
-  const result = new Uint8Array(expectedLength);
-  for (let index = 0; index < expectedLength; index += 1) result[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-  return result;
+function storeRecord(store: AuthenticatedSessionStore): StoreRecord {
+  const record = STORES.get(store);
+  if (!record) throw new Error("UNAUTHENTICATED_SESSION_STORE");
+  return record;
 }
 
-function createAdapter(resolveIdentity: () => AuthenticatedSenderIdentity | undefined, keyState: AuthenticatedSessionKeyState): AuthenticatedSessionAdapter {
+function validIdentity(identity: AuthenticatedSenderIdentity | undefined): AuthenticatedSenderIdentity {
+  if (!identity || !identity.accountId.trim() || !identity.sessionId.trim() || !identity.senderId.trim()) throw new Error("UNVERIFIED_SENDER_PROVENANCE");
+  return Object.freeze({ ...identity });
+}
+
+function randomBytes(length: number): Uint8Array {
+  const value = new Uint8Array(length);
+  globalThis.crypto.getRandomValues(value);
+  return value;
+}
+
+function newKey(identity: AuthenticatedSenderIdentity, generation: number): PersistedKey {
+  return Object.freeze({ keyId: hex(randomBytes(16)), integrityKey: randomBytes(32), accountId: identity.accountId, sessionId: identity.sessionId, generation });
+}
+
+/** Internal adapter bridge used by the real authenticated-session implementation and tests. */
+export function createAuthenticatedSessionStore(): AuthenticatedSessionStore {
+  const store = Object.freeze({});
+  STORES.set(store, { revokedKeyIds: new Set(), generation: 0 });
+  return store as AuthenticatedSessionStore;
+}
+
+function createAdapter(resolveIdentity: () => AuthenticatedSenderIdentity | undefined, store: AuthenticatedSessionStore, key: PersistedKey): AuthenticatedSessionAdapter {
   const capability = Object.freeze({});
-  let revoked = false;
+  const token = Object.freeze({});
+  const state = storeRecord(store);
+  state.activeToken = token;
   const record = {
     resolveIdentity,
-    integrityKey: bytes(keyState.integrityKey, 32),
-    keyId: keyState.keyId,
-    get revoked() { return revoked; },
+    integrityKey: key.integrityKey,
+    keyId: key.keyId,
+    get revoked() {
+      const current = storeRecord(store);
+      return current.current?.keyId !== key.keyId || current.activeToken !== token || current.revokedKeyIds.has(key.keyId);
+    },
   } as AuthenticatedSessionRecord;
   CAPABILITIES.set(capability, record);
-  return Object.freeze({
-    capability: capability as AuthenticatedSessionCapability,
-    keyState: Object.freeze({ ...keyState }),
-    revoke: () => { revoked = true; },
-  });
+
+  const revoke = (): void => {
+    const state = storeRecord(store);
+    state.revokedKeyIds.add(key.keyId);
+    if (state.current?.keyId === key.keyId && state.activeToken === token) {
+      state.current = undefined;
+      state.activeToken = undefined;
+    }
+  };
+  const rotate = (): AuthenticatedSessionAdapter => {
+    const identity = validIdentity(resolveIdentity());
+    const state = storeRecord(store);
+    if (state.current?.keyId !== key.keyId || state.activeToken !== token || state.revokedKeyIds.has(key.keyId)) throw new Error("REVOKED_AUTHENTICATED_SESSION");
+    state.revokedKeyIds.add(key.keyId);
+    const next = newKey(identity, ++state.generation);
+    state.current = next;
+    return createAdapter(resolveIdentity, store, next);
+  };
+  return Object.freeze({ capability: capability as AuthenticatedSessionCapability, store, revoke, rotate });
 }
 
-/** Adapter-owned construction point; generated key state must be stored by the authenticated adapter. */
+/** Adapter-owned construction point; key material remains inside its protected durable store. */
 export function createAuthenticatedSessionAdapter(
   resolveIdentity: () => AuthenticatedSenderIdentity | undefined,
+  store = createAuthenticatedSessionStore(),
 ): AuthenticatedSessionAdapter {
-  const key = new Uint8Array(32);
-  const keyId = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(key);
-  globalThis.crypto.getRandomValues(keyId);
-  return createAdapter(resolveIdentity, { version: 1, keyId: hex(keyId), integrityKey: hex(key) });
+  const identity = validIdentity(resolveIdentity());
+  const state = storeRecord(store);
+  if (state.current) throw new Error("AUTHENTICATED_SESSION_ALREADY_EXISTS");
+  const key = newKey(identity, ++state.generation);
+  state.current = key;
+  return createAdapter(resolveIdentity, store, key);
 }
 
-/** Restore using key state recovered from protected authenticated-session storage. */
+/** Restore only through the authenticated adapter's opaque protected durable store. */
 export function restoreAuthenticatedSessionAdapter(
   resolveIdentity: () => AuthenticatedSenderIdentity | undefined,
-  keyState: AuthenticatedSessionKeyState,
+  store: AuthenticatedSessionStore,
 ): AuthenticatedSessionAdapter {
-  if (keyState.version !== 1 || keyState.keyId.length !== 32 || !HEX.test(keyState.keyId)) throw new Error("INVALID_AUTHENTICATED_SESSION_KEY_STATE");
-  return createAdapter(resolveIdentity, keyState);
+  const identity = validIdentity(resolveIdentity());
+  const state = storeRecord(store);
+  const key = state.current;
+  if (!key || state.revokedKeyIds.has(key.keyId)) throw new Error("REVOKED_AUTHENTICATED_SESSION");
+  if (key.accountId !== identity.accountId || key.sessionId !== identity.sessionId) throw new Error("AUTHENTICATED_SESSION_IDENTITY_MISMATCH");
+  return createAdapter(resolveIdentity, store, key);
 }
 
 export function resolveAuthenticatedSessionCapability(

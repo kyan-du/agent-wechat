@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 
-const { createAuthenticatedSessionAdapter, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
+const { createAuthenticatedSessionAdapter, createAuthenticatedSessionStore, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
 const { advanceDelivery, canAdvanceDelivery, createAuthenticatedSenderBoundary, createQueuedDelivery, issueTrustedSenderProvenance, deliveryAfterSend, observeDelivery } = await import("./delivery-domain.ts");
 
 const sessionAdapter = createAuthenticatedSessionAdapter(
@@ -108,17 +108,31 @@ test("sender provenance requires the authenticated session capability", async ()
 });
 
 test("persisted attempts survive adapter restoration with the protected key state", async () => {
-  const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }));
+  const store = createAuthenticatedSessionStore();
+  const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store);
   const originalBoundary = createAuthenticatedSenderBoundary(originalAdapter.capability);
   const originalProvenance = issueTrustedSenderProvenance(originalBoundary, new Date("2025-01-01T00:00:00Z"));
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "restart-chat", "restart payload", new Date("2026-01-01T00:00:00Z"), undefined, originalProvenance);
   const serialized = JSON.parse(JSON.stringify(attempt));
-  const restoredAdapter = restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), originalAdapter.keyState);
-  originalAdapter.revoke();
+  const restoredAdapter = restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store);
   const restoredProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(restoredAdapter.capability), new Date("2025-01-01T00:00:00Z"));
   const confirmed = await observeDelivery(serialized, { chatId: "restart-chat", localId: 4, serverId: 5, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_restart", content: "restart payload" }, restoredProvenance, new Date("2026-01-01T00:00:03Z"));
   assert.equal(confirmed.state, "confirmed");
-  await assert.rejects(() => observeDelivery(serialized, { chatId: "restart-chat", localId: 4, serverId: 5, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_restart", content: "restart payload" }, originalProvenance), /UNTRUSTED_SENDER_PROVENANCE/);
+  restoredAdapter.revoke();
+  assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store), /REVOKED_AUTHENTICATED_SESSION/);
+});
+
+test("rotating a session revokes old attempts and restores only the new generation", async () => {
+  const store = createAuthenticatedSessionStore();
+  const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), store);
+  const oldProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(adapter.capability), new Date("2025-01-01T00:00:00Z"));
+  const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date("2026-01-01T00:00:00Z"), undefined, oldProvenance);
+  const nextAdapter = adapter.rotate();
+  await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_rotate", content: "hello" }, oldProvenance), /UNTRUSTED_SENDER_PROVENANCE/);
+  const nextProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(nextAdapter.capability), new Date("2025-01-01T00:00:00Z"));
+  await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_rotate", content: "hello" }, nextProvenance), /UNKNOWN_AUTHENTICATED_SESSION_KEY/);
+  const restoredCurrent = restoreAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), store);
+  assert.ok(restoredCurrent.capability);
 });
 
 test("session logout and re-authentication revoke old provenance", async () => {

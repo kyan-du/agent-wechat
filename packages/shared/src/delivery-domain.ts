@@ -161,8 +161,7 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
   if (!TRUSTED_PROVENANCES.has(provenance)) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
   if (Date.parse(provenance.verifiedAt) > now.getTime()) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
   const timestamp = now.toISOString();
-  const session = PROVENANCE_RECORDS.get(provenance)?.session;
-  if (!session) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
+  const session = activeSessionFor(provenance);
   return validateAttempt(await buildAttempt({ schemaVersion: 1, senderId: provenance.senderId, senderAccountId: provenance.accountId, senderSessionId: provenance.sessionId, targetChatId, payloadDigest: await payloadDigest(payload), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [], sessionKeyId: session.keyId }, provenance));
 }
 
@@ -179,8 +178,7 @@ export async function deliveryAfterSend(result: Pick<SendResult, "success" | "co
   if (Date.parse(provenance.verifiedAt) > now.getTime()) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
-  const session = PROVENANCE_RECORDS.get(provenance)?.session;
-  if (!session) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
+  const session = activeSessionFor(provenance);
   return validateAttempt(await buildAttempt({ schemaVersion: 1, senderId: provenance.senderId, senderAccountId: provenance.accountId, senderSessionId: provenance.sessionId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason: result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure" }], sessionKeyId: session.keyId }, provenance));
 }
 
