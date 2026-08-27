@@ -88,10 +88,9 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
-  if ((to === "failed" || to === "uncertain") && (current.state === "queued" || current.state === "composing") && current.initialOutcome === undefined) {
+  if ((to === "failed" || to === "uncertain" || to === "submitted") && (current.state === "queued" || current.state === "composing")) {
     throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   }
-  if (to === "submitted" && current.state === "composing" && current.initialOutcome === undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted)) return current;
   const timestamp = now.toISOString();
   const next = validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });

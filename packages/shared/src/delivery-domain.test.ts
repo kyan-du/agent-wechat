@@ -118,9 +118,18 @@ test("submitted evidence must be a successful send result", async () => {
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self");
   const composing = await advance(queued, "composing", "send_accepted");
   const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false } };
-  await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME/);
+  await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME|INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
   assert.equal((await submitComposingDelivery(composing, { success: false, commitAttempted: false })).state, "failed");
   await assert.rejects(() => submitComposingDelivery(composing, { success: true, commitAttempted: false }), /INVALID_DELIVERY_RESULT_EVIDENCE/);
+});
+
+test("composing terminal transitions require the result-aware operation", async () => {
+  const composing = await advance(await createQueuedDelivery("chat", "hello", "wxid_self"), "composing", "send_accepted");
+  const successful = await submitComposingDelivery(composing, { success: true, commitAttempted: true }, new Date());
+  const clonedSuccessful = JSON.parse(JSON.stringify(successful));
+  assert.equal((await observeDelivery(clonedSuccessful, { chatId: "chat", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_self", content: "hello" })).state, "confirmed");
+  await assert.rejects(() => advance(composing, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY|INVALID_DELIVERY_COMMIT_EVIDENCE/);
+  await assert.rejects(() => advance(composing, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
 });
 
 test("failed send outcomes survive round-trip while direct fabrication is rejected", async () => {
