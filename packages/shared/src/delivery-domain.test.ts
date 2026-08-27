@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 
-const { createAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
+const { createAuthenticatedSessionAdapter, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
 const { advanceDelivery, canAdvanceDelivery, createAuthenticatedSenderBoundary, createQueuedDelivery, issueTrustedSenderProvenance, deliveryAfterSend, observeDelivery } = await import("./delivery-domain.ts");
 
 const sessionAdapter = createAuthenticatedSessionAdapter(
@@ -107,12 +107,44 @@ test("sender provenance requires the authenticated session capability", async ()
   }
 });
 
+test("persisted attempts survive adapter restoration with the protected key state", async () => {
+  const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }));
+  const originalBoundary = createAuthenticatedSenderBoundary(originalAdapter.capability);
+  const originalProvenance = issueTrustedSenderProvenance(originalBoundary, new Date("2025-01-01T00:00:00Z"));
+  const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "restart-chat", "restart payload", new Date("2026-01-01T00:00:00Z"), undefined, originalProvenance);
+  const serialized = JSON.parse(JSON.stringify(attempt));
+  const restoredAdapter = restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), originalAdapter.keyState);
+  originalAdapter.revoke();
+  const restoredProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(restoredAdapter.capability), new Date("2025-01-01T00:00:00Z"));
+  const confirmed = await observeDelivery(serialized, { chatId: "restart-chat", localId: 4, serverId: 5, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_restart", content: "restart payload" }, restoredProvenance, new Date("2026-01-01T00:00:03Z"));
+  assert.equal(confirmed.state, "confirmed");
+  await assert.rejects(() => observeDelivery(serialized, { chatId: "restart-chat", localId: 4, serverId: 5, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_restart", content: "restart payload" }, originalProvenance), /UNTRUSTED_SENDER_PROVENANCE/);
+});
+
+test("session logout and re-authentication revoke old provenance", async () => {
+  let identity = { accountId: "account-before", sessionId: "session-before", senderId: "wxid_before" };
+  const adapter = createAuthenticatedSessionAdapter(() => identity);
+  const oldProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(adapter.capability), new Date("2025-01-01T00:00:00Z"));
+  const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date("2026-01-01T00:00:00Z"), undefined, oldProvenance);
+  identity = { accountId: "account-after", sessionId: "session-after", senderId: "wxid_after" };
+  await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_before", content: "hello" }, oldProvenance), /REVOKED_SENDER_PROVENANCE/);
+  adapter.revoke();
+  assert.throws(() => createAuthenticatedSenderBoundary(adapter.capability), /UNAUTHENTICATED_SESSION_CAPABILITY/);
+});
+
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date("2026-01-01T00:00:00Z"), undefined, trusted());
   const invalidTime = { ...attempt, updatedAt: "2026-01-01T00:00:00Z", transitions: [{ ...attempt.transitions[0], at: "2026-01-01T00:00:01Z" }] };
-  await assert.rejects(() => advance(invalidTime, "submitted", "send_accepted"), /TAMPERED_DELIVERY_ATTEMPT/);
+  await assert.rejects(() => advance(invalidTime, "submitted", "send_accepted"), /INVALID_DELIVERY_TRANSITION_TIME/);
   const invalidId = { ...attempt, state: "confirmed" as const, observedLocalId: -1, transitions: [...attempt.transitions, { from: "submitted" as const, to: "observed_in_chat" as const, at: "2026-01-01T00:00:01Z", reason: "target_sender_and_payload_match" as const }, { from: "observed_in_chat" as const, to: "confirmed" as const, at: "2026-01-01T00:00:02Z", reason: "observation_confirmed" as const }] };
-  await assert.rejects(() => advance(invalidId, "confirmed", "observation_confirmed"), /TAMPERED_DELIVERY_ATTEMPT/);
+  await assert.rejects(() => advance(invalidId, "confirmed", "observation_confirmed"), /Number must be greater than or equal to 0/);
   const staleUpdate = { ...attempt, updatedAt: "2025-12-31T23:59:59Z" };
-  await assert.rejects(() => advance(staleUpdate, "submitted", "send_accepted"), /TAMPERED_DELIVERY_ATTEMPT/);
+  await assert.rejects(() => advance(staleUpdate, "submitted", "send_accepted"), /INVALID_DELIVERY_TIME/);
+
+  const oversized = { ...attempt, targetChatId: "x".repeat(70_000) };
+  await assert.rejects(() => advance(oversized, "submitted", "send_accepted"), /DELIVERY_ATTEMPT_TOO_LARGE/);
+  await assert.rejects(() => advance({ ...attempt, unexpected: true } as any, "submitted", "send_accepted"), /INVALID_DELIVERY_ATTEMPT_INPUT/);
+  const cyclic = { ...attempt } as any;
+  cyclic.transitions = [cyclic];
+  await assert.rejects(() => advance(cyclic, "submitted", "send_accepted"), /CYCLIC_DELIVERY_ATTEMPT/);
 });
