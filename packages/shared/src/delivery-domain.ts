@@ -66,7 +66,7 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
     if (previous && transition.from !== previous.to) throw new Error("INVALID_DELIVERY_TRANSITION_CHAIN");
     if (previous && Date.parse(transition.at) < Date.parse(previous.at)) throw new Error("INVALID_DELIVERY_TRANSITION_TIME");
     if (index === 0 && Date.parse(transition.at) < createdAt) throw new Error("INVALID_DELIVERY_TRANSITION_TIME");
-    if (Date.parse(transition.at) > updatedAt || !canAdvanceDelivery(transition.from, transition.to, transition.reason, parsed.commitAttempted)) throw new Error("INVALID_DELIVERY_TRANSITION_EDGE");
+    if (Date.parse(transition.at) > updatedAt || !canAdvanceDelivery(transition.from, transition.to, transition.reason, parsed.commitAttempted, parsed.initialOutcome)) throw new Error("INVALID_DELIVERY_TRANSITION_EDGE");
     if (transition.to === "uncertain" && transition.reason === "post_commit_uncertain" && !parsed.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
     if (transition.to === "failed" && transition.reason === "pre_commit_failure" && parsed.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   }
@@ -82,9 +82,9 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   const current = validateAttempt(attempt);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   if ((to === "failed" && reason === "pre_commit_failure") || (to === "uncertain" && reason === "post_commit_uncertain" && (current.state === "queued" || current.state === "composing"))) {
-    if (canAdvanceDelivery(current.state, to, reason, current.commitAttempted)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
+    if (!TERMINAL_STATES.has(current.state) && canAdvanceDelivery(current.state, to, reason, current.commitAttempted, current.initialOutcome)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   }
-  if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted)) return current;
+  if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted, current.initialOutcome)) return current;
   const timestamp = now.toISOString();
   const next = validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
   return next;
@@ -109,8 +109,11 @@ export async function observeDelivery(attempt: DeliveryAttempt, observation: Del
   return validateAttempt({ ...confirmed, observedLocalId: checkedObservation.localId });
 }
 
-export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause, commitAttempted?: boolean): boolean {
+export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause, commitAttempted?: boolean, initialOutcome?: DeliveryInitialOutcome): boolean {
   if (TERMINAL_STATES.has(from)) return false;
+  if ((to === "uncertain" || to === "failed") && (from === "queued" || from === "composing")) {
+    if (initialOutcome?.source !== "send_result" || initialOutcome.commitAttempted !== commitAttempted || initialOutcome.success !== false) return false;
+  }
   if (reason === "post_commit_uncertain" && commitAttempted !== true) return false;
   if (reason === "pre_commit_failure" && commitAttempted !== false) return false;
   return EDGE_CAUSES.get(`${from}:${to}`)?.has(reason ?? ("" as DeliveryCause)) === true;

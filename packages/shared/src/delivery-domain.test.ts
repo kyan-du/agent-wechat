@@ -59,12 +59,12 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "target_sender_and_payload_match"), true);
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "confirmed", "sender_unverified"), false);
-  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false), true);
-  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure"), false);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false, { source: "send_result", success: false, commitAttempted: false }), true);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false), false);
   assert.equal(canAdvanceDelivery("submitted", "failed", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "failed", "pre_commit_failure"), false);
-  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true), true);
-  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), false);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true, { source: "send_result", success: false, commitAttempted: true }), true);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true), false);
 });
 
 test("delivery outcomes use an explicit initial state/cause matrix", async () => {
@@ -80,7 +80,7 @@ test("delivery outcomes use an explicit initial state/cause matrix", async () =>
     assert.equal(attempt.transitions[0]?.reason, reason);
   }
   const valid = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
-  const malformed = { ...valid, state: "failed" as const, commitAttempted: true, transitions: [{ ...valid.transitions[0], to: "failed" as const, reason: "pre_commit_failure" as const }] };
+  const malformed = { ...valid, state: "failed" as const, commitAttempted: true, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: true }, transitions: [{ ...valid.transitions[0], to: "failed" as const, reason: "pre_commit_failure" as const }] };
   await assert.rejects(() => advance(malformed, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME|INVALID_DELIVERY_COMMIT_EVIDENCE/);
 });
 
@@ -95,6 +95,9 @@ test("failed send outcomes survive round-trip while direct fabrication is reject
   const failed = await deliveryAfterSend({ success: false, commitAttempted: false }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
   const restored = JSON.parse(JSON.stringify(failed));
   assert.equal((await advance(restored, "failed", "pre_commit_failure")).state, "failed");
+  const clonedQueued = JSON.parse(JSON.stringify(await createQueuedDelivery("chat", "hello", "wxid_self")));
+  const clonedFailure = { ...clonedQueued, state: "failed" as const, initialOutcome: undefined, transitions: [{ from: "queued" as const, to: "failed" as const, at: clonedQueued.createdAt, reason: "pre_commit_failure" as const }] };
+  await assert.rejects(() => advance(clonedFailure, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY|INVALID_DELIVERY_INITIAL_OUTCOME/);
 
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
   const fabricated = {
