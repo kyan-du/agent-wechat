@@ -23,6 +23,9 @@ export type DeliveryObservation = Pick<Message, "chatId" | "localId" | "serverId
 export type DeliveryTransition = { from: DeliveryState; to: DeliveryState; at: string; reason: DeliveryCause };
 
 const TERMINAL_STATES = new Set<DeliveryState>(["confirmed", "uncertain", "failed"]);
+// Terminal pre-commit failures must come from the send-result factory, not a
+// caller-created DeliveryAttempt-shaped object.
+const AUTHORITATIVE_ATTEMPTS = new WeakSet<object>();
 const EDGE_CAUSES = new Map<string, ReadonlySet<DeliveryCause>>([
   ["queued:composing", new Set(["send_accepted"])], ["queued:submitted", new Set(["send_accepted"])], ["composing:submitted", new Set(["send_accepted"])],
   ["submitted:observed_in_chat", new Set(["target_sender_and_payload_match"])], ["observed_in_chat:confirmed", new Set(["observation_confirmed"])],
@@ -37,7 +40,7 @@ export async function payloadDigest(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
+function validateAttempt(attempt: DeliveryAttempt, allowInitialFailure = false): DeliveryAttempt {
   const parsed = deliveryAttemptSchema.strict().parse(attempt);
   const createdAt = Date.parse(parsed.createdAt);
   const updatedAt = Date.parse(parsed.updatedAt);
@@ -48,6 +51,7 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (lastTransition && lastTransition.from === "queued" && ["submitted", "uncertain", "failed"].includes(parsed.state)) {
     const expected = parsed.state === "submitted" ? "send_accepted" : parsed.state === "uncertain" ? "post_commit_uncertain" : "pre_commit_failure";
     if (expected !== lastTransition.reason || (parsed.state === "uncertain" && !parsed.commitAttempted) || (parsed.state === "failed" && parsed.commitAttempted)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+    if (parsed.state === "failed" && !allowInitialFailure && !AUTHORITATIVE_ATTEMPTS.has(attempt)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   }
   if (lastTransition && lastTransition.to !== parsed.state) throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.observedLocalId !== undefined && !["observed_in_chat", "confirmed"].includes(parsed.state)) throw new Error("INVALID_DELIVERY_OBSERVATION_STATE");
@@ -66,23 +70,29 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
 
 export async function createQueuedDelivery(targetChatId: string, payload: string, senderId: string, now = new Date(), idempotencyKey?: string): Promise<DeliveryAttempt> {
   const timestamp = now.toISOString();
-  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [] });
+  const attempt = validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [] });
+  AUTHORITATIVE_ATTEMPTS.add(attempt);
+  return attempt;
 }
 
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
-  if (to === "failed" && reason === "pre_commit_failure" && current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
+  if (to === "failed" && reason === "pre_commit_failure" && canAdvanceDelivery(current.state, to, reason)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   if (!canAdvanceDelivery(current.state, to, reason)) return current;
   const timestamp = now.toISOString();
-  return validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
+  const next = validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
+  AUTHORITATIVE_ATTEMPTS.add(next);
+  return next;
 }
 
 export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
-  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
+  const attempt = validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] }, true);
+  AUTHORITATIVE_ATTEMPTS.add(attempt);
+  return attempt;
 }
 
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
@@ -94,7 +104,9 @@ export async function observeDelivery(attempt: DeliveryAttempt, observation: Del
   if (checkedObservation.type !== 1 || await payloadDigest(checkedObservation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const observed = await advanceDelivery(current, "observed_in_chat", "target_sender_and_payload_match", now);
   const confirmed = await advanceDelivery(observed, "confirmed", "observation_confirmed", now);
-  return validateAttempt({ ...confirmed, observedLocalId: checkedObservation.localId });
+  const result = validateAttempt({ ...confirmed, observedLocalId: checkedObservation.localId });
+  AUTHORITATIVE_ATTEMPTS.add(result);
+  return result;
 }
 
 export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause): boolean {

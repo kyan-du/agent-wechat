@@ -86,7 +86,18 @@ test("advanceDelivery rejects terminal causes without matching commit evidence",
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self");
   await assert.rejects(() => advance(queued, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_COMMIT_EVIDENCE/);
   const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
-  await assert.rejects(() => advance(submitted, "failed", "pre_commit_failure"), /INVALID_DELIVERY_COMMIT_EVIDENCE|INVALID_DELIVERY_TRANSITION_EDGE/);
+  assert.equal((await advance(submitted, "failed", "pre_commit_failure")).state, "submitted");
+});
+
+test("fabricated initial failures cannot enter the authoritative delivery path", async () => {
+  const queued = await createQueuedDelivery("chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+  const fabricated = {
+    ...queued,
+    state: "failed" as const,
+    updatedAt: "2026-01-01T00:00:01Z",
+    transitions: [{ from: "queued" as const, to: "failed" as const, at: "2026-01-01T00:00:01Z", reason: "pre_commit_failure" as const }],
+  };
+  await assert.rejects(() => advance(fabricated, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
 });
 
 test("final observations are schema-valid and deeply immutable", async () => {
