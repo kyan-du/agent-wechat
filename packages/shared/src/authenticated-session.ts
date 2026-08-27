@@ -5,23 +5,30 @@ export type AuthenticatedSessionCapability = {
   readonly [authenticatedSessionCapabilityBrand]: never;
 };
 
-type AuthenticatedSession = {
+export type AuthenticatedSessionRecord = {
   readonly resolveIdentity: () => AuthenticatedSenderIdentity | undefined;
+  readonly integrityKey: Uint8Array;
 };
 
-const CAPABILITIES = new WeakMap<object, AuthenticatedSession>();
+export type AuthenticatedSessionAdapter = {
+  readonly capability: AuthenticatedSessionCapability;
+};
 
-/** Internal adapter bridge; this module is not part of the package public exports. */
-export function createAuthenticatedSessionCapability(
+const CAPABILITIES = new WeakMap<object, AuthenticatedSessionRecord>();
+
+/** Adapter-owned construction point; the public package does not export this module. */
+export function createAuthenticatedSessionAdapter(
   resolveIdentity: () => AuthenticatedSenderIdentity | undefined,
-): AuthenticatedSessionCapability {
+): AuthenticatedSessionAdapter {
   const capability = Object.freeze({});
-  CAPABILITIES.set(capability, { resolveIdentity });
-  return capability as AuthenticatedSessionCapability;
+  const integrityKey = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(integrityKey);
+  CAPABILITIES.set(capability, { resolveIdentity, integrityKey });
+  return Object.freeze({ capability: capability as AuthenticatedSessionCapability });
 }
 
 export function resolveAuthenticatedSessionCapability(
   capability: AuthenticatedSessionCapability,
-): (() => AuthenticatedSenderIdentity | undefined) | undefined {
-  return CAPABILITIES.get(capability)?.resolveIdentity;
+): AuthenticatedSessionRecord | undefined {
+  return CAPABILITIES.get(capability);
 }

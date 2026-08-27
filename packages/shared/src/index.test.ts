@@ -13,7 +13,9 @@ registerHooks({
 
 const shared = await import("./index.ts");
 
-test("package root exports the authenticated delivery boundary", () => {
+test("package root exports the authenticated delivery boundary without capability issuance", () => {
   assert.equal(typeof shared.createAuthenticatedSenderBoundary, "function");
   assert.equal(typeof shared.issueTrustedSenderProvenance, "function");
+  assert.equal("createAuthenticatedSessionAdapter" in shared, false);
+  assert.equal("issueAuthenticatedSessionCapability" in shared, false);
 });
