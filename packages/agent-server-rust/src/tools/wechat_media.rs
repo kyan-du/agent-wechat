@@ -54,6 +54,29 @@ fn pending() -> MediaResult {
     pending_with("pending", "", "", "MEDIA_NOT_DOWNLOADED")
 }
 
+fn pending_image(local_id: i64, code: &str) -> MediaResult {
+    pending_with(
+        "pending",
+        "jpeg",
+        format!("msg_{local_id}.jpg"),
+        code,
+    )
+}
+
+/// Avoid decoding a file while WeChat is still writing it.
+fn read_stable_file(path: &Path) -> Option<Vec<u8>> {
+    let before = fs::metadata(path).ok()?;
+    if !before.is_file() || before.len() == 0 {
+        return None;
+    }
+    let data = fs::read(path).ok()?;
+    let after = fs::metadata(path).ok()?;
+    if before.len() != after.len() || after.len() != data.len() as u64 {
+        return None;
+    }
+    Some(data)
+}
+
 fn account_base_paths(account_dir: &str) -> [String; 2] {
     [
         format!("/home/wechat/xwechat_files/{account_dir}"),
@@ -148,7 +171,7 @@ fn get_image_thumbnail(
             .join("Thumb")
             .join(&thumb_name);
         if thumb_path.exists() {
-            if let Ok(data) = fs::read(&thumb_path) {
+            if let Some(data) = read_stable_file(&thumb_path) {
                 return Some(MediaResult {
                     media_type: "image".into(),
                     data: Some(base64::Engine::encode(
@@ -176,7 +199,7 @@ fn get_image_thumbnail(
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with(&prefix) {
-                    if let Ok(data) = fs::read(entry.path()) {
+                    if let Some(data) = read_stable_file(&entry.path()) {
                         return Some(MediaResult {
                             media_type: "image".into(),
                             data: Some(base64::Engine::encode(
@@ -304,7 +327,7 @@ fn resolve_xor_byte(
             if !name.ends_with("_t.dat") {
                 continue;
             }
-            if let Ok(sib) = fs::read(entry.path()) {
+            if let Some(sib) = read_stable_file(&entry.path()) {
                 if sib.len() < 15 || sib[..6] != DAT_MAGIC {
                     continue;
                 }
@@ -650,49 +673,19 @@ fn decrypt_and_return(
     image_keys: &ImageKeys,
     local_id: i64,
 ) -> MediaResult {
-    let dat = match fs::read(dat_path) {
-        Ok(d) => d,
-        Err(_) => {
-            return MediaResult {
-                media_type: "image".into(),
-                data: None,
-                url: None,
-                format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
-                source: None,
-                error_code: None,
-            }
-        }
+    let dat = match read_stable_file(Path::new(dat_path)) {
+        Some(d) => d,
+        None => return pending_image(local_id, "IMAGE_NOT_STABLE"),
     };
 
     let xor_byte = match resolve_xor_byte(dat_path, &dat, image_keys) {
         Some(xb) => xb,
-        None => {
-            return MediaResult {
-                media_type: "image".into(),
-                data: None,
-                url: None,
-                format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
-                source: None,
-                error_code: None,
-            }
-        }
+        None => return pending_image(local_id, "IMAGE_XOR_KEY_UNAVAILABLE"),
     };
 
     let decrypted = match decrypt_dat(&dat, &image_keys.aes_key_hex, xor_byte) {
         Some(d) => d,
-        None => {
-            return MediaResult {
-                media_type: "image".into(),
-                data: None,
-                url: None,
-                format: "jpeg".into(),
-                filename: format!("msg_{local_id}.jpg"),
-                source: None,
-                error_code: None,
-            }
-        }
+        None => return pending_image(local_id, "IMAGE_DECRYPTION_FAILED"),
     };
 
     let (format, ext) = detect_image_format(&decrypted);
@@ -721,7 +714,7 @@ fn decrypt_and_return(
         // Try _t.dat thumbnail
         let thumb_path = dat_path.replace(".dat", "_t.dat");
         if Path::new(&thumb_path).exists() {
-            if let Ok(thumb_dat) = fs::read(&thumb_path) {
+            if let Some(thumb_dat) = read_stable_file(Path::new(&thumb_path)) {
                 if let Some(xb2) = resolve_xor_byte(&thumb_path, &thumb_dat, image_keys) {
                     if let Some(dec) =
                         decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2)
@@ -1075,12 +1068,7 @@ pub fn get_message_media(
             }
 
             // Image exists but can't be retrieved
-            pending_with(
-                "image",
-                "jpeg",
-                format!("msg_{local_id}.jpg"),
-                "IMAGE_RESOURCE_UNAVAILABLE",
-            )
+            pending_image(local_id, "IMAGE_RESOURCE_UNAVAILABLE")
         }
         43 => {
             // Video

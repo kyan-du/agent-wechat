@@ -2,22 +2,46 @@ import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 
+// These errors mean WeChat has not finished materializing the local media yet.
+// Validation and authentication failures remain terminal and are returned immediately.
+const RETRYABLE_MEDIA_ERRORS = new Set([
+  "MEDIA_NOT_DOWNLOADED",
+  "IMAGE_RESOURCE_UNAVAILABLE",
+  "FILE_NOT_DOWNLOADED",
+  "VOICE_NOT_DOWNLOADED",
+  "IMAGE_NOT_STABLE",
+  "IMAGE_XOR_KEY_UNAVAILABLE",
+  "IMAGE_DECRYPTION_FAILED",
+]);
+
+export const DEFAULT_MEDIA_POLL_ATTEMPTS = 30;
+export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 1000;
+
+function isRetryable(result: MediaResult): boolean {
+  return result.type === "pending" ||
+    (result.data === undefined && result.errorCode !== undefined && RETRYABLE_MEDIA_ERRORS.has(result.errorCode));
+}
+
 export async function pollMedia(
   client: MediaClient,
   chatId: string,
   localId: number,
   log?: { info?: (...args: any[]) => void },
-  maxAttempts = 15,
-  intervalMs = 1000,
+  maxAttempts = DEFAULT_MEDIA_POLL_ATTEMPTS,
+  intervalMs = DEFAULT_MEDIA_POLL_INTERVAL_MS,
 ): Promise<MediaResult | null> {
+  let lastResult: MediaResult | undefined;
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const result = await client.getMedia(chatId, localId);
+    lastResult = result;
     if (result.type === "unsupported") return result;
-    if (result.data || result.errorCode && result.type !== "pending") return result;
+    if (result.data || !isRetryable(result)) return result;
     if (attempt < maxAttempts) {
-      log?.info?.(`[wechat:media] pending attempt=${attempt}/${maxAttempts}`);
+      log?.info?.(`[wechat:media] pending attempt=${attempt}/${maxAttempts} elapsedMs=${Date.now() - startedAt}`);
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
-  return null;
+  log?.info?.(`[wechat:media] pending exhausted attempts=${maxAttempts} elapsedMs=${Date.now() - startedAt}`);
+  return lastResult ?? null;
 }
