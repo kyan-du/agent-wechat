@@ -88,7 +88,7 @@ export async function observeDelivery(attempt: DeliveryAttempt, observation: Del
   if (observation.type !== 1 || await payloadDigest(observation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const observed = await advanceDelivery(current, "observed_in_chat", "target_sender_and_payload_match", now);
   const confirmed = await advanceDelivery(observed, "confirmed", "observation_confirmed", now);
-  return Object.freeze({ ...confirmed, observedLocalId: observation.localId });
+  return validateAttempt({ ...confirmed, observedLocalId: observation.localId });
 }
 
 export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause): boolean {

@@ -72,6 +72,16 @@ test("advanceDelivery rejects terminal causes without matching commit evidence",
   await assert.rejects(() => advance(submitted, "failed", "pre_commit_failure"), /INVALID_DELIVERY_COMMIT_EVIDENCE|INVALID_DELIVERY_TRANSITION_EDGE/);
 });
 
+test("final observations are schema-valid and deeply immutable", async () => {
+  const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+  const result = await observeDelivery(attempt, { chatId: "chat", localId: 8, serverId: 9, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_self", content: "hello" });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.transitions), true);
+  assert.equal(Object.isFrozen(result.transitions[0]), true);
+  assert.equal(result.observedLocalId, 8);
+  assert.throws(() => (result as any).targetChatId = "tampered", TypeError);
+});
+
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"), undefined);
   const invalidTime = { ...attempt, updatedAt: "2026-01-01T00:00:00Z", transitions: [{ ...attempt.transitions[0], at: "2026-01-01T00:00:01Z" }] };
