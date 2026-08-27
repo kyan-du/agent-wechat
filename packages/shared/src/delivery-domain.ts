@@ -167,6 +167,8 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
 
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, provenance: TrustedSenderProvenance, now = new Date()): Promise<DeliveryAttempt> {
   const current = await authenticateAttempt(attempt, provenance);
+  if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
+  if (to === "failed" && reason === "pre_commit_failure" && current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   if (!canAdvanceDelivery(current.state, to, reason)) return current;
   const timestamp = now.toISOString();
   const { integrityTag: _integrityTag, ...unsigned } = current;

@@ -16,8 +16,8 @@ const shared = await import("./index.ts");
 test("package root exports the authenticated delivery boundary without capability issuance", () => {
   assert.equal(typeof shared.createAuthenticatedSenderBoundary, "function");
   assert.equal(typeof shared.issueTrustedSenderProvenance, "function");
-  assert.equal(typeof shared.createAuthenticatedSessionAdapter, "function");
-  assert.equal(typeof shared.createAuthenticatedSessionStore, "function");
-  assert.equal(typeof shared.restoreAuthenticatedSessionAdapter, "function");
+  assert.equal("createAuthenticatedSessionAdapter" in shared, false);
+  assert.equal("createAuthenticatedSessionStore" in shared, false);
+  assert.equal("restoreAuthenticatedSessionAdapter" in shared, false);
   assert.equal("issueAuthenticatedSessionCapability" in shared, false);
 });

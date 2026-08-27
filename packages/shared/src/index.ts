@@ -31,16 +31,8 @@ export {
   type TrustedSenderProvenance,
 } from "./delivery-domain.js";
 
-export {
-  createAuthenticatedSessionAdapter,
-  createAuthenticatedSessionStore,
-  restoreAuthenticatedSessionAdapter,
-  type AuthenticatedSessionAdapter,
-  type AuthenticatedSessionRecord,
-  type AuthenticatedSessionStore,
-  type AuthenticatedSessionStoreBackend,
-  type AuthenticatedSessionStoreSnapshot,
-} from "./authenticated-session.js";
+// The authenticated-session adapter is intentionally not exported from the
+// public package root; the real session implementation owns its construction.
 
 // Export HTTP client
 export {

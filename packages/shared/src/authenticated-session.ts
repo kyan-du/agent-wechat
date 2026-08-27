@@ -7,17 +7,17 @@ export type AuthenticatedSessionCapability = {
 };
 
 /**
- * Backend-owned handle for protected durable session state. The backend must
- * protect key material and make writes atomic before returning successfully.
+ * Adapter-owned persistence boundary. Implementations must protect key
+ * material and atomically compare-and-swap the complete snapshot.
  */
 export type AuthenticatedSessionStoreBackend = {
   readonly read: () => AuthenticatedSessionStoreSnapshot | undefined;
-  /** Must durably commit the complete replacement snapshot or throw. */
-  readonly write: (snapshot: AuthenticatedSessionStoreSnapshot) => void;
+  readonly compareAndSwap: (expectedRevision: number | null, snapshot: AuthenticatedSessionStoreSnapshot) => boolean;
 };
 
 export type AuthenticatedSessionStoreSnapshot = Readonly<{
   version: 1;
+  revision: number;
   generation: number;
   closed: boolean;
   current?: Readonly<{
@@ -31,7 +31,7 @@ export type AuthenticatedSessionStoreSnapshot = Readonly<{
   revokedKeyIds: readonly string[];
 }>;
 
-/** Opaque handle implemented by the authenticated adapter's protected durable store. */
+/** Opaque handle implemented by the authenticated session adapter. */
 export type AuthenticatedSessionStore = {
   readonly [authenticatedSessionStoreBrand]: never;
 };
@@ -65,6 +65,7 @@ type StoreRecord = {
   activeToken?: object;
   readonly revokedKeyIds: Set<string>;
   generation: number;
+  revision: number;
   closed: boolean;
 };
 
@@ -106,24 +107,25 @@ function newKey(identity: AuthenticatedSenderIdentity, generation: number): Pers
 
 function validSnapshot(snapshot: AuthenticatedSessionStoreSnapshot | undefined): AuthenticatedSessionStoreSnapshot | undefined {
   if (snapshot === undefined) return undefined;
-  if (!snapshot || snapshot.version !== 1 || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 0 || typeof snapshot.closed !== "boolean" || !Array.isArray(snapshot.revokedKeyIds)) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
+  if (!snapshot || snapshot.version !== 1 || !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0 || !Number.isSafeInteger(snapshot.generation) || snapshot.generation < 0 || typeof snapshot.closed !== "boolean" || !Array.isArray(snapshot.revokedKeyIds)) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
   const revokedKeyIds = snapshot.revokedKeyIds.map((keyId) => {
     bytes(keyId, 16);
     return keyId;
   });
   if (new Set(revokedKeyIds).size !== revokedKeyIds.length) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
-  if (!snapshot.current) return Object.freeze({ version: 1, generation: snapshot.generation, closed: snapshot.closed, revokedKeyIds: Object.freeze(revokedKeyIds) });
+  if (!snapshot.current) return Object.freeze({ version: 1, revision: snapshot.revision, generation: snapshot.generation, closed: snapshot.closed, revokedKeyIds: Object.freeze(revokedKeyIds) });
   const current = snapshot.current;
-  if (!Number.isSafeInteger(current.generation) || current.generation <= 0 || current.generation > snapshot.generation || !current.accountId.trim() || !current.sessionId.trim() || !current.senderId.trim()) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
+  if (snapshot.closed || !Number.isSafeInteger(current.generation) || current.generation <= 0 || current.generation > snapshot.generation || !current.accountId.trim() || !current.sessionId.trim() || !current.senderId.trim()) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
   bytes(current.keyId, 16);
   bytes(current.integrityKey, 32);
   if (revokedKeyIds.includes(current.keyId)) throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
-  return Object.freeze({ version: 1, generation: snapshot.generation, closed: snapshot.closed, current: Object.freeze({ ...current }), revokedKeyIds: Object.freeze(revokedKeyIds) });
+  return Object.freeze({ version: 1, revision: snapshot.revision, generation: snapshot.generation, closed: snapshot.closed, current: Object.freeze({ ...current }), revokedKeyIds: Object.freeze(revokedKeyIds) });
 }
 
 function snapshotFromState(state: StoreRecord): AuthenticatedSessionStoreSnapshot {
   return Object.freeze({
     version: 1,
+    revision: state.revision,
     generation: state.generation,
     closed: state.closed,
     ...(state.current ? { current: Object.freeze({ keyId: state.current.keyId, integrityKey: hex(state.current.integrityKey), accountId: state.current.accountId, sessionId: state.current.sessionId, senderId: state.current.senderId, generation: state.current.generation }) } : {}),
@@ -139,40 +141,38 @@ function stateFromSnapshot(backend: AuthenticatedSessionStoreBackend, snapshot: 
     ...(current ? { current: Object.freeze({ ...current, integrityKey: bytes(current.integrityKey, 32) }) } : {}),
     revokedKeyIds: new Set(validated?.revokedKeyIds ?? []),
     generation: validated?.generation ?? 0,
+    revision: validated?.revision ?? 0,
     closed: validated?.closed ?? false,
   };
 }
 
 function commitState(state: StoreRecord, next: { current?: PersistedKey; generation: number; closed: boolean; revokedKeyIds: Set<string> }): void {
-  const current = state.current;
-  const generation = state.generation;
-  const closed = state.closed;
-  const revokedKeyIds = new Set(state.revokedKeyIds);
+  const persisted = validSnapshot(state.backend.read());
+  const persistedRevision = persisted?.revision ?? 0;
+  if (persistedRevision !== state.revision) throw new Error("CONCURRENT_AUTHENTICATED_SESSION_UPDATE");
+  const nextState = { ...state, current: next.current, generation: next.generation, closed: next.closed, revokedKeyIds: next.revokedKeyIds, revision: state.revision + 1 } as StoreRecord;
+  const snapshot = snapshotFromState(nextState);
+  if (!state.backend.compareAndSwap(state.revision, snapshot)) throw new Error("CONCURRENT_AUTHENTICATED_SESSION_UPDATE");
   state.current = next.current;
   state.generation = next.generation;
   state.closed = next.closed;
+  state.revision = nextState.revision;
   state.revokedKeyIds.clear();
   for (const keyId of next.revokedKeyIds) state.revokedKeyIds.add(keyId);
-  try {
-    state.backend.write(snapshotFromState(state));
-  } catch (error) {
-    state.current = current;
-    state.generation = generation;
-    state.closed = closed;
-    state.revokedKeyIds.clear();
-    for (const keyId of revokedKeyIds) state.revokedKeyIds.add(keyId);
-    throw error;
-  }
 }
 
-/** Create a store backed by adapter-owned protected durable storage. */
+/** Internal construction point used by the authenticated session adapter. */
 export function createAuthenticatedSessionStore(backend: AuthenticatedSessionStoreBackend): AuthenticatedSessionStore {
-  if (!backend || typeof backend.read !== "function" || typeof backend.write !== "function") throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
+  if (!backend || typeof backend.read !== "function" || typeof backend.compareAndSwap !== "function") throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
+  let persisted = validSnapshot(backend.read());
+  if (!persisted) {
+    const initial: AuthenticatedSessionStoreSnapshot = Object.freeze({ version: 1, revision: 0, generation: 0, closed: false, revokedKeyIds: Object.freeze([]) });
+    if (!backend.compareAndSwap(null, initial)) persisted = validSnapshot(backend.read());
+    else persisted = initial;
+  }
+  if (!persisted) throw new Error("CONCURRENT_AUTHENTICATED_SESSION_UPDATE");
   const store = Object.freeze({});
-  const persisted = backend.read();
-  const state = stateFromSnapshot(backend, persisted);
-  STORES.set(store, state);
-  if (persisted === undefined) backend.write(snapshotFromState(state));
+  STORES.set(store, stateFromSnapshot(backend, persisted));
   return store as AuthenticatedSessionStore;
 }
 
@@ -194,7 +194,6 @@ function createAdapter(resolveIdentity: () => AuthenticatedSenderIdentity | unde
 
   const revoke = (): void => {
     const state = storeRecord(store);
-    // A stale adapter must not be able to revoke a newer generation.
     if (state.closed || state.current?.keyId !== key.keyId || state.activeToken !== token) return;
     const revokedKeyIds = new Set(state.revokedKeyIds);
     revokedKeyIds.add(key.keyId);

@@ -18,7 +18,11 @@ function testStore() {
   let persisted: any;
   return createAuthenticatedSessionStore({
     read: () => persisted,
-    write: (snapshot: any) => { persisted = structuredClone(snapshot); },
+    compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
+      if ((persisted?.revision ?? null) !== expectedRevision) return false;
+      persisted = structuredClone(snapshot);
+      return true;
+    },
   });
 }
 
@@ -78,6 +82,13 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
   assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), true);
 });
 
+test("advanceDelivery rejects terminal causes without matching commit evidence", async () => {
+  const queued = await createQueuedDelivery("chat", "hello", trusted());
+  await assert.rejects(() => advance(queued, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_COMMIT_EVIDENCE/);
+  const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date(), undefined, trusted());
+  await assert.rejects(() => advance(submitted, "failed", "pre_commit_failure"), /INVALID_DELIVERY_COMMIT_EVIDENCE/);
+});
+
 test("sender provenance requires the authenticated session capability", async () => {
   assert.throws(
     () => createAuthenticatedSenderBoundary({} as never),
@@ -118,7 +129,11 @@ test("sender provenance requires the authenticated session capability", async ()
 
 test("persisted attempts survive adapter restoration with the protected key state", async () => {
   let persisted: any;
-  const backend = { read: () => persisted, write: (snapshot: any) => { persisted = structuredClone(snapshot); } };
+  const backend = { read: () => persisted, compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
+    if ((persisted?.revision ?? null) !== expectedRevision) return false;
+    persisted = structuredClone(snapshot);
+    return true;
+  } };
   const store = createAuthenticatedSessionStore(backend);
   const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store);
   const originalBoundary = createAuthenticatedSenderBoundary(originalAdapter.capability);
@@ -135,7 +150,11 @@ test("persisted attempts survive adapter restoration with the protected key stat
 
 test("rotating a session revokes old attempts and restores only the new generation", async () => {
   let persisted: any;
-  const backend = { read: () => persisted, write: (snapshot: any) => { persisted = structuredClone(snapshot); } };
+  const backend = { read: () => persisted, compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
+    if ((persisted?.revision ?? null) !== expectedRevision) return false;
+    persisted = structuredClone(snapshot);
+    return true;
+  } };
   const store = createAuthenticatedSessionStore(backend);
   const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), store);
   const oldProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(adapter.capability), new Date("2025-01-01T00:00:00Z"));
@@ -161,15 +180,41 @@ test("session logout and re-authentication revoke old provenance", async () => {
   assert.throws(() => createAuthenticatedSessionAdapter(() => identity, store), /REVOKED_AUTHENTICATED_SESSION/);
 });
 
+test("stale authenticated session stores cannot overwrite a newer generation", () => {
+  let persisted: any;
+  const backend = { read: () => persisted, compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
+    if ((persisted?.revision ?? null) !== expectedRevision) return false;
+    persisted = structuredClone(snapshot);
+    return true;
+  } };
+  const firstStore = createAuthenticatedSessionStore(backend);
+  const secondStore = createAuthenticatedSessionStore(backend);
+  const first = createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), firstStore);
+  assert.throws(
+    () => createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), secondStore),
+    /CONCURRENT_AUTHENTICATED_SESSION_UPDATE/,
+  );
+  const rotated = first.rotate();
+  assert.throws(
+    () => createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), secondStore),
+    /CONCURRENT_AUTHENTICATED_SESSION_UPDATE/,
+  );
+  assert.ok(rotated.capability);
+});
+
 test("store persistence rejects replayed or malformed authenticated state", async () => {
   let persisted: any;
-  const backend = { read: () => persisted, write: (snapshot: any) => { persisted = structuredClone(snapshot); } };
+  const backend = { read: () => persisted, compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
+    if ((persisted?.revision ?? null) !== expectedRevision) return false;
+    persisted = structuredClone(snapshot);
+    return true;
+  } };
   const store = createAuthenticatedSessionStore(backend);
   const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), store);
   adapter.revoke();
   assert.equal(persisted.closed, true);
   assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), store), /REVOKED_AUTHENTICATED_SESSION/);
-  assert.throws(() => createAuthenticatedSessionStore({ read: () => ({ ...persisted, current: { ...persisted.current, integrityKey: "bad" } }), write: () => {} }), /INVALID_AUTHENTICATED_SESSION_STORE/);
+  assert.throws(() => createAuthenticatedSessionStore({ read: () => ({ ...persisted, current: { ...persisted.current, integrityKey: "bad" } }), compareAndSwap: () => false }), /INVALID_AUTHENTICATED_SESSION_STORE/);
 });
 
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {
