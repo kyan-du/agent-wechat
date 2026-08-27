@@ -8,6 +8,7 @@ export type DeliveryCause = "send_accepted" | "target_sender_and_payload_match" 
 
 export type DeliveryAttempt = {
   schemaVersion: typeof DELIVERY_DOMAIN_SCHEMA_VERSION;
+  senderId: string;
   targetChatId: string;
   payloadDigest: string;
   state: DeliveryState;
@@ -58,9 +59,9 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   return Object.freeze({ ...parsed, transitions: Object.freeze(parsed.transitions.map((transition) => Object.freeze({ ...transition }))) });
 }
 
-export async function createQueuedDelivery(targetChatId: string, payload: string, now = new Date(), idempotencyKey?: string): Promise<DeliveryAttempt> {
+export async function createQueuedDelivery(targetChatId: string, payload: string, senderId: string, now = new Date(), idempotencyKey?: string): Promise<DeliveryAttempt> {
   const timestamp = now.toISOString();
-  return validateAttempt({ schemaVersion: 1, targetChatId, payloadDigest: await payloadDigest(payload), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [] });
+  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [] });
 }
 
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): Promise<DeliveryAttempt> {
@@ -72,17 +73,18 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   return validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
 }
 
-export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
+export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
-  return validateAttempt({ schemaVersion: 1, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
+  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
 }
 
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (current.state !== "submitted" && current.state !== "observed_in_chat") return current;
   if (observation.chatId !== current.targetChatId) return advanceDelivery(current, "uncertain", "target_mismatch", now);
+  if (observation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
   if (observation.type !== 1 || await payloadDigest(observation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const observed = await advanceDelivery(current, "observed_in_chat", "target_sender_and_payload_match", now);
   const confirmed = await advanceDelivery(observed, "confirmed", "observation_confirmed", now);

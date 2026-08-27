@@ -218,7 +218,7 @@ export const deliveryCauseSchema = z.enum(["send_accepted", "target_sender_and_p
 export const deliveryTransitionSchema = z.object({ from: deliveryStateSchema, to: deliveryStateSchema, at: z.string().datetime(), reason: deliveryCauseSchema });
 export const deliveryAttemptSchema = z.object({
   schemaVersion: z.literal(1), idempotencyKey: idempotencyKeySchema.optional(),
-  targetChatId: z.string().trim().min(1).max(512),
+  senderId: z.string().trim().min(1).max(512), targetChatId: z.string().trim().min(1).max(512),
   payloadDigest: z.string().regex(/^[a-f0-9]{64}$/), state: deliveryStateSchema,
   commitAttempted: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   observedLocalId: z.number().int().nonnegative().optional(), transitions: z.array(deliveryTransitionSchema).max(32),
