@@ -13,13 +13,22 @@ export {
 
 export {
   DELIVERY_DOMAIN_SCHEMA_VERSION,
+  advanceDelivery,
   canAdvanceDelivery,
+  createQueuedDelivery,
+  issueTrustedSenderProvenance,
   deliveryAfterSend,
   observeDelivery,
   payloadDigest,
+  type AuthenticatedSenderBoundary,
+  type AuthenticatedSenderIdentity,
+  type AuthenticatedSenderResolver,
   type DeliveryAttempt,
+  type DeliveryCause,
   type DeliveryObservation,
   type DeliveryState,
+  type SenderProvenanceVerifier,
+  type TrustedSenderProvenance,
 } from "./delivery-domain.js";
 
 // Export HTTP client
