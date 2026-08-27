@@ -54,9 +54,9 @@ test("advanceDelivery records allowed edges and rejects skipped/backward edges",
   const composing = await advance(queued, "composing", "send_accepted");
   assert.equal(composing.state, "composing");
   await assert.rejects(() => advance(composing, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
-  const submittedFromComposing = await submitComposingDelivery(composing, { success: true, commitAttempted: true, resultId: "result-1" }, new Date());
+  const submittedFromComposing = await submitComposingDelivery(composing, { success: true, commitAttempted: true, resultId: "result-1", attemptId: composing.attemptId }, new Date());
   assert.equal(submittedFromComposing.state, "submitted");
-  assert.deepEqual(JSON.parse(JSON.stringify(submittedFromComposing)).initialOutcome, { source: "send_result", success: true, commitAttempted: true, resultId: "result-1" });
+  assert.deepEqual(JSON.parse(JSON.stringify(submittedFromComposing)).initialOutcome, { source: "send_result", success: true, commitAttempted: true, resultId: "result-1", attemptId: composing.attemptId });
   const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
   assert.equal((await advance(submitted, "confirmed", "observation_confirmed")).state, "submitted");
   const observed = await advance(submitted, "observed_in_chat", "target_sender_and_payload_match");
@@ -95,7 +95,7 @@ test("delivery outcomes use an explicit initial state/cause matrix", async () =>
     assert.equal(attempt.transitions[0]?.reason, reason);
   }
   const valid = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
-  const malformed = { ...valid, state: "failed" as const, commitAttempted: true, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: true }, transitions: [{ ...valid.transitions[0], to: "failed" as const, reason: "pre_commit_failure" as const }] };
+  const malformed = { ...valid, state: "failed" as const, commitAttempted: true, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: true, resultId: "bad", attemptId: valid.attemptId }, transitions: [{ ...valid.transitions[0], to: "failed" as const, reason: "pre_commit_failure" as const }] };
   await assert.rejects(() => advance(malformed, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME|INVALID_DELIVERY_COMMIT_EVIDENCE/);
 
   const fabricatedSubmitted = {
@@ -117,17 +117,17 @@ test("advanceDelivery rejects terminal causes without matching commit evidence",
 test("submitted evidence must be a successful send result", async () => {
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self");
   const composing = await advance(queued, "composing", "send_accepted");
-  const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false } };
+  const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false, resultId: "forged", attemptId: composing.attemptId } };
   await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME|INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
-  assert.equal((await submitComposingDelivery(composing, { success: false, commitAttempted: false, resultId: "result-fail" })).state, "failed");
-  await assert.rejects(() => submitComposingDelivery(composing, { success: true, commitAttempted: false, resultId: "result-conflict" }), /INVALID_DELIVERY_RESULT_EVIDENCE/);
+  assert.equal((await submitComposingDelivery(composing, { success: false, commitAttempted: false, resultId: "result-fail", attemptId: composing.attemptId })).state, "failed");
+  await assert.rejects(() => submitComposingDelivery(composing, { success: true, commitAttempted: false, resultId: "result-conflict", attemptId: composing.attemptId }), /INVALID_DELIVERY_RESULT_EVIDENCE/);
 });
 
 test("composing terminal transitions require the result-aware operation", async () => {
   const composing = await advance(await createQueuedDelivery("chat", "hello", "wxid_self"), "composing", "send_accepted");
-  const successful = await submitComposingDelivery(composing, { success: true, commitAttempted: true, resultId: "result-2" }, new Date());
-  assert.deepEqual(await submitComposingDelivery(successful, { success: true, commitAttempted: true, resultId: "result-2" }), successful);
-  await assert.rejects(() => submitComposingDelivery(successful, { success: true, commitAttempted: true, resultId: "result-other" }), /INVALID_DELIVERY_SUBMISSION_STATE/);
+  const successful = await submitComposingDelivery(composing, { success: true, commitAttempted: true, resultId: "result-2", attemptId: composing.attemptId }, new Date());
+  assert.deepEqual(await submitComposingDelivery(successful, { success: true, commitAttempted: true, resultId: "result-2", attemptId: composing.attemptId }), successful);
+  await assert.rejects(() => submitComposingDelivery(successful, { success: true, commitAttempted: true, resultId: "result-other", attemptId: composing.attemptId }), /INVALID_DELIVERY_SUBMISSION_STATE|INVALID_DELIVERY_RESULT_CONFLICT/);
   const clonedSuccessful = JSON.parse(JSON.stringify(successful));
   assert.equal((await observeDelivery(clonedSuccessful, { chatId: "chat", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_self", content: "hello" })).state, "confirmed");
   await assert.rejects(() => advance(composing, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY|INVALID_DELIVERY_COMMIT_EVIDENCE/);
