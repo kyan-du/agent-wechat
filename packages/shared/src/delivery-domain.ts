@@ -51,6 +51,7 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   const lastTransition = parsed.transitions.at(-1);
   if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  if (parsed.transitions.length > 0 && parsed.transitions[0]?.from !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_ORIGIN");
   if ((parsed.state === "queued" || parsed.state === "composing") && parsed.initialOutcome !== undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   const firstTransition = parsed.transitions[0];
   if (parsed.state !== "queued" && parsed.state !== "composing") {

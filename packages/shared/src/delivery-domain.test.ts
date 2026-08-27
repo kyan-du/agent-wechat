@@ -157,6 +157,27 @@ test("observation chronology is bounded by attempt creation and observation time
   assert.equal((await observeDelivery(attempt, { ...observation, timestamp: "2026-01-01T00:00:01Z" }, new Date("2026-01-01T00:00:02Z"))).state, "confirmed");
 });
 
+test("runtime validation rejects histories that bypass the queued origin", async () => {
+  const digest = await (await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"))).payloadDigest;
+  const forged = {
+    schemaVersion: 1 as const,
+    senderId: "wxid_self",
+    targetChatId: "chat",
+    payloadDigest: digest,
+    state: "confirmed" as const,
+    commitAttempted: false,
+    initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false },
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:02Z",
+    transitions: [
+      { from: "submitted" as const, to: "observed_in_chat" as const, at: "2026-01-01T00:00:01Z", reason: "target_sender_and_payload_match" as const },
+      { from: "observed_in_chat" as const, to: "confirmed" as const, at: "2026-01-01T00:00:02Z", reason: "observation_confirmed" as const },
+    ],
+  };
+  await assert.rejects(() => advance(forged, "confirmed", "observation_confirmed"), /INVALID_DELIVERY_TRANSITION_ORIGIN/);
+  await assert.rejects(() => observeDelivery(JSON.parse(JSON.stringify(forged)), { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_self", content: "hello" }), /INVALID_DELIVERY_TRANSITION_ORIGIN/);
+});
+
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"), undefined);
   const invalidTime = { ...attempt, updatedAt: "2026-01-01T00:00:00Z", transitions: [{ ...attempt.transitions[0], at: "2026-01-01T00:00:01Z" }] };
