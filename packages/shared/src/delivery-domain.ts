@@ -81,8 +81,8 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
-  if ((to === "failed" && reason === "pre_commit_failure") || (to === "uncertain" && reason === "post_commit_uncertain" && (current.state === "queued" || current.state === "composing"))) {
-    if (!TERMINAL_STATES.has(current.state) && canAdvanceDelivery(current.state, to, reason, current.commitAttempted, current.initialOutcome)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
+  if ((to === "failed" && reason === "pre_commit_failure" && (current.state === "queued" || current.state === "composing")) || (to === "uncertain" && reason === "post_commit_uncertain" && (current.state === "queued" || current.state === "composing"))) {
+    throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   }
   if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted, current.initialOutcome)) return current;
   const timestamp = now.toISOString();
@@ -103,10 +103,14 @@ export async function observeDelivery(attempt: DeliveryAttempt, observation: Del
   if (current.state !== "submitted" && current.state !== "observed_in_chat") return current;
   if (checkedObservation.chatId !== current.targetChatId) return advanceDelivery(current, "uncertain", "target_mismatch", now);
   if (checkedObservation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
-  if (checkedObservation.type !== 1 || await payloadDigest(checkedObservation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
+  if (normalizeDeliveryType(checkedObservation.type) !== 1 || await payloadDigest(checkedObservation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const observed = await advanceDelivery(current, "observed_in_chat", "target_sender_and_payload_match", now);
   const confirmed = await advanceDelivery(observed, "confirmed", "observation_confirmed", now);
   return validateAttempt({ ...confirmed, observedLocalId: checkedObservation.localId });
+}
+
+function normalizeDeliveryType(type: number): number {
+  return (type % 0x1_0000_0000) & 0x7fff_ffff;
 }
 
 export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause, commitAttempted?: boolean, initialOutcome?: DeliveryInitialOutcome): boolean {
