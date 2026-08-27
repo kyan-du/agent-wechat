@@ -26,9 +26,6 @@ export {
   type DeliveryState,
 } from "./delivery-domain.js";
 
-// The authenticated-session adapter is intentionally not exported from the
-// public package root; the real session implementation owns its construction.
-
 // Export HTTP client
 export {
   WeChatClient,
