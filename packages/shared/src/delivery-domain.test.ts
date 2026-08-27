@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 
-const { createAuthenticatedSessionAdapter, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
+const { createAuthenticatedSessionAdapter, restoreAuthenticatedSessionAdapter } = await import("./internal/authenticated-session.ts");
 const { advanceDelivery, canAdvanceDelivery, createAuthenticatedSenderBoundary, createQueuedDelivery, issueTrustedSenderProvenance, deliveryAfterSend, observeDelivery } = await import("./delivery-domain.ts");
 
 function testBackend() {

@@ -1,4 +1,4 @@
-import type { AuthenticatedSenderIdentity } from "./delivery-domain.js";
+import type { AuthenticatedSenderIdentity } from "../delivery-domain.js";
 
 declare const authenticatedSessionCapabilityBrand: unique symbol;
 declare const authenticatedSessionStoreBrand: unique symbol;

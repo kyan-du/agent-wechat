@@ -1,5 +1,5 @@
-import { resolveAuthenticatedSessionCapability } from "./authenticated-session.js";
-import type { AuthenticatedSessionCapability } from "./authenticated-session.js";
+import { resolveAuthenticatedSessionCapability } from "./internal/authenticated-session.js";
+import type { AuthenticatedSessionCapability } from "./internal/authenticated-session.js";
 import { deliveryAttemptSchema } from "./schemas/index.js";
 import type { Message, SendResult } from "./types/index.js";
 
@@ -8,7 +8,7 @@ export type DeliveryState = "queued" | "composing" | "submitted" | "observed_in_
 export type DeliveryCause = "send_accepted" | "target_sender_and_payload_match" | "observation_confirmed" | "target_mismatch" | "sender_unverified" | "payload_mismatch" | "pre_commit_failure" | "post_commit_uncertain";
 export type AuthenticatedSenderIdentity = { readonly accountId: string; readonly sessionId: string; readonly senderId: string };
 export type TrustedSenderProvenance = AuthenticatedSenderIdentity & { readonly verifiedAt: string; readonly __trustedSenderProvenance: true };
-export type { AuthenticatedSessionCapability } from "./authenticated-session.js";
+export type { AuthenticatedSessionCapability } from "./internal/authenticated-session.js";
 declare const authenticatedSenderBoundaryBrand: unique symbol;
 export type AuthenticatedSenderBoundary = { readonly [authenticatedSenderBoundaryBrand]: never };
 

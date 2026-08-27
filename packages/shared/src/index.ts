@@ -15,20 +15,15 @@ export {
   DELIVERY_DOMAIN_SCHEMA_VERSION,
   advanceDelivery,
   canAdvanceDelivery,
-  createAuthenticatedSenderBoundary,
   createQueuedDelivery,
-  issueTrustedSenderProvenance,
   deliveryAfterSend,
   observeDelivery,
   payloadDigest,
-  type AuthenticatedSenderBoundary,
   type AuthenticatedSenderIdentity,
-  type AuthenticatedSessionCapability,
   type DeliveryAttempt,
   type DeliveryCause,
   type DeliveryObservation,
   type DeliveryState,
-  type TrustedSenderProvenance,
 } from "./delivery-domain.js";
 
 // The authenticated-session adapter is intentionally not exported from the
