@@ -1,4 +1,4 @@
-import { resolveAuthenticatedSessionCapability } from "./internal/authenticated-session.js";
+import { activeSessionFor } from "./internal/delivery-domain-trust.js";
 import type { AuthenticatedSessionCapability } from "./internal/authenticated-session.js";
 import { deliveryAttemptSchema } from "./schemas/index.js";
 import type { Message, SendResult } from "./types/index.js";
@@ -32,9 +32,6 @@ export type DeliveryAttempt = {
 export type DeliveryObservation = Pick<Message, "chatId" | "localId" | "serverId" | "timestamp" | "type" | "sender" | "content">;
 export type DeliveryTransition = { from: DeliveryState; to: DeliveryState; at: string; reason: DeliveryCause };
 
-const TRUSTED_PROVENANCES = new WeakSet<object>();
-const AUTHENTICATED_BOUNDARIES = new WeakMap<object, ReturnType<typeof resolveAuthenticatedSessionCapability>>();
-const PROVENANCE_RECORDS = new WeakMap<object, { session: NonNullable<ReturnType<typeof resolveAuthenticatedSessionCapability>> }>();
 const TERMINAL_STATES = new Set<DeliveryState>(["confirmed", "uncertain", "failed"]);
 const EDGE_CAUSES = new Map<string, ReadonlySet<DeliveryCause>>([
   ["queued:composing", new Set(["send_accepted"])], ["queued:submitted", new Set(["send_accepted"])], ["composing:submitted", new Set(["send_accepted"])],
@@ -54,25 +51,6 @@ async function integrityTag(unsigned: Omit<DeliveryAttempt, "integrityTag">, key
   const cryptoKey = await globalThis.crypto.subtle.importKey("raw", new Uint8Array(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const mac = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(canonicalUnsignedAttempt(unsigned)));
   return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function createAuthenticatedSenderBoundary(capability: AuthenticatedSessionCapability): AuthenticatedSenderBoundary {
-  const session = resolveAuthenticatedSessionCapability(capability);
-  if (!session) throw new Error("UNAUTHENTICATED_SESSION_CAPABILITY");
-  const boundary = Object.freeze({});
-  AUTHENTICATED_BOUNDARIES.set(boundary, session);
-  return boundary as AuthenticatedSenderBoundary;
-}
-
-function issueTrustedSenderProvenance(boundary: AuthenticatedSenderBoundary, verifiedAt = new Date()): TrustedSenderProvenance {
-  const session = AUTHENTICATED_BOUNDARIES.get(boundary);
-  const identity = session?.resolveIdentity();
-  if (!session || session.revoked || !identity || !identity.accountId.trim() || !identity.sessionId.trim() || !identity.senderId.trim()) throw new Error("UNVERIFIED_SENDER_PROVENANCE");
-  if (!Number.isFinite(verifiedAt.getTime())) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
-  const provenance = Object.freeze({ ...identity, verifiedAt: verifiedAt.toISOString(), __trustedSenderProvenance: true as const });
-  TRUSTED_PROVENANCES.add(provenance);
-  PROVENANCE_RECORDS.set(provenance, { session });
-  return provenance;
 }
 
 const MAX_ATTEMPT_INPUT_BYTES = 64 * 1024;
@@ -133,14 +111,6 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   return validated as DeliveryAttempt;
 }
 
-function activeSessionFor(provenance: TrustedSenderProvenance): NonNullable<ReturnType<typeof resolveAuthenticatedSessionCapability>> {
-  const record = PROVENANCE_RECORDS.get(provenance);
-  if (!TRUSTED_PROVENANCES.has(provenance) || !record?.session || record.session.revoked) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
-  const identity = record.session.resolveIdentity();
-  if (!identity || identity.accountId !== provenance.accountId || identity.sessionId !== provenance.sessionId || identity.senderId !== provenance.senderId) throw new Error("REVOKED_SENDER_PROVENANCE");
-  return record.session;
-}
-
 async function authenticateAttempt(attempt: DeliveryAttempt, provenance: TrustedSenderProvenance): Promise<DeliveryAttempt> {
   const session = activeSessionFor(provenance);
   const normalized = validateAttempt(attempt);
@@ -158,7 +128,6 @@ async function buildAttempt(unsigned: Omit<DeliveryAttempt, "integrityTag">, pro
 }
 
 export async function createQueuedDelivery(targetChatId: string, payload: string, provenance: TrustedSenderProvenance, now = new Date(), idempotencyKey?: string): Promise<DeliveryAttempt> {
-  if (!TRUSTED_PROVENANCES.has(provenance)) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
   if (Date.parse(provenance.verifiedAt) > now.getTime()) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
   const timestamp = now.toISOString();
   const session = activeSessionFor(provenance);
@@ -176,7 +145,6 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
 }
 
 export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, now: Date, idempotencyKey: string | undefined, provenance: TrustedSenderProvenance): Promise<DeliveryAttempt> {
-  if (!TRUSTED_PROVENANCES.has(provenance)) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
   if (Date.parse(provenance.verifiedAt) > now.getTime()) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
