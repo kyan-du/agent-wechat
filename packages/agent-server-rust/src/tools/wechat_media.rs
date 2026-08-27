@@ -69,9 +69,12 @@ fn read_stable_file(path: &Path) -> Option<Vec<u8>> {
     if !before.is_file() || before.len() == 0 {
         return None;
     }
+    let before_modified = before.modified().ok()?;
     let data = fs::read(path).ok()?;
     let after = fs::metadata(path).ok()?;
-    if before.len() != after.len() || after.len() != data.len() as u64 {
+    if before.len() != after.len()
+        || before_modified != after.modified().ok()?
+        || after.len() != data.len() as u64 {
         return None;
     }
     Some(data)
