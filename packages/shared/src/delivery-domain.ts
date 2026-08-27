@@ -56,7 +56,7 @@ async function integrityTag(unsigned: Omit<DeliveryAttempt, "integrityTag">, key
   return [...new Uint8Array(mac)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function createAuthenticatedSenderBoundary(capability: AuthenticatedSessionCapability): AuthenticatedSenderBoundary {
+function createAuthenticatedSenderBoundary(capability: AuthenticatedSessionCapability): AuthenticatedSenderBoundary {
   const session = resolveAuthenticatedSessionCapability(capability);
   if (!session) throw new Error("UNAUTHENTICATED_SESSION_CAPABILITY");
   const boundary = Object.freeze({});
@@ -64,7 +64,7 @@ export function createAuthenticatedSenderBoundary(capability: AuthenticatedSessi
   return boundary as AuthenticatedSenderBoundary;
 }
 
-export function issueTrustedSenderProvenance(boundary: AuthenticatedSenderBoundary, verifiedAt = new Date()): TrustedSenderProvenance {
+function issueTrustedSenderProvenance(boundary: AuthenticatedSenderBoundary, verifiedAt = new Date()): TrustedSenderProvenance {
   const session = AUTHENTICATED_BOUNDARIES.get(boundary);
   const identity = session?.resolveIdentity();
   if (!session || session.revoked || !identity || !identity.accountId.trim() || !identity.sessionId.trim() || !identity.senderId.trim()) throw new Error("UNVERIFIED_SENDER_PROVENANCE");
