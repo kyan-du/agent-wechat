@@ -6,10 +6,12 @@ export type DeliveryState = "queued" | "composing" | "submitted" | "observed_in_
 export type AuthenticatedSenderIdentity = { readonly accountId: string; readonly sessionId: string; readonly senderId: string };
 export type DeliveryCause = "send_accepted" | "target_sender_and_payload_match" | "observation_confirmed" | "target_mismatch" | "sender_unverified" | "payload_mismatch" | "pre_commit_failure" | "post_commit_uncertain";
 
+// Completion identity is scoped to one durable attempt: attemptId + resultId.
 export type DeliveryInitialOutcome = {
   readonly source: "send_result";
   readonly success: boolean;
   readonly commitAttempted: boolean;
+  /** Transport completion ID, unique within this attempt rather than globally. */
   readonly resultId: string;
   readonly attemptId: string;
 };
@@ -111,6 +113,7 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   return next;
 }
 
+/** Apply one completion to a durable attempt; resultId uniqueness is scoped by attemptId. */
 export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted"> & { resultId: string; attemptId: string }, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (result.attemptId !== current.attemptId) throw new Error("INVALID_DELIVERY_RESULT_ID");
