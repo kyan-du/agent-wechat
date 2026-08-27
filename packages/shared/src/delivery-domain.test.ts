@@ -77,11 +77,11 @@ test("runtime validation rejects impossible delivery history, times, and IDs", a
   const invalidTime = { ...attempt, updatedAt: "2026-01-01T00:00:00Z", transitions: [{ ...attempt.transitions[0], at: "2026-01-01T00:00:01Z" }] };
   await assert.rejects(() => advance(invalidTime, "submitted", "send_accepted"), /INVALID_DELIVERY_TRANSITION_EDGE|INVALID_DELIVERY_TRANSITION_TIME/);
   const invalidId = { ...attempt, state: "confirmed" as const, observedLocalId: -1, transitions: [...attempt.transitions, { from: "submitted" as const, to: "observed_in_chat" as const, at: "2026-01-01T00:00:01Z", reason: "target_sender_and_payload_match" as const }, { from: "observed_in_chat" as const, to: "confirmed" as const, at: "2026-01-01T00:00:02Z", reason: "observation_confirmed" as const }] };
-  await assert.rejects(() => advance(invalidId, "confirmed", "observation_confirmed"), /INVALID_DELIVERY_TRANSITION_EDGE/);
+  await assert.rejects(() => advance(invalidId, "confirmed", "observation_confirmed"), /Number must be greater than or equal to 0/);
   const staleUpdate = { ...attempt, updatedAt: "2025-12-31T23:59:59Z" };
   await assert.rejects(() => advance(staleUpdate, "submitted", "send_accepted"), /INVALID_DELIVERY_TIME/);
 
   const oversized = { ...attempt, targetChatId: "x".repeat(70_000) };
-  assert.equal((await advance(oversized, "submitted", "send_accepted")).state, "submitted");
-  assert.equal((await advance({ ...attempt, unexpected: true } as any, "submitted", "send_accepted")).state, "submitted");
+  await assert.rejects(() => advance(oversized, "submitted", "send_accepted"), /String must contain at most 512/);
+  await assert.rejects(() => advance({ ...attempt, unexpected: true } as any, "submitted", "send_accepted"), /Unrecognized key/);
 });

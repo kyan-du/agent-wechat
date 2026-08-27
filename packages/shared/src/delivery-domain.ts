@@ -1,3 +1,4 @@
+import { deliveryAttemptSchema } from "./schemas/index.js";
 import type { Message, SendResult } from "./types/index.js";
 
 export const DELIVERY_DOMAIN_SCHEMA_VERSION = 1 as const;
@@ -36,24 +37,25 @@ export async function payloadDigest(value: string): Promise<string> {
 }
 
 function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
-  const createdAt = Date.parse(attempt.createdAt);
-  const updatedAt = Date.parse(attempt.updatedAt);
+  const parsed = deliveryAttemptSchema.strict().parse(attempt);
+  const createdAt = Date.parse(parsed.createdAt);
+  const updatedAt = Date.parse(parsed.updatedAt);
   if (!Number.isFinite(createdAt) || !Number.isFinite(updatedAt) || updatedAt < createdAt) throw new Error("INVALID_DELIVERY_TIME");
-  const lastTransition = attempt.transitions.at(-1);
-  if (attempt.transitions.length === 0 && attempt.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
-  if (lastTransition && lastTransition.to !== attempt.state) throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
-  if (attempt.observedLocalId !== undefined && !["observed_in_chat", "confirmed"].includes(attempt.state)) throw new Error("INVALID_DELIVERY_OBSERVATION_STATE");
-  for (let index = 0; index < attempt.transitions.length; index += 1) {
-    const transition = attempt.transitions[index]!;
-    const previous = attempt.transitions[index - 1];
+  const lastTransition = parsed.transitions.at(-1);
+  if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
+  if (lastTransition && lastTransition.to !== parsed.state) throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
+  if (parsed.observedLocalId !== undefined && !["observed_in_chat", "confirmed"].includes(parsed.state)) throw new Error("INVALID_DELIVERY_OBSERVATION_STATE");
+  for (let index = 0; index < parsed.transitions.length; index += 1) {
+    const transition = parsed.transitions[index]!;
+    const previous = parsed.transitions[index - 1];
     if (previous && transition.from !== previous.to) throw new Error("INVALID_DELIVERY_TRANSITION_CHAIN");
     if (previous && Date.parse(transition.at) < Date.parse(previous.at)) throw new Error("INVALID_DELIVERY_TRANSITION_TIME");
     if (index === 0 && Date.parse(transition.at) < createdAt) throw new Error("INVALID_DELIVERY_TRANSITION_TIME");
     if (Date.parse(transition.at) > updatedAt || !canAdvanceDelivery(transition.from, transition.to, transition.reason)) throw new Error("INVALID_DELIVERY_TRANSITION_EDGE");
-    if (transition.to === "uncertain" && transition.reason === "post_commit_uncertain" && !attempt.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
-    if (transition.to === "failed" && transition.reason === "pre_commit_failure" && attempt.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
+    if (transition.to === "uncertain" && transition.reason === "post_commit_uncertain" && !parsed.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
+    if (transition.to === "failed" && transition.reason === "pre_commit_failure" && parsed.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   }
-  return Object.freeze({ ...attempt, transitions: Object.freeze(attempt.transitions.map((transition) => Object.freeze({ ...transition }))) });
+  return Object.freeze({ ...parsed, transitions: Object.freeze(parsed.transitions.map((transition) => Object.freeze({ ...transition }))) });
 }
 
 export async function createQueuedDelivery(targetChatId: string, payload: string, now = new Date(), idempotencyKey?: string): Promise<DeliveryAttempt> {
