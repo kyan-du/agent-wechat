@@ -107,6 +107,13 @@ test("advanceDelivery rejects terminal causes without matching commit evidence",
   assert.equal((await advance(submitted, "failed", "pre_commit_failure")).state, "submitted");
 });
 
+test("submitted evidence must be a successful send result", async () => {
+  const queued = await createQueuedDelivery("chat", "hello", "wxid_self");
+  const composing = await advance(queued, "composing", "send_accepted");
+  const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false } };
+  await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME/);
+});
+
 test("failed send outcomes survive round-trip while direct fabrication is rejected", async () => {
   const failed = await deliveryAfterSend({ success: false, commitAttempted: false }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
   const restored = JSON.parse(JSON.stringify(failed));

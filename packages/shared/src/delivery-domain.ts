@@ -51,12 +51,13 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   const lastTransition = parsed.transitions.at(-1);
   if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
-  if (parsed.state === "queued" && parsed.initialOutcome !== undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  if ((parsed.state === "queued" || parsed.state === "composing") && parsed.initialOutcome !== undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   const firstTransition = parsed.transitions[0];
   if (parsed.state !== "queued" && parsed.state !== "composing") {
     const outcome = parsed.initialOutcome;
     if (outcome?.source !== "send_result") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
-    if (outcome.commitAttempted !== parsed.commitAttempted) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+    const requiresSuccessfulSend = firstTransition?.to === "submitted";
+    if (outcome.success !== requiresSuccessfulSend || outcome.commitAttempted !== parsed.commitAttempted) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   }
   if (firstTransition?.from === "queued" && ["submitted", "uncertain", "failed"].includes(firstTransition.to)) {
     const expected = firstTransition.to === "submitted" ? "send_accepted" : firstTransition.to === "uncertain" ? "post_commit_uncertain" : "pre_commit_failure";
