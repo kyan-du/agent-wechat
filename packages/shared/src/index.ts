@@ -16,6 +16,7 @@ export {
   advanceDelivery,
   canAdvanceDelivery,
   createQueuedDelivery,
+  isAllowedEdge,
   deliveryAfterSend,
   observeDelivery,
   payloadDigest,

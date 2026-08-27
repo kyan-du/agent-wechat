@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 
-const { advanceDelivery, canAdvanceDelivery, createQueuedDelivery, deliveryAfterSend, observeDelivery } = await import("./delivery-domain.ts");
+const { advanceDelivery, canAdvanceDelivery, createQueuedDelivery, deliveryAfterSend, isAllowedEdge, observeDelivery } = await import("./delivery-domain.ts");
 
 const advance = (attempt: any, to: any, reason: any, now?: Date) => advanceDelivery(attempt, to, reason, now);
 
@@ -38,11 +38,11 @@ test("matching packed message types are normalized before confirmation", async (
 
 test("wrong target or payload is uncertain and never retried automatically", async () => {
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
-  assert.equal((await observeDelivery(attempt, { chatId: "other", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:00Z", type: 1, sender: "wxid_self", content: "hello" })).state, "uncertain");
+  assert.equal((await observeDelivery(attempt, { chatId: "other", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_self", content: "hello" })).state, "uncertain");
   const freshAttempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
-  assert.equal((await observeDelivery(freshAttempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:00Z", type: 1, sender: "wxid_other", content: "hello" })).state, "uncertain");
+  assert.equal((await observeDelivery(freshAttempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_other", content: "hello" })).state, "uncertain");
   const anotherAttempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
-  assert.equal((await observeDelivery(anotherAttempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:00Z", type: 1, sender: "wxid_self", content: " different" })).state, "uncertain");
+  assert.equal((await observeDelivery(anotherAttempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_self", content: " different" })).state, "uncertain");
 });
 
 test("advanceDelivery records allowed edges and rejects skipped/backward edges", async () => {
@@ -65,12 +65,14 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "target_sender_and_payload_match"), true);
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "confirmed", "sender_unverified"), false);
-  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false, { source: "send_result", success: false, commitAttempted: false }), true);
-  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false), false);
+  assert.equal(isAllowedEdge("queued", "failed", "pre_commit_failure", false), true);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false), true);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("submitted", "failed", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "failed", "pre_commit_failure"), false);
-  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true, { source: "send_result", success: false, commitAttempted: true }), true);
-  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true), false);
+  assert.equal(isAllowedEdge("queued", "uncertain", "post_commit_uncertain", true), true);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true), true);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), false);
 });
 
 test("delivery outcomes use an explicit initial state/cause matrix", async () => {
