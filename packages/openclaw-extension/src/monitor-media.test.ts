@@ -71,3 +71,17 @@ test("media polling returns the last transient diagnostic after bounded exhausti
   assert.equal(calls, 2);
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
 });
+
+test("media polling stops immediately for permanent image key and decryption failures", async () => {
+  for (const errorCode of ["IMAGE_XOR_KEY_UNAVAILABLE", "IMAGE_DECRYPTION_FAILED"]) {
+    let calls = 0;
+    const client = { getMedia: async () => {
+      calls += 1;
+      return { type: "pending", format: "jpeg", filename: "broken.jpg", errorCode };
+    } };
+    const result = await pollMedia(client as never, "room@chatroom", 100, undefined, 30, 0);
+    assert.equal(calls, 1, errorCode);
+    assert.equal(result?.errorCode, errorCode);
+    assert.equal(result?.type, "pending");
+  }
+});

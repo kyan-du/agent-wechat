@@ -10,16 +10,15 @@ const RETRYABLE_MEDIA_ERRORS = new Set([
   "FILE_NOT_DOWNLOADED",
   "VOICE_NOT_DOWNLOADED",
   "IMAGE_NOT_STABLE",
-  "IMAGE_XOR_KEY_UNAVAILABLE",
-  "IMAGE_DECRYPTION_FAILED",
 ]);
 
 export const DEFAULT_MEDIA_POLL_ATTEMPTS = 30;
 export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 1000;
 
 function isRetryable(result: MediaResult): boolean {
-  return result.type === "pending" ||
-    (result.data === undefined && result.errorCode !== undefined && RETRYABLE_MEDIA_ERRORS.has(result.errorCode));
+  if (result.data !== undefined) return false;
+  if (result.errorCode !== undefined) return RETRYABLE_MEDIA_ERRORS.has(result.errorCode);
+  return result.type === "pending";
 }
 
 export async function pollMedia(
