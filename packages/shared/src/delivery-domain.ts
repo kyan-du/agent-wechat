@@ -113,7 +113,7 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   return next;
 }
 
-/** Apply one completion to a durable attempt; resultId uniqueness is scoped by attemptId. */
+/** Pure per-attempt helper; callers must CAS the returned record into durable storage. */
 export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted"> & { resultId: string; attemptId: string }, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (result.attemptId !== current.attemptId) throw new Error("INVALID_DELIVERY_RESULT_ID");
