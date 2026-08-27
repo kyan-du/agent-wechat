@@ -22,6 +22,7 @@ export {
   type AuthenticatedSenderIdentity,
   type DeliveryAttempt,
   type DeliveryCause,
+  type DeliveryInitialOutcome,
   type DeliveryObservation,
   type DeliveryState,
 } from "./delivery-domain.js";
@@ -62,6 +63,7 @@ export {
   mediaResultSchema,
   deliveryStateSchema,
   deliveryTransitionSchema,
+  deliveryInitialOutcomeSchema,
   deliveryAttemptSchema,
   deliveryObservationSchema,
   // Agent config schema

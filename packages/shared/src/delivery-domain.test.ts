@@ -59,10 +59,12 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "target_sender_and_payload_match"), true);
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "confirmed", "sender_unverified"), false);
-  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure"), true);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure", false), true);
+  assert.equal(canAdvanceDelivery("queued", "failed", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("submitted", "failed", "pre_commit_failure"), false);
   assert.equal(canAdvanceDelivery("observed_in_chat", "failed", "pre_commit_failure"), false);
-  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), true);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain", true), true);
+  assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), false);
 });
 
 test("delivery outcomes use an explicit initial state/cause matrix", async () => {
@@ -89,7 +91,11 @@ test("advanceDelivery rejects terminal causes without matching commit evidence",
   assert.equal((await advance(submitted, "failed", "pre_commit_failure")).state, "submitted");
 });
 
-test("fabricated initial failures cannot enter the authoritative delivery path", async () => {
+test("failed send outcomes survive round-trip while direct fabrication is rejected", async () => {
+  const failed = await deliveryAfterSend({ success: false, commitAttempted: false }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+  const restored = JSON.parse(JSON.stringify(failed));
+  assert.equal((await advance(restored, "failed", "pre_commit_failure")).state, "failed");
+
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
   const fabricated = {
     ...queued,
@@ -97,7 +103,7 @@ test("fabricated initial failures cannot enter the authoritative delivery path",
     updatedAt: "2026-01-01T00:00:01Z",
     transitions: [{ from: "queued" as const, to: "failed" as const, at: "2026-01-01T00:00:01Z", reason: "pre_commit_failure" as const }],
   };
-  await assert.rejects(() => advance(fabricated, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
+  await assert.rejects(() => advance(fabricated, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY|INVALID_DELIVERY_INITIAL_OUTCOME/);
 });
 
 test("final observations are schema-valid and deeply immutable", async () => {

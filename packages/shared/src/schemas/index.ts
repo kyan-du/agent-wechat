@@ -220,11 +220,13 @@ export const deliveryObservationSchema = z.object({
   chatId: z.string().trim().min(1).max(512), localId: z.number().int().nonnegative().safe(), serverId: z.number().int().nonnegative().safe(),
   timestamp: z.string().datetime(), type: z.number().int().nonnegative().safe(), sender: z.string().trim().min(1).max(512), content: z.string().max(1_000_000),
 }).strict();
+export const deliveryInitialOutcomeSchema = z.object({ source: z.literal("send_result"), success: z.boolean(), commitAttempted: z.boolean() }).strict();
 export const deliveryAttemptSchema = z.object({
   schemaVersion: z.literal(1), idempotencyKey: idempotencyKeySchema.optional(),
   senderId: z.string().trim().min(1).max(512), targetChatId: z.string().trim().min(1).max(512),
   payloadDigest: z.string().regex(/^[a-f0-9]{64}$/), state: deliveryStateSchema,
-  commitAttempted: z.boolean(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+  commitAttempted: z.boolean(), initialOutcome: deliveryInitialOutcomeSchema.optional(),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   observedLocalId: z.number().int().nonnegative().optional(), transitions: z.array(deliveryTransitionSchema).max(32),
 });
 
