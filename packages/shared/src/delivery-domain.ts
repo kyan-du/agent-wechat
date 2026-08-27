@@ -1,4 +1,4 @@
-import { deliveryAttemptSchema } from "./schemas/index.js";
+import { deliveryAttemptSchema, deliveryObservationSchema } from "./schemas/index.js";
 import type { Message, SendResult } from "./types/index.js";
 
 export const DELIVERY_DOMAIN_SCHEMA_VERSION = 1 as const;
@@ -44,6 +44,11 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (!Number.isFinite(createdAt) || !Number.isFinite(updatedAt) || updatedAt < createdAt) throw new Error("INVALID_DELIVERY_TIME");
   const lastTransition = parsed.transitions.at(-1);
   if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
+  if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  if (lastTransition && lastTransition.from === "queued" && ["submitted", "uncertain", "failed"].includes(parsed.state)) {
+    const expected = parsed.state === "submitted" ? "send_accepted" : parsed.state === "uncertain" ? "post_commit_uncertain" : "pre_commit_failure";
+    if (expected !== lastTransition.reason || (parsed.state === "uncertain" && !parsed.commitAttempted) || (parsed.state === "failed" && parsed.commitAttempted)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  }
   if (lastTransition && lastTransition.to !== parsed.state) throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.observedLocalId !== undefined && !["observed_in_chat", "confirmed"].includes(parsed.state)) throw new Error("INVALID_DELIVERY_OBSERVATION_STATE");
   for (let index = 0; index < parsed.transitions.length; index += 1) {
@@ -82,13 +87,14 @@ export async function deliveryAfterSend(result: Pick<SendResult, "success" | "co
 
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
+  const checkedObservation = deliveryObservationSchema.strict().parse(observation);
   if (current.state !== "submitted" && current.state !== "observed_in_chat") return current;
-  if (observation.chatId !== current.targetChatId) return advanceDelivery(current, "uncertain", "target_mismatch", now);
-  if (observation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
-  if (observation.type !== 1 || await payloadDigest(observation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
+  if (checkedObservation.chatId !== current.targetChatId) return advanceDelivery(current, "uncertain", "target_mismatch", now);
+  if (checkedObservation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
+  if (checkedObservation.type !== 1 || await payloadDigest(checkedObservation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const observed = await advanceDelivery(current, "observed_in_chat", "target_sender_and_payload_match", now);
   const confirmed = await advanceDelivery(observed, "confirmed", "observation_confirmed", now);
-  return validateAttempt({ ...confirmed, observedLocalId: observation.localId });
+  return validateAttempt({ ...confirmed, observedLocalId: checkedObservation.localId });
 }
 
 export function canAdvanceDelivery(from: DeliveryState, to: DeliveryState, reason?: DeliveryCause): boolean {

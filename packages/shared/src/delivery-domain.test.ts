@@ -65,6 +65,23 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
   assert.equal(canAdvanceDelivery("queued", "uncertain", "post_commit_uncertain"), true);
 });
 
+test("delivery outcomes use an explicit initial state/cause matrix", async () => {
+  const cases = [
+    [{ success: true, commitAttempted: false }, "submitted", "send_accepted"],
+    [{ success: true, commitAttempted: true }, "submitted", "send_accepted"],
+    [{ success: false, commitAttempted: true }, "uncertain", "post_commit_uncertain"],
+    [{ success: false, commitAttempted: false }, "failed", "pre_commit_failure"],
+  ] as const;
+  for (const [result, state, reason] of cases) {
+    const attempt = await deliveryAfterSend(result, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+    assert.equal(attempt.state, state);
+    assert.equal(attempt.transitions[0]?.reason, reason);
+  }
+  const valid = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+  const malformed = { ...valid, state: "failed" as const, commitAttempted: true, transitions: [{ ...valid.transitions[0], to: "failed" as const, reason: "pre_commit_failure" as const }] };
+  await assert.rejects(() => advance(malformed, "failed", "pre_commit_failure"), /INVALID_DELIVERY_INITIAL_OUTCOME|INVALID_DELIVERY_COMMIT_EVIDENCE/);
+});
+
 test("advanceDelivery rejects terminal causes without matching commit evidence", async () => {
   const queued = await createQueuedDelivery("chat", "hello", "wxid_self");
   await assert.rejects(() => advance(queued, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_COMMIT_EVIDENCE/);
@@ -80,6 +97,12 @@ test("final observations are schema-valid and deeply immutable", async () => {
   assert.equal(Object.isFrozen(result.transitions[0]), true);
   assert.equal(result.observedLocalId, 8);
   assert.throws(() => (result as any).targetChatId = "tampered", TypeError);
+});
+
+test("observation validation rejects unsafe IDs and timestamps", async () => {
+  const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"));
+  await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: -1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_self", content: "hello" }), /Number must be greater than or equal to 0/);
+  await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "invalid", type: 1, sender: "wxid_self", content: "hello" }), /Invalid datetime/);
 });
 
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {

@@ -63,6 +63,7 @@ export {
   deliveryStateSchema,
   deliveryTransitionSchema,
   deliveryAttemptSchema,
+  deliveryObservationSchema,
   // Agent config schema
   agentConfigSchema,
 } from "./schemas/index.js";

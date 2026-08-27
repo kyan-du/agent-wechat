@@ -216,6 +216,10 @@ export const sendParamsSchema = z.object({
 export const deliveryStateSchema = z.enum(["queued", "composing", "submitted", "observed_in_chat", "confirmed", "uncertain", "failed"]);
 export const deliveryCauseSchema = z.enum(["send_accepted", "target_sender_and_payload_match", "observation_confirmed", "target_mismatch", "sender_unverified", "payload_mismatch", "pre_commit_failure", "post_commit_uncertain"]);
 export const deliveryTransitionSchema = z.object({ from: deliveryStateSchema, to: deliveryStateSchema, at: z.string().datetime(), reason: deliveryCauseSchema });
+export const deliveryObservationSchema = z.object({
+  chatId: z.string().trim().min(1).max(512), localId: z.number().int().nonnegative().safe(), serverId: z.number().int().nonnegative().safe(),
+  timestamp: z.string().datetime(), type: z.number().int().nonnegative().safe(), sender: z.string().trim().min(1).max(512), content: z.string().max(1_000_000),
+}).strict();
 export const deliveryAttemptSchema = z.object({
   schemaVersion: z.literal(1), idempotencyKey: idempotencyKeySchema.optional(),
   senderId: z.string().trim().min(1).max(512), targetChatId: z.string().trim().min(1).max(512),
