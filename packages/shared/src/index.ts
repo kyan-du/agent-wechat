@@ -20,6 +20,7 @@ export {
   deliveryAfterSend,
   observeDelivery,
   payloadDigest,
+  submitComposingDelivery,
   type AuthenticatedSenderIdentity,
   type DeliveryAttempt,
   type DeliveryCause,
