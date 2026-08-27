@@ -31,6 +31,17 @@ export {
   type TrustedSenderProvenance,
 } from "./delivery-domain.js";
 
+export {
+  createAuthenticatedSessionAdapter,
+  createAuthenticatedSessionStore,
+  restoreAuthenticatedSessionAdapter,
+  type AuthenticatedSessionAdapter,
+  type AuthenticatedSessionRecord,
+  type AuthenticatedSessionStore,
+  type AuthenticatedSessionStoreBackend,
+  type AuthenticatedSessionStoreSnapshot,
+} from "./authenticated-session.js";
+
 // Export HTTP client
 export {
   WeChatClient,
