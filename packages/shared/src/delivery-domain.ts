@@ -169,7 +169,7 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   const current = await authenticateAttempt(attempt, provenance);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   if (to === "failed" && reason === "pre_commit_failure" && current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
-  if (!canAdvanceDelivery(current.state, to, reason)) return current;
+  if (!canAdvanceDelivery(current.state, to, reason)) return Object.freeze({ ...current, transitions: current.transitions.map((transition) => Object.freeze({ ...transition })) });
   const timestamp = now.toISOString();
   const { integrityTag: _integrityTag, ...unsigned } = current;
   return validateAttempt(await buildAttempt({ ...unsigned, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] }, provenance));

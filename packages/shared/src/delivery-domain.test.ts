@@ -11,24 +11,24 @@ registerHooks({
   },
 });
 
-const { createAuthenticatedSessionAdapter, createAuthenticatedSessionStore, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
+const { createAuthenticatedSessionAdapter, restoreAuthenticatedSessionAdapter } = await import("./authenticated-session.ts");
 const { advanceDelivery, canAdvanceDelivery, createAuthenticatedSenderBoundary, createQueuedDelivery, issueTrustedSenderProvenance, deliveryAfterSend, observeDelivery } = await import("./delivery-domain.ts");
 
-function testStore() {
+function testBackend() {
   let persisted: any;
-  return createAuthenticatedSessionStore({
+  return {
     read: () => persisted,
     compareAndSwap: (expectedRevision: number | null, snapshot: any) => {
       if ((persisted?.revision ?? null) !== expectedRevision) return false;
       persisted = structuredClone(snapshot);
       return true;
     },
-  });
+  };
 }
 
 const sessionAdapter = createAuthenticatedSessionAdapter(
   () => ({ accountId: "account", sessionId: "session", senderId: "wxid_self" }),
-  testStore(),
+  testBackend(),
 );
 const authenticatedBoundary = createAuthenticatedSenderBoundary(sessionAdapter.capability);
 const trusted = (verifiedAt = new Date("2025-01-01T00:00:00Z")) => issueTrustedSenderProvenance(authenticatedBoundary, verifiedAt);
@@ -134,18 +134,17 @@ test("persisted attempts survive adapter restoration with the protected key stat
     persisted = structuredClone(snapshot);
     return true;
   } };
-  const store = createAuthenticatedSessionStore(backend);
-  const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store);
+  const originalAdapter = createAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), backend);
   const originalBoundary = createAuthenticatedSenderBoundary(originalAdapter.capability);
   const originalProvenance = issueTrustedSenderProvenance(originalBoundary, new Date("2025-01-01T00:00:00Z"));
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "restart-chat", "restart payload", new Date("2026-01-01T00:00:00Z"), undefined, originalProvenance);
   const serialized = JSON.parse(JSON.stringify(attempt));
-  const restoredAdapter = restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store);
+  const restoredAdapter = restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), backend);
   const restoredProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(restoredAdapter.capability), new Date("2025-01-01T00:00:00Z"));
   const confirmed = await observeDelivery(serialized, { chatId: "restart-chat", localId: 4, serverId: 5, timestamp: "2026-01-01T00:00:02Z", type: 1, sender: "wxid_restart", content: "restart payload" }, restoredProvenance, new Date("2026-01-01T00:00:03Z"));
   assert.equal(confirmed.state, "confirmed");
   restoredAdapter.revoke();
-  assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), store), /REVOKED_AUTHENTICATED_SESSION/);
+  assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "restart-account", sessionId: "restart-session", senderId: "wxid_restart" }), backend), /REVOKED_AUTHENTICATED_SESSION/);
 });
 
 test("rotating a session revokes old attempts and restores only the new generation", async () => {
@@ -155,29 +154,28 @@ test("rotating a session revokes old attempts and restores only the new generati
     persisted = structuredClone(snapshot);
     return true;
   } };
-  const store = createAuthenticatedSessionStore(backend);
-  const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), store);
+  const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), backend);
   const oldProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(adapter.capability), new Date("2025-01-01T00:00:00Z"));
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date("2026-01-01T00:00:00Z"), undefined, oldProvenance);
   const nextAdapter = adapter.rotate();
   await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_rotate", content: "hello" }, oldProvenance), /UNTRUSTED_SENDER_PROVENANCE/);
   const nextProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(nextAdapter.capability), new Date("2025-01-01T00:00:00Z"));
   await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_rotate", content: "hello" }, nextProvenance), /UNKNOWN_AUTHENTICATED_SESSION_KEY/);
-  const restoredCurrent = restoreAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), store);
+  const restoredCurrent = restoreAuthenticatedSessionAdapter(() => ({ accountId: "rotate-account", sessionId: "rotate-session", senderId: "wxid_rotate" }), backend);
   assert.ok(restoredCurrent.capability);
 });
 
 test("session logout and re-authentication revoke old provenance", async () => {
   let identity = { accountId: "account-before", sessionId: "session-before", senderId: "wxid_before" };
-  const store = testStore();
-  const adapter = createAuthenticatedSessionAdapter(() => identity, store);
+  const backend = testBackend();
+  const adapter = createAuthenticatedSessionAdapter(() => identity, backend);
   const oldProvenance = issueTrustedSenderProvenance(createAuthenticatedSenderBoundary(adapter.capability), new Date("2025-01-01T00:00:00Z"));
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", new Date("2026-01-01T00:00:00Z"), undefined, oldProvenance);
   identity = { accountId: "account-after", sessionId: "session-after", senderId: "wxid_after" };
   await assert.rejects(() => observeDelivery(attempt, { chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1, sender: "wxid_before", content: "hello" }, oldProvenance), /REVOKED_SENDER_PROVENANCE/);
   adapter.revoke();
   assert.throws(() => createAuthenticatedSenderBoundary(adapter.capability), /UNAUTHENTICATED_SESSION_CAPABILITY/);
-  assert.throws(() => createAuthenticatedSessionAdapter(() => identity, store), /REVOKED_AUTHENTICATED_SESSION/);
+  assert.throws(() => createAuthenticatedSessionAdapter(() => identity, backend), /REVOKED_AUTHENTICATED_SESSION/);
 });
 
 test("stale authenticated session stores cannot overwrite a newer generation", () => {
@@ -187,18 +185,15 @@ test("stale authenticated session stores cannot overwrite a newer generation", (
     persisted = structuredClone(snapshot);
     return true;
   } };
-  const firstStore = createAuthenticatedSessionStore(backend);
-  const secondStore = createAuthenticatedSessionStore(backend);
-  const first = createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), firstStore);
-  assert.throws(
-    () => createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), secondStore),
-    /CONCURRENT_AUTHENTICATED_SESSION_UPDATE/,
-  );
+  const first = createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), backend);
+  const staleSnapshot = structuredClone(persisted);
+  const staleBackend = {
+    read: () => staleSnapshot,
+    compareAndSwap: (expectedRevision: number | null, snapshot: any) => backend.compareAndSwap(expectedRevision, snapshot),
+  };
+  const second = restoreAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), staleBackend);
   const rotated = first.rotate();
-  assert.throws(
-    () => createAuthenticatedSessionAdapter(() => ({ accountId: "race-account", sessionId: "race-session", senderId: "wxid_race" }), secondStore),
-    /CONCURRENT_AUTHENTICATED_SESSION_UPDATE/,
-  );
+  assert.throws(() => second.rotate(), /CONCURRENT_AUTHENTICATED_SESSION_UPDATE/);
   assert.ok(rotated.capability);
 });
 
@@ -209,12 +204,11 @@ test("store persistence rejects replayed or malformed authenticated state", asyn
     persisted = structuredClone(snapshot);
     return true;
   } };
-  const store = createAuthenticatedSessionStore(backend);
-  const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), store);
+  const adapter = createAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), backend);
   adapter.revoke();
   assert.equal(persisted.closed, true);
-  assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), store), /REVOKED_AUTHENTICATED_SESSION/);
-  assert.throws(() => createAuthenticatedSessionStore({ read: () => ({ ...persisted, current: { ...persisted.current, integrityKey: "bad" } }), compareAndSwap: () => false }), /INVALID_AUTHENTICATED_SESSION_STORE/);
+  assert.throws(() => restoreAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), backend), /REVOKED_AUTHENTICATED_SESSION/);
+  assert.throws(() => createAuthenticatedSessionAdapter(() => ({ accountId: "persist-account", sessionId: "persist-session", senderId: "wxid_persist" }), { read: () => ({ ...persisted, current: { ...persisted.current, integrityKey: "bad" } }), compareAndSwap: () => false } as any), /INVALID_AUTHENTICATED_SESSION_STORE/);
 });
 
 test("runtime validation rejects impossible delivery history, times, and IDs", async () => {

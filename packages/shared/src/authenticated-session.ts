@@ -161,8 +161,7 @@ function commitState(state: StoreRecord, next: { current?: PersistedKey; generat
   for (const keyId of next.revokedKeyIds) state.revokedKeyIds.add(keyId);
 }
 
-/** Internal construction point used by the authenticated session adapter. */
-export function createAuthenticatedSessionStore(backend: AuthenticatedSessionStoreBackend): AuthenticatedSessionStore {
+function createStore(backend: AuthenticatedSessionStoreBackend): AuthenticatedSessionStore {
   if (!backend || typeof backend.read !== "function" || typeof backend.compareAndSwap !== "function") throw new Error("INVALID_AUTHENTICATED_SESSION_STORE");
   let persisted = validSnapshot(backend.read());
   if (!persisted) {
@@ -194,6 +193,7 @@ function createAdapter(resolveIdentity: () => AuthenticatedSenderIdentity | unde
 
   const revoke = (): void => {
     const state = storeRecord(store);
+    // A stale adapter must not be able to revoke a newer generation.
     if (state.closed || state.current?.keyId !== key.keyId || state.activeToken !== token) return;
     const revokedKeyIds = new Set(state.revokedKeyIds);
     revokedKeyIds.add(key.keyId);
@@ -216,8 +216,9 @@ function createAdapter(resolveIdentity: () => AuthenticatedSenderIdentity | unde
 /** Adapter-owned construction point; key material remains inside its protected durable store. */
 export function createAuthenticatedSessionAdapter(
   resolveIdentity: () => AuthenticatedSenderIdentity | undefined,
-  store: AuthenticatedSessionStore,
+  backend: AuthenticatedSessionStoreBackend,
 ): AuthenticatedSessionAdapter {
+  const store = createStore(backend);
   const identity = validIdentity(resolveIdentity());
   const state = storeRecord(store);
   if (state.closed) throw new Error("REVOKED_AUTHENTICATED_SESSION");
@@ -230,8 +231,9 @@ export function createAuthenticatedSessionAdapter(
 /** Restore after a process restart through the adapter-owned protected durable store. */
 export function restoreAuthenticatedSessionAdapter(
   resolveIdentity: () => AuthenticatedSenderIdentity | undefined,
-  store: AuthenticatedSessionStore,
+  backend: AuthenticatedSessionStoreBackend,
 ): AuthenticatedSessionAdapter {
+  const store = createStore(backend);
   const identity = validIdentity(resolveIdentity());
   const state = storeRecord(store);
   const key = state.current;
