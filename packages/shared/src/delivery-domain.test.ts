@@ -15,6 +15,10 @@ const { advanceDelivery, canAdvanceDelivery, createQueuedDelivery, deliveryAfter
 
 const advance = (attempt: any, to: any, reason: any, now?: Date) => advanceDelivery(attempt, to, reason, now);
 
+test("contradictory successful send evidence is rejected", async () => {
+  await assert.rejects(() => deliveryAfterSend({ success: true, commitAttempted: false }, "chat", "hello", "wxid_self", new Date()), /INVALID_DELIVERY_RESULT_EVIDENCE/);
+});
+
 test("successful post-commit send enters submitted without claiming confirmation", async () => {
   const attempt = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date("2026-01-01T00:00:00Z"), "key-1");
   assert.equal(attempt.state, "submitted");
@@ -53,7 +57,7 @@ test("advanceDelivery records allowed edges and rejects skipped/backward edges",
   const submittedFromComposing = await submitComposingDelivery(composing, { success: true, commitAttempted: true }, new Date());
   assert.equal(submittedFromComposing.state, "submitted");
   assert.deepEqual(JSON.parse(JSON.stringify(submittedFromComposing)).initialOutcome, { source: "send_result", success: true, commitAttempted: true });
-  const submitted = await deliveryAfterSend({ success: true, commitAttempted: false }, "chat", "hello", "wxid_self", new Date(), undefined);
+  const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
   assert.equal((await advance(submitted, "confirmed", "observation_confirmed")).state, "submitted");
   const observed = await advance(submitted, "observed_in_chat", "target_sender_and_payload_match");
   assert.equal(observed.state, "observed_in_chat");
@@ -80,7 +84,7 @@ test("terminal outcomes and semantically invalid causes are rejected", () => {
 
 test("delivery outcomes use an explicit initial state/cause matrix", async () => {
   const cases = [
-    [{ success: true, commitAttempted: false }, "submitted", "send_accepted"],
+    [{ success: true, commitAttempted: true }, "submitted", "send_accepted"],
     [{ success: true, commitAttempted: true }, "submitted", "send_accepted"],
     [{ success: false, commitAttempted: true }, "uncertain", "post_commit_uncertain"],
     [{ success: false, commitAttempted: false }, "failed", "pre_commit_failure"],
@@ -116,6 +120,7 @@ test("submitted evidence must be a successful send result", async () => {
   const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false } };
   await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME/);
   assert.equal((await submitComposingDelivery(composing, { success: false, commitAttempted: false })).state, "failed");
+  await assert.rejects(() => submitComposingDelivery(composing, { success: true, commitAttempted: false }), /INVALID_DELIVERY_RESULT_EVIDENCE/);
 });
 
 test("failed send outcomes survive round-trip while direct fabrication is rejected", async () => {

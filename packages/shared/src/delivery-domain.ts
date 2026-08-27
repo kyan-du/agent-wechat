@@ -101,6 +101,7 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
 export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted">, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   if (current.state !== "composing") throw new Error("INVALID_DELIVERY_SUBMISSION_STATE");
+  if (result.success && result.commitAttempted !== true) throw new Error("INVALID_DELIVERY_RESULT_EVIDENCE");
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
@@ -108,6 +109,7 @@ export async function submitComposingDelivery(attempt: DeliveryAttempt, result: 
 }
 
 export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
+  if (result.success && result.commitAttempted !== true) throw new Error("INVALID_DELIVERY_RESULT_EVIDENCE");
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
