@@ -10,6 +10,7 @@ export type DeliveryInitialOutcome = {
   readonly source: "send_result";
   readonly success: boolean;
   readonly commitAttempted: boolean;
+  readonly resultId: string;
 };
 export type DeliveryAttempt = {
   schemaVersion: typeof DELIVERY_DOMAIN_SCHEMA_VERSION;
@@ -44,7 +45,14 @@ export async function payloadDigest(value: string): Promise<string> {
 }
 
 function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
-  const parsed = deliveryAttemptSchema.strict().parse(attempt);
+  let parsed;
+  try {
+    parsed = deliveryAttemptSchema.strict().parse(attempt);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('initialOutcome') || !message.includes('resultId')) throw error;
+    throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
+  }
   const createdAt = Date.parse(parsed.createdAt);
   const updatedAt = Date.parse(parsed.updatedAt);
   if (!Number.isFinite(createdAt) || !Number.isFinite(updatedAt) || updatedAt < createdAt) throw new Error("INVALID_DELIVERY_TIME");
@@ -97,22 +105,26 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   return next;
 }
 
-export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted">, now = new Date()): Promise<DeliveryAttempt> {
+export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted"> & { resultId: string }, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
-  if (current.state !== "composing") throw new Error("INVALID_DELIVERY_SUBMISSION_STATE");
+  if (current.state !== "composing") {
+    if (current.initialOutcome?.source === "send_result" && current.initialOutcome.resultId === result.resultId && current.initialOutcome.success === result.success && current.initialOutcome.commitAttempted === result.commitAttempted) return current;
+    throw new Error("INVALID_DELIVERY_SUBMISSION_STATE");
+  }
   if (result.success && result.commitAttempted !== true) throw new Error("INVALID_DELIVERY_RESULT_EVIDENCE");
   const timestamp = now.toISOString();
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
-  return validateAttempt({ ...current, state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true }, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to: state, at: timestamp, reason }] });
+  return validateAttempt({ ...current, state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true, resultId: result.resultId }, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to: state, at: timestamp, reason }] });
 }
 
-export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
+export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted"> & { resultId?: string }, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
   if (result.success && result.commitAttempted !== true) throw new Error("INVALID_DELIVERY_RESULT_EVIDENCE");
   const timestamp = now.toISOString();
+  const resultId = result.resultId ?? idempotencyKey ?? `${timestamp}:${targetChatId}`;
   const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
   const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
-  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true }, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
+  return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true, resultId }, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
 }
 
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
