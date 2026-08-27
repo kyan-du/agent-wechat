@@ -11,7 +11,7 @@ registerHooks({
   },
 });
 
-const { advanceDelivery, canAdvanceDelivery, createQueuedDelivery, deliveryAfterSend, isAllowedEdge, observeDelivery } = await import("./delivery-domain.ts");
+const { advanceDelivery, canAdvanceDelivery, createQueuedDelivery, deliveryAfterSend, isAllowedEdge, observeDelivery, submitComposingDelivery } = await import("./delivery-domain.ts");
 
 const advance = (attempt: any, to: any, reason: any, now?: Date) => advanceDelivery(attempt, to, reason, now);
 
@@ -50,6 +50,9 @@ test("advanceDelivery records allowed edges and rejects skipped/backward edges",
   const composing = await advance(queued, "composing", "send_accepted");
   assert.equal(composing.state, "composing");
   await assert.rejects(() => advance(composing, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY/);
+  const submittedFromComposing = await submitComposingDelivery(composing, { success: true, commitAttempted: true }, new Date());
+  assert.equal(submittedFromComposing.state, "submitted");
+  assert.deepEqual(JSON.parse(JSON.stringify(submittedFromComposing)).initialOutcome, { source: "send_result", success: true, commitAttempted: true });
   const submitted = await deliveryAfterSend({ success: true, commitAttempted: false }, "chat", "hello", "wxid_self", new Date(), undefined);
   assert.equal((await advance(submitted, "confirmed", "observation_confirmed")).state, "submitted");
   const observed = await advance(submitted, "observed_in_chat", "target_sender_and_payload_match");
@@ -112,6 +115,7 @@ test("submitted evidence must be a successful send result", async () => {
   const composing = await advance(queued, "composing", "send_accepted");
   const fabricated = { ...composing, initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false } };
   await assert.rejects(() => advance(fabricated, "submitted", "send_accepted"), /INVALID_DELIVERY_INITIAL_OUTCOME/);
+  assert.equal((await submitComposingDelivery(composing, { success: false, commitAttempted: false })).state, "failed");
 });
 
 test("failed send outcomes survive round-trip while direct fabrication is rejected", async () => {

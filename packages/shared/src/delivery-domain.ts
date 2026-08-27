@@ -57,7 +57,7 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (parsed.state !== "queued" && parsed.state !== "composing") {
     const outcome = parsed.initialOutcome;
     if (outcome?.source !== "send_result") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
-    const requiresSuccessfulSend = firstTransition?.to === "submitted";
+    const requiresSuccessfulSend = firstTransition?.to === "submitted" || (firstTransition?.to === "composing" && ["submitted", "observed_in_chat", "confirmed"].includes(parsed.state));
     if (outcome.success !== requiresSuccessfulSend || outcome.commitAttempted !== parsed.commitAttempted) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   }
   if (firstTransition?.from === "queued" && ["submitted", "uncertain", "failed"].includes(firstTransition.to)) {
@@ -96,6 +96,15 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   const timestamp = now.toISOString();
   const next = validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
   return next;
+}
+
+export async function submitComposingDelivery(attempt: DeliveryAttempt, result: Pick<SendResult, "success" | "commitAttempted">, now = new Date()): Promise<DeliveryAttempt> {
+  const current = validateAttempt(attempt);
+  if (current.state !== "composing") throw new Error("INVALID_DELIVERY_SUBMISSION_STATE");
+  const timestamp = now.toISOString();
+  const state: DeliveryState = result.success ? "submitted" : result.commitAttempted ? "uncertain" : "failed";
+  const reason: DeliveryCause = result.success ? "send_accepted" : result.commitAttempted ? "post_commit_uncertain" : "pre_commit_failure";
+  return validateAttempt({ ...current, state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true }, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to: state, at: timestamp, reason }] });
 }
 
 export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, senderId: string, now: Date, idempotencyKey?: string): Promise<DeliveryAttempt> {
