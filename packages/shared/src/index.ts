@@ -15,6 +15,7 @@ export {
   DELIVERY_DOMAIN_SCHEMA_VERSION,
   advanceDelivery,
   canAdvanceDelivery,
+  createAuthenticatedSenderBoundary,
   createQueuedDelivery,
   issueTrustedSenderProvenance,
   deliveryAfterSend,
@@ -22,12 +23,11 @@ export {
   payloadDigest,
   type AuthenticatedSenderBoundary,
   type AuthenticatedSenderIdentity,
-  type AuthenticatedSenderResolver,
+  type AuthenticatedSessionCapability,
   type DeliveryAttempt,
   type DeliveryCause,
   type DeliveryObservation,
   type DeliveryState,
-  type SenderProvenanceVerifier,
   type TrustedSenderProvenance,
 } from "./delivery-domain.js";
 

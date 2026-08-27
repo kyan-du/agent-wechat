@@ -1,3 +1,5 @@
+import { resolveAuthenticatedSessionCapability } from "./authenticated-session.js";
+import type { AuthenticatedSessionCapability } from "./authenticated-session.js";
 import { deliveryAttemptSchema } from "./schemas/index.js";
 import type { Message, SendResult } from "./types/index.js";
 
@@ -16,10 +18,12 @@ export type TrustedSenderProvenance = AuthenticatedSenderIdentity & {
   readonly __trustedSenderProvenance: true;
 };
 
-/** The authenticated session boundary supplies and verifies this resolver. */
-export type AuthenticatedSenderResolver = () => AuthenticatedSenderIdentity | undefined;
-export type SenderProvenanceVerifier = (identity: AuthenticatedSenderIdentity) => boolean;
-export type AuthenticatedSenderBoundary = { readonly __authenticatedSenderBoundary: true };
+/** Opaque capability issued only by an authenticated session adapter. */
+export type { AuthenticatedSessionCapability } from "./authenticated-session.js";
+declare const authenticatedSenderBoundaryBrand: unique symbol;
+export type AuthenticatedSenderBoundary = {
+  readonly [authenticatedSenderBoundaryBrand]: never;
+};
 
 export type DeliveryAttempt = {
   schemaVersion: typeof DELIVERY_DOMAIN_SCHEMA_VERSION;
@@ -41,7 +45,7 @@ export type DeliveryTransition = { from: DeliveryState; to: DeliveryState; at: s
 
 const DELIVERY_STATES: readonly DeliveryState[] = ["queued", "composing", "submitted", "observed_in_chat", "confirmed", "uncertain", "failed"];
 const TRUSTED_PROVENANCES = new WeakSet<object>();
-const AUTHENTICATED_BOUNDARIES = new WeakMap<object, SenderProvenanceVerifier>();
+const AUTHENTICATED_BOUNDARIES = new WeakMap<object, () => AuthenticatedSenderIdentity | undefined>();
 const TERMINAL_STATES = new Set<DeliveryState>(["confirmed", "uncertain", "failed"]);
 const EDGE_CAUSES = new Map<string, ReadonlySet<DeliveryCause>>([
   ["queued:composing", new Set(["send_accepted"])],
@@ -62,19 +66,22 @@ export async function payloadDigest(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Create an opaque capability owned by an authenticated session boundary. */
-export function createAuthenticatedSenderBoundary(verify: SenderProvenanceVerifier): AuthenticatedSenderBoundary {
-  const boundary = Object.freeze({ __authenticatedSenderBoundary: true as const });
-  AUTHENTICATED_BOUNDARIES.set(boundary, verify);
-  return boundary;
+/** Create a boundary from an opaque capability supplied by the authenticated session adapter. */
+export function createAuthenticatedSenderBoundary(capability: AuthenticatedSessionCapability): AuthenticatedSenderBoundary {
+  const resolveIdentity = resolveAuthenticatedSessionCapability(capability);
+  if (!resolveIdentity) throw new Error("UNAUTHENTICATED_SESSION_CAPABILITY");
+  const boundary = Object.freeze({});
+  AUTHENTICATED_BOUNDARIES.set(boundary, resolveIdentity);
+  return boundary as AuthenticatedSenderBoundary;
 }
 
-export function issueTrustedSenderProvenance(boundary: AuthenticatedSenderBoundary, resolver: AuthenticatedSenderResolver, verifiedAt = new Date()): TrustedSenderProvenance {
-  const verify = AUTHENTICATED_BOUNDARIES.get(boundary);
-  const identity = resolver();
-  if (!verify || !identity || !identity.accountId.trim() || !identity.sessionId.trim() || !identity.senderId.trim() || verify(identity) !== true) {
+export function issueTrustedSenderProvenance(boundary: AuthenticatedSenderBoundary, verifiedAt = new Date()): TrustedSenderProvenance {
+  const resolveIdentity = AUTHENTICATED_BOUNDARIES.get(boundary);
+  const identity = resolveIdentity?.();
+  if (!identity || !identity.accountId.trim() || !identity.sessionId.trim() || !identity.senderId.trim()) {
     throw new Error("UNVERIFIED_SENDER_PROVENANCE");
   }
+  if (!Number.isFinite(verifiedAt.getTime())) throw new Error("INVALID_SENDER_PROVENANCE_TIME");
   const provenance = Object.freeze({ ...identity, verifiedAt: verifiedAt.toISOString(), __trustedSenderProvenance: true as const });
   TRUSTED_PROVENANCES.add(provenance);
   return provenance;
@@ -132,7 +139,8 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
 export function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): DeliveryAttempt {
   const current = validateAttempt(attempt);
   if (!DELIVERY_STATES.includes(to) || !canAdvanceDelivery(current.state, to, reason)) return current;
-  return validateAttempt({ ...current, state: to, updatedAt: now.toISOString(), transitions: [...current.transitions, { from: current.state, to, at: now.toISOString(), reason }] });
+  const timestamp = now.toISOString();
+  return validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
 }
 
 export async function deliveryAfterSend(result: Pick<SendResult, "success" | "commitAttempted">, targetChatId: string, payload: string, now = new Date(), idempotencyKey: string | undefined, provenance: TrustedSenderProvenance): Promise<DeliveryAttempt> {
@@ -149,8 +157,12 @@ export async function deliveryAfterSend(result: Pick<SendResult, "success" | "co
   return validateAttempt({ schemaVersion: 1, senderId: provenance.senderId, senderAccountId: provenance.accountId, senderSessionId: provenance.sessionId, targetChatId, payloadDigest: await payloadDigest(payload), state, commitAttempted: result.commitAttempted === true, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions });
 }
 
-export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
+export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, provenance: TrustedSenderProvenance, now = new Date()): Promise<DeliveryAttempt> {
+  if (!TRUSTED_PROVENANCES.has(provenance)) throw new Error("UNTRUSTED_SENDER_PROVENANCE");
   const current = validateAttempt(attempt);
+  if (current.senderId !== provenance.senderId || current.senderAccountId !== provenance.accountId || current.senderSessionId !== provenance.sessionId) {
+    throw new Error("UNAUTHENTICATED_DELIVERY_ATTEMPT");
+  }
   if (current.state !== "submitted" && current.state !== "observed_in_chat") return current;
   if (observation.chatId !== current.targetChatId) return advanceDelivery(current, "uncertain", "target_mismatch", now);
   if (observation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
