@@ -132,7 +132,7 @@ test("composing terminal transitions require the result-aware operation", async 
   await assert.rejects(() => submitComposingDelivery(otherComposing, { success: true, commitAttempted: true, resultId: "result-2", attemptId: composing.attemptId }), /INVALID_DELIVERY_RESULT_ID/);
   // Durable callers must compare-and-set the immutable result, not overwrite a newer record.
   const clonedSuccessful = JSON.parse(JSON.stringify(successful));
-  const replayed = await submitComposingDelivery(JSON.parse(JSON.stringify(composing)), { success: true, commitAttempted: true, resultId: "result-2", attemptId: composing.attemptId });
+  const replayed = await submitComposingDelivery(JSON.parse(JSON.stringify(composing)), { success: true, commitAttempted: true, resultId: "result-2", attemptId: composing.attemptId }, new Date(successful.updatedAt));
   assert.deepEqual(replayed, successful);
   assert.equal((await observeDelivery(clonedSuccessful, { chatId: "chat", localId: 1, serverId: 1, timestamp: new Date().toISOString(), type: 1, sender: "wxid_self", content: "hello" })).state, "confirmed");
   await assert.rejects(() => advance(composing, "uncertain", "post_commit_uncertain"), /INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY|INVALID_DELIVERY_COMMIT_EVIDENCE/);
