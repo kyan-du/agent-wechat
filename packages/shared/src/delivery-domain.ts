@@ -53,11 +53,15 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   if (parsed.state === "queued" && parsed.initialOutcome !== undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   const firstTransition = parsed.transitions[0];
+  if (parsed.state !== "queued" && parsed.state !== "composing") {
+    const outcome = parsed.initialOutcome;
+    if (outcome?.source !== "send_result") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
+    if (outcome.commitAttempted !== parsed.commitAttempted) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  }
   if (firstTransition?.from === "queued" && ["submitted", "uncertain", "failed"].includes(firstTransition.to)) {
     const expected = firstTransition.to === "submitted" ? "send_accepted" : firstTransition.to === "uncertain" ? "post_commit_uncertain" : "pre_commit_failure";
     const outcome = parsed.initialOutcome;
-    if (outcome?.source !== "send_result") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
-    if (expected !== firstTransition.reason || outcome.success !== (firstTransition.to === "submitted") || outcome.commitAttempted !== parsed.commitAttempted || (firstTransition.to === "uncertain" && !parsed.commitAttempted) || (firstTransition.to === "failed" && parsed.commitAttempted)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+    if (expected !== firstTransition.reason || outcome?.success !== (firstTransition.to === "submitted") || outcome?.commitAttempted !== parsed.commitAttempted || (firstTransition.to === "uncertain" && !parsed.commitAttempted) || (firstTransition.to === "failed" && parsed.commitAttempted)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   }
   if (lastTransition && lastTransition.to !== parsed.state) throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.observedLocalId !== undefined && !["observed_in_chat", "confirmed"].includes(parsed.state)) throw new Error("INVALID_DELIVERY_OBSERVATION_STATE");
@@ -85,6 +89,7 @@ export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryStat
   if ((to === "failed" || to === "uncertain") && (current.state === "queued" || current.state === "composing") && current.initialOutcome === undefined) {
     throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   }
+  if (to === "submitted" && current.state === "composing" && current.initialOutcome === undefined) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted)) return current;
   const timestamp = now.toISOString();
   const next = validateAttempt({ ...current, state: to, updatedAt: timestamp, transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
