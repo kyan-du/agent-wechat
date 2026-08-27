@@ -82,7 +82,7 @@ test("sender provenance requires the authenticated session capability", async ()
       chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1,
       sender: "attacker", content: "hello",
     }, trusted()),
-    /TAMPERED_DELIVERY_ATTEMPT/,
+    /REVOKED_SENDER_PROVENANCE/,
   );
 
   await assert.rejects(
@@ -90,7 +90,7 @@ test("sender provenance requires the authenticated session capability", async ()
       chatId: "chat", localId: 1, serverId: 1, timestamp: "2026-01-01T00:00:01Z", type: 1,
       sender: "attacker", content: "hello",
     }, trusted()),
-    /TAMPERED_DELIVERY_ATTEMPT/,
+    /REVOKED_SENDER_PROVENANCE/,
   );
 
   for (const tampered of [
