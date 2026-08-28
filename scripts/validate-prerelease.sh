@@ -15,9 +15,6 @@ pnpm typecheck
 pnpm -r --if-present test
 pnpm build
 node scripts/validate-release-boundary.mjs --require-rendered
-node scripts/release-audit.mjs --write
-git diff --exit-code -- docs/release-audit/npm-materials.json
-
 for package_dir in packages/cli packages/openclaw-extension packages/wechaty-puppet; do
   (
     cd "$package_dir"

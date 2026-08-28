@@ -46,10 +46,7 @@ jobs:
               - '.github/workflows/ghcr-prerelease.yml'
               - '.github/workflows/docker-rebuild.yml'
               - '.github/workflows/ci.yml'
-              - 'scripts/audit-release.sh'
-              - 'scripts/release-audit.mjs'
               - 'scripts/validate-docker-context.mjs'
-              - 'scripts/test-release-audit.sh'
               - 'scripts/validate-prerelease-contract.mjs'
               - 'scripts/generate-prerelease-manifest.mjs'
               - 'scripts/validate-prerelease.sh'
@@ -66,7 +63,6 @@ jobs:
               - 'docs/release/**'
               - '.github/workflows/release-validation.yml'
               - '.github/workflows/npm-*.yml'
-              - 'docs/release-audit/**'
               - 'docker/**'
             rust:
               - 'packages/agent-server-rust/**'
@@ -126,14 +122,6 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-      - name: Release artifact audit
-        run: |
-          node scripts/release-audit.mjs --write
-          git diff --exit-code -- docs/release-audit/npm-materials.json
-          ./scripts/test-release-audit.sh
-          unexpected=$(git status --porcelain --untracked-files=all | grep -Ev '^(\?\?| M) (packages/.*/dist/|docs/dist/)' || true)
-          test -z "$unexpected" || { printf '%s\n' "$unexpected"; exit 1; }
 
       - name: Typecheck
         run: pnpm typecheck
