@@ -8,6 +8,7 @@ DOCKERFILE="$DOCKER_DIR/Dockerfile"
 ARCH_ONLY=""
 NO_CACHE=0
 BUILD_MODE="release"
+VERSION="$(node -p "require('$ROOT_DIR/packages/agent-server-rust/package.json').version")"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -61,6 +62,7 @@ build_arch() {
     ${NO_CACHE:+--no-cache} \
     --platform "$platform" \
     --build-arg BUILD_MODE="$BUILD_MODE" \
+    --build-arg VERSION="$VERSION" \
     -t "$tag" \
     --load \
     -f "$DOCKERFILE" \
