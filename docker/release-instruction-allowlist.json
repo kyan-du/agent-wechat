@@ -7,7 +7,7 @@
     "WORKDIR /build",
     "RUN command -v pkg-config && test \"$(dpkg-query -W -f='${Version}' pkg-config)\" = \"1.8.1-1\"",
     "COPY agent-server-rust/Cargo.toml agent-server-rust/Cargo.lock* ./",
-    "RUN test -n \"$VERSION\" && sed -i \"0,/^version = .*/s//version = \\\"$VERSION\\\"/\" Cargo.toml",
+    "RUN if [ -n \"$VERSION\" ]; then sed -i \"0,/^version = .*/s//version = \\\"$VERSION\\\"/\" Cargo.toml; fi",
     "RUN mkdir -p src && echo 'fn main() {}' > src/main.rs",
     "RUN if [ \"$BUILD_MODE\" = \"debug\" ]; then cargo build 2>/dev/null || true; else cargo build --release 2>/dev/null || true; fi",
     "RUN rm -rf src target/release/deps/agent_server* target/debug/deps/agent_server*",
