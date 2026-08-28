@@ -62,7 +62,7 @@ export async function payloadDigest(value: string): Promise<string> {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
+function validateAttempt(attempt: DeliveryAttempt, allowObservationEvidence = false): DeliveryAttempt {
   let parsed;
   try {
     parsed = deliveryAttemptSchema.strict().parse(attempt);
@@ -78,11 +78,12 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   if (parsed.transitions.length > 0 && parsed.transitions[0]?.from !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_ORIGIN");
+  if ((parsed.state === "observed_in_chat" || parsed.state === "confirmed") && !allowObservationEvidence) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   if (parsed.state === "observed_in_chat" || parsed.state === "confirmed") {
     const observationTransitions = parsed.transitions.filter((transition) => transition.to === "observed_in_chat" || transition.to === "confirmed");
     if (observationTransitions.length === 0 || parsed.observationEvidence === undefined) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   }
-  if ((parsed.state === "queued" || parsed.state === "composing") && (parsed.initialOutcome !== undefined || parsed.observationEvidence !== undefined)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
+  if ((parsed.state === "queued" || parsed.state === "composing" || parsed.state === "submitted") && (parsed.initialOutcome !== undefined && (parsed.state === "queued" || parsed.state === "composing") || parsed.observationEvidence !== undefined || parsed.observedLocalId !== undefined && parsed.state === "submitted")) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   if (parsed.state === "observed_in_chat" && parsed.observationEvidence === undefined) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   if (parsed.state === "confirmed" && (parsed.observationEvidence === undefined || parsed.observedLocalId === undefined)) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   if (parsed.observationEvidence !== undefined && (parsed.observationEvidence.chatId !== parsed.targetChatId || parsed.observationEvidence.sender !== parsed.senderId || parsed.observationEvidence.payloadDigest !== parsed.payloadDigest || (parsed.observedLocalId !== undefined && parsed.observationEvidence.localId !== parsed.observedLocalId))) throw new Error("INVALID_DELIVERY_OBSERVATION_EVIDENCE");
@@ -118,14 +119,14 @@ export async function createQueuedDelivery(targetChatId: string, payload: string
   return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), attemptId: newAttemptId(), state: "queued", commitAttempted: false, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [] });
 }
 
-function advanceDeliveryInternal(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now: Date, observationEvidence?: DeliveryObservationEvidence): DeliveryAttempt {
-  const current = validateAttempt(attempt);
+function advanceDeliveryInternal(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now: Date, observationEvidence?: DeliveryObservationEvidence, allowObservationEvidence = false): DeliveryAttempt {
+  const current = validateAttempt(attempt, allowObservationEvidence);
   if (to === "uncertain" && reason === "post_commit_uncertain" && !current.commitAttempted) throw new Error("INVALID_DELIVERY_COMMIT_EVIDENCE");
   if ((to === "failed" || to === "uncertain" || to === "submitted") && (current.state === "queued" || current.state === "composing")) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME_AUTHORITY");
   if ((to === "observed_in_chat" || to === "confirmed") && observationEvidence === undefined) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   if (!canAdvanceDelivery(current.state, to, reason, current.commitAttempted)) return current;
   const timestamp = now.toISOString();
-  return validateAttempt({ ...current, state: to, updatedAt: timestamp, ...(observationEvidence ? { observationEvidence } : {}), transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] });
+  return validateAttempt({ ...current, state: to, updatedAt: timestamp, ...(observationEvidence ? { observationEvidence } : {}), transitions: [...current.transitions, { from: current.state, to, at: timestamp, reason }] }, allowObservationEvidence);
 }
 
 export async function advanceDelivery(attempt: DeliveryAttempt, to: DeliveryState, reason: DeliveryCause, now = new Date()): Promise<DeliveryAttempt> {
@@ -158,11 +159,11 @@ export async function deliveryAfterSend(result: Pick<SendResult, "success" | "co
 }
 
 function buildObservedDelivery(current: DeliveryAttempt, evidence: DeliveryObservationEvidence, now: Date): DeliveryAttempt {
-  return advanceDeliveryInternal(current, "observed_in_chat", "target_sender_and_payload_match", now, evidence);
+  return advanceDeliveryInternal(current, "observed_in_chat", "target_sender_and_payload_match", now, evidence, true);
 }
 
 function buildConfirmedDelivery(current: DeliveryAttempt, evidence: DeliveryObservationEvidence, now: Date): DeliveryAttempt {
-  return advanceDeliveryInternal({ ...current, observedLocalId: evidence.localId }, "confirmed", "observation_confirmed", now, evidence);
+  return advanceDeliveryInternal({ ...current, observedLocalId: evidence.localId }, "confirmed", "observation_confirmed", now, evidence, true);
 }
 
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
