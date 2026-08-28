@@ -4,6 +4,7 @@
 FROM rust:1.93-bookworm@sha256:7c4ae649a84014c467d79319bbf17ce2632ae8b8be123ac2fb2ea5be46823f31 AS builder
 
 ARG BUILD_MODE=release
+ARG VERSION
 
 WORKDIR /build
 
@@ -14,6 +15,13 @@ RUN command -v pkg-config \
 
 # Copy manifests first for dependency caching
 COPY agent-server-rust/Cargo.toml agent-server-rust/Cargo.lock* ./
+# Inject the release version before Cargo compiles env!("CARGO_PKG_VERSION").
+# The prerelease workflow passes the exact tag (for example 0.13.4-next.3).
+# Validation and local debug builds may omit VERSION and use the checked-in
+# package version instead.
+RUN if [ -n "$VERSION" ]; then \
+      sed -i "0,/^version = .*/s//version = \"$VERSION\"/" Cargo.toml; \
+    fi
 # Create dummy src for dependency build
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
 RUN if [ "$BUILD_MODE" = "debug" ]; then cargo build 2>/dev/null || true; else cargo build --release 2>/dev/null || true; fi
