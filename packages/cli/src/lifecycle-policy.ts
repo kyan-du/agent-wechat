@@ -10,3 +10,10 @@ export type VolumeInspect = {
   Labels?: Record<string, string> | null;
 };
 
+export function hasOwnedContainer(info: { Config?: { Labels?: Record<string, string> } }): boolean {
+  return info.Config?.Labels?.[INSTANCE_LABEL] === "default";
+}
+
+export function hasOwnedVolume(existing: VolumeInspect, role: "data" | "wechat-home"): boolean {
+  return existing.Driver === "local" && existing.Labels?.[INSTANCE_LABEL] === "default" && existing.Labels?.[VOLUME_ROLE_LABEL] === role;
+}
