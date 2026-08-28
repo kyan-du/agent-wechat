@@ -19,12 +19,13 @@ function exactEnv(env: string[] | undefined, key: string): string | undefined {
 export function containerOwnershipError(
   info: OwnershipInspect,
   inventory: InstanceInventory,
-  options: { ignoreContainerId?: boolean } = {},
+  options: { ignoreContainerId?: boolean; allowMissingOwnershipLabel?: boolean } = {},
 ): { code: string; message: string } | undefined {
   if (!options.ignoreContainerId && inventory.containerId && info.Id !== inventory.containerId) {
     return { code: "CONTAINER_ID_MISMATCH", message: "container identity changed" };
   }
-  if (info.Config?.Labels?.[INSTANCE_LABEL] !== "default") {
+  const ownershipLabel = info.Config?.Labels?.[INSTANCE_LABEL];
+  if (ownershipLabel !== "default" && !(options.allowMissingOwnershipLabel && ownershipLabel === undefined)) {
     return { code: "CONTAINER_OWNERSHIP_MISMATCH", message: "container is not owned by this instance" };
   }
   const expectedImage = inventory.imageDigest ?? inventory.imageRef;

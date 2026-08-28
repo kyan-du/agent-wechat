@@ -46,6 +46,9 @@ test("container actions require exact inventory ownership", () => {
   const recreated = { ...inspect, Id: "c".repeat(64) };
   assert.equal(containerOwnershipError(recreated, inventory)?.code, "CONTAINER_ID_MISMATCH");
   assert.equal(containerOwnershipError(recreated, inventory, { ignoreContainerId: true }), undefined);
+  const unlabelled = { ...recreated, Config: { ...recreated.Config, Labels: { ...recreated.Config.Labels, ["dev.visionclaw.agent-wechat.instance"]: undefined } } };
+  assert.equal(containerOwnershipError(unlabelled, inventory, { ignoreContainerId: true })?.code, "CONTAINER_OWNERSHIP_MISMATCH");
+  assert.equal(containerOwnershipError(unlabelled, inventory, { ignoreContainerId: true, allowMissingOwnershipLabel: true }), undefined);
   assert.equal(containerOwnershipError({ ...recreated, Mounts: [] }, inventory, { ignoreContainerId: true })?.code, "CONTAINER_RESOURCE_MISMATCH");
   assert.equal(containerOwnershipError({ ...inspect, Config: { Labels: {} } }, inventory)?.code, "CONTAINER_OWNERSHIP_MISMATCH");
   assert.equal(containerOwnershipError({ ...inspect, Config: { ...inspect.Config, Image: "agent-wechat:amd64" } }, inventory)?.code, "CONTAINER_IMAGE_MISMATCH");

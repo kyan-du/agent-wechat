@@ -184,7 +184,10 @@ export function assertOwnedContainer(info: DockerInspect, inventory: InstanceInv
 /** Adopt an externally recreated container only after all trusted resources match. */
 function reconcileContainerId(info: DockerInspect, inventory: InstanceInventory): InstanceInventory {
   if (!inventory.containerId || info.Id === inventory.containerId) return inventory;
-  const violation = containerOwnershipError(info, inventory, { ignoreContainerId: true });
+  const violation = containerOwnershipError(info, inventory, {
+    ignoreContainerId: true,
+    allowMissingOwnershipLabel: true,
+  });
   if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
   const reconciled = { ...inventory, containerId: info.Id, updatedAt: new Date().toISOString() };
   saveInventory(reconciled);
