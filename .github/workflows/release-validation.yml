@@ -9,8 +9,6 @@ on:
       - '.changeset/**'
       - 'packages/**'
       - 'release/**'
-      - 'scripts/audit-release.sh'
-      - 'scripts/release-audit.mjs'
       - 'scripts/validate-docker-context.mjs'
       - 'scripts/validate-prerelease-contract.mjs'
       - 'scripts/validate-prerelease.sh'
@@ -19,6 +17,8 @@ on:
       - 'scripts/smoke-npm-packages.mjs'
       - 'scripts/check-npm-production-release.mjs'
       - 'scripts/verify-published-npm-release.mjs'
+      - 'scripts/validate-release-consistency.mjs'
+      - 'scripts/validate-release-consistency.test.mjs'
       - '.github/workflows/release-validation.yml'
       - '.github/workflows/npm-*.yml'
       - 'package.json'
@@ -30,8 +30,6 @@ on:
       - '.changeset/**'
       - 'packages/**'
       - 'release/**'
-      - 'scripts/audit-release.sh'
-      - 'scripts/release-audit.mjs'
       - 'scripts/validate-docker-context.mjs'
       - 'scripts/validate-prerelease-contract.mjs'
       - 'scripts/validate-prerelease.sh'
@@ -40,6 +38,8 @@ on:
       - 'scripts/smoke-npm-packages.mjs'
       - 'scripts/check-npm-production-release.mjs'
       - 'scripts/verify-published-npm-release.mjs'
+      - 'scripts/validate-release-consistency.mjs'
+      - 'scripts/validate-release-consistency.test.mjs'
       - '.github/workflows/release-validation.yml'
       - '.github/workflows/npm-*.yml'
       - 'package.json'
@@ -88,3 +88,6 @@ jobs:
 
       - name: Clean-install and import packed public packages
         run: pnpm test:npm-packages
+
+      - name: Validate package, Cargo, and CLI runtime versions
+        run: pnpm test:release-consistency

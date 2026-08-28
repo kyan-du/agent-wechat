@@ -73,6 +73,9 @@ jobs:
           pnpm -r --if-present test
           pnpm test:release-boundary
 
+      - name: Validate package, Cargo, and CLI runtime versions
+        run: node scripts/validate-release-consistency.mjs --version "${{ inputs.version }}" --commit "$GITHUB_SHA"
+
       - name: Pack exact production tarballs
         run: |
           set -euo pipefail

@@ -13,8 +13,15 @@ Run the workflow manually with one input:
 - `version`: exact stable `X.Y.Z`, matching `@kyan-du/agent-wechat-cli` and `@kyan-du/agent-wechat-openclaw`.
 
 The workflow checks out `main` and fails unless the dispatch SHA equals the current
-`origin/main` SHA. It also requires at least one successful `CI` run for that commit on
-`main` before it packs or publishes.
+origin/main SHA. It also requires at least one successful `CI` run for that commit on
+main before it packs or publishes.
+
+Before packing, the workflow runs `scripts/validate-release-consistency.mjs`. This
+checks that the three public npm package manifests, the Rust package manifest, the
+built CLI's `--version`, and its generated compatibility metadata all agree with the
+requested stable version. It also binds the check to the exact dispatch SHA. A release
+candidate must therefore be built from the same commit whose source metadata is being
+published.
 
 ## Approval and publishing
 
