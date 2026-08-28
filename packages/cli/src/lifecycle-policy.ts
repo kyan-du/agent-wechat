@@ -14,6 +14,16 @@ export function hasOwnedContainer(info: { Config?: { Labels?: Record<string, str
   return info.Config?.Labels?.[INSTANCE_LABEL] === "default";
 }
 
+/** A legacy fixed-name container is safe to reconcile only when inventory binds its ID. */
+export function isReconcileableContainer(
+  info: { Id: string; Config?: { Labels?: Record<string, string> } },
+  inventory?: Pick<InstanceInventory, "containerId">,
+): boolean {
+  if (hasOwnedContainer(info)) return true;
+  const id = inventory?.containerId;
+  return Boolean(id && (info.Id === id || info.Id.startsWith(id) || id.startsWith(info.Id)));
+}
+
 export function hasOwnedVolume(existing: VolumeInspect, role: "data" | "wechat-home"): boolean {
   return existing.Driver === "local" && existing.Labels?.[INSTANCE_LABEL] === "default" && existing.Labels?.[VOLUME_ROLE_LABEL] === role;
 }
