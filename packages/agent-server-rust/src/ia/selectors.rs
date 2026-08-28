@@ -4,7 +4,11 @@ use regex::Regex;
 /// Match WeChat's composer send button in supported English and Chinese UIs.
 /// Keep this exact to avoid treating unrelated buttons as send controls.
 pub fn is_send_button_name(name: &str) -> bool {
-    matches!(name.trim(), "Send" | "Send(S)" | "发送" | "发送(S)")
+    // GTK exposes the accelerator with locale-dependent whitespace (for
+    // example, both `Send(S)` and `Send (S)`). Compare the semantic label,
+    // not that presentation detail, while retaining an explicit allowlist.
+    let normalized: String = name.chars().filter(|c| !c.is_whitespace()).collect();
+    matches!(normalized.as_str(), "Send" | "Send(S)" | "发送" | "发送(S)")
 }
 
 // ============================================
@@ -558,6 +562,8 @@ mod tests {
         assert!(is_send_button_name("Send"));
         assert!(is_send_button_name("发送(S)"));
         assert!(is_send_button_name("发送"));
+        assert!(is_send_button_name("Send (S)"));
+        assert!(is_send_button_name("发送 (S)"));
         assert!(!is_send_button_name("Cancel"));
         assert!(!is_send_button_name("Send file"));
     }
