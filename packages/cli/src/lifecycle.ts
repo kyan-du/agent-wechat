@@ -19,7 +19,9 @@ import { buildDockerRunArgs } from "./device-identity.js";
 import { validatePublishedImageReference } from "./image-reference.js";
 import { CliError, EXIT } from "./exit-contract.js";
 import {
+  IMAGE_LABEL,
   INSTANCE_LABEL,
+  VOLUME_ROLE_LABEL,
   type VolumeInspect,
 } from "./lifecycle-policy.js";
 
