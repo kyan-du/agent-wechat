@@ -58,10 +58,8 @@ test("advanceDelivery records allowed edges and rejects skipped/backward edges",
   assert.equal(submittedFromComposing.state, "submitted");
   assert.deepEqual(JSON.parse(JSON.stringify(submittedFromComposing)).initialOutcome, { source: "send_result", success: true, commitAttempted: true, resultId: "result-1", attemptId: composing.attemptId });
   const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date(), undefined);
-  assert.equal((await advance(submitted, "confirmed", "observation_confirmed")).state, "submitted");
-  const observed = await advance(submitted, "observed_in_chat", "target_sender_and_payload_match");
-  assert.equal(observed.state, "observed_in_chat");
-  assert.equal((await advance(observed, "confirmed", "observation_confirmed")).state, "confirmed");
+  await assert.rejects(() => advance(submitted, "observed_in_chat", "target_sender_and_payload_match"), /INVALID_DELIVERY_OBSERVATION_AUTHORITY/);
+  await assert.rejects(() => advance({ ...submitted, state: "observed_in_chat", transitions: [...submitted.transitions, { from: "submitted" as const, to: "observed_in_chat" as const, at: new Date().toISOString(), reason: "target_sender_and_payload_match" as const }] }, "confirmed", "observation_confirmed"), /INVALID_DELIVERY_OBSERVATION_AUTHORITY/);
   assert.equal(canAdvanceDelivery("queued", "composing", "observation_confirmed"), false);
   assert.equal(canAdvanceDelivery("composing", "submitted", "observation_confirmed"), false);
 });

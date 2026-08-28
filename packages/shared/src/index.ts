@@ -26,6 +26,7 @@ export {
   type DeliveryCause,
   type DeliveryInitialOutcome,
   type DeliveryObservation,
+  type DeliveryObservationEvidence,
   type DeliveryState,
 } from "./delivery-domain.js";
 
@@ -66,6 +67,7 @@ export {
   deliveryStateSchema,
   deliveryTransitionSchema,
   deliveryInitialOutcomeSchema,
+  deliveryObservationEvidenceSchema,
   deliveryAttemptSchema,
   deliveryObservationSchema,
   // Agent config schema
