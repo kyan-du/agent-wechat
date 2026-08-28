@@ -99,6 +99,7 @@ mod tests {
     fn load_fixture(name: &str) -> A11yNode {
         let json = match name {
             "chat_view.json" => include_str!("test_fixtures/chat_view.json"),
+            "chat_with_update_overlay.json" => include_str!("test_fixtures/chat_with_update_overlay.json"),
             "more_menu_open.json" => include_str!("test_fixtures/more_menu_open.json"),
             "settings_open.json" => include_str!("test_fixtures/settings_open.json"),
             "settings_confirm.json" => include_str!("test_fixtures/settings_confirm.json"),
@@ -162,5 +163,13 @@ mod tests {
         );
         // popup must NOT false-match
         assert!(states.popup.is_none());
+    }
+
+    #[test]
+    fn test_chat_update_overlay_is_not_settings() {
+        let a11y = load_fixture("chat_with_update_overlay.json");
+        let states = identify_states(&a11y, "");
+        assert_eq!(states.main_window.as_ref().unwrap().state_id, "chat");
+        assert!(states.settings.is_none());
     }
 }

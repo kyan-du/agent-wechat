@@ -1,6 +1,7 @@
 use super::Plan;
 use crate::db::{get_db, queries};
 use crate::ia::actions;
+use crate::ia::helpers::action_frame;
 use crate::ia::types::*;
 use crate::tools::wechat_db::{find_account_dir, find_wechat_pid};
 use crate::tools::wechat_keys::{extract_keys_async, needs_key_extraction, store_keys};
@@ -68,9 +69,14 @@ impl Plan for LoginPlan {
 
         // Dismiss popups first
         if state.popup.is_some() && identified.popup.is_some() {
+            let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
+                actions::close_window()
+            } else {
+                actions::dismiss_popup()
+            };
             return Some(SelectedAction {
-                action: actions::dismiss_popup(),
-                frame: frame(),
+                action,
+                frame: action_frame(identified),
             });
         }
 

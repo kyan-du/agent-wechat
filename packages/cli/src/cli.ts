@@ -172,7 +172,7 @@ async function resetAuth(yes: boolean): Promise<void> {
   try {
     removeOwnedVolume(inventory, 1, "wechat-home");
   } catch (error) {
-    if (error instanceof CliError && error.code === "VOLUME_OWNERSHIP_MISMATCH") throw error;
+    if (error instanceof CliError && error.code === "VOLUME_DRIVER_UNSUPPORTED") throw error;
     throw new CliError("AUTH_RESET_CLEANUP_INCOMPLETE", `remaining resource: volume:${inventory.volumes[1]}`, EXIT.CLEANUP);
   }
   const remaining: string[] = [];

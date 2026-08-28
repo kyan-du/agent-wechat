@@ -1,6 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
-use crate::ia::helpers::find_edit_and_send_button;
+use crate::ia::helpers::{action_frame, find_edit_and_send_button};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
@@ -77,12 +77,14 @@ impl Plan for ChatOpenPlan {
     ) -> Option<SelectedAction> {
         // Dismiss popups
         if state.popup.is_some() && identified.popup.is_some() {
+            let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
+                actions::close_window()
+            } else {
+                actions::dismiss_popup()
+            };
             return Some(SelectedAction {
-                action: actions::dismiss_popup(),
-                frame: identified
-                    .main_window
-                    .as_ref()
-                    .and_then(|m| m.frame.clone()),
+                action,
+                frame: action_frame(identified),
             });
         }
 
@@ -140,10 +142,7 @@ impl Plan for ChatOpenPlan {
                         if !skipped {
                             return Some(SelectedAction {
                                 action: actions::wait_short(),
-                                frame: identified
-                                    .main_window
-                                    .as_ref()
-                                    .and_then(|m| m.frame.clone()),
+                                frame: action_frame(identified),
                             });
                         }
                         continue;
@@ -154,10 +153,7 @@ impl Plan for ChatOpenPlan {
                     tracing::info!("[chat_open] Opening → Done (no clear_unreads)");
                     return Some(SelectedAction {
                         action: actions::wait_short(),
-                        frame: identified
-                            .main_window
-                            .as_ref()
-                            .and_then(|m| m.frame.clone()),
+                        frame: action_frame(identified),
                     });
                 }
 
@@ -182,10 +178,7 @@ impl Plan for ChatOpenPlan {
                             }
                             return Some(SelectedAction {
                                 action: actions::wait_short(),
-                                frame: identified
-                                    .main_window
-                                    .as_ref()
-                                    .and_then(|m| m.frame.clone()),
+                                frame: action_frame(identified),
                             });
                         }
                     };
@@ -198,10 +191,7 @@ impl Plan for ChatOpenPlan {
                     if let Some(bounds) = &edit_node.bounds {
                         return Some(SelectedAction {
                             action: actions::click_bounds(bounds),
-                            frame: identified
-                                .main_window
-                                .as_ref()
-                                .and_then(|m| m.frame.clone()),
+                            frame: action_frame(identified),
                         });
                     }
                     continue;

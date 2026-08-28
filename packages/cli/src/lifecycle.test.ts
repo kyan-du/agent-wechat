@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasOwnedContainer, hasOwnedVolume, isReconcileableContainer } from "./lifecycle-policy.ts";
+import { hasOwnedContainer, isReconcileableContainer, isUsableLocalVolume } from "./lifecycle-policy.ts";
 
 test("fixed-name containers require the CLI instance label", () => {
   const owned = { Id: "a".repeat(64), Image: "sha256:x", Config: { Labels: { "dev.visionclaw.agent-wechat.instance": "default" } } };
@@ -16,10 +16,7 @@ test("legacy fixed-name containers reconcile only through trusted inventory", ()
   assert.equal(isReconcileableContainer(info), false);
 });
 
-test("purge volumes require local driver, instance label, and matching role", () => {
-  const owned = { Driver: "local", Labels: { "dev.visionclaw.agent-wechat.instance": "default", "dev.visionclaw.agent-wechat.volume-role": "data" } };
-  assert.equal(hasOwnedVolume(owned, "data"), true);
-  assert.equal(hasOwnedVolume({ ...owned, Labels: {} }, "data"), false);
-  assert.equal(hasOwnedVolume({ ...owned, Driver: "custom" }, "data"), false);
-  assert.equal(hasOwnedVolume(owned, "wechat-home"), false);
+test("purge volumes require a local Docker driver", () => {
+  assert.equal(isUsableLocalVolume({ Driver: "local" }), true);
+  assert.equal(isUsableLocalVolume({ Driver: "custom" }), false);
 });

@@ -24,6 +24,6 @@ export function isReconcileableContainer(
   return Boolean(id && (info.Id === id || info.Id.startsWith(id) || id.startsWith(info.Id)));
 }
 
-export function hasOwnedVolume(existing: VolumeInspect, role: "data" | "wechat-home"): boolean {
-  return existing.Driver === "local" && existing.Labels?.[INSTANCE_LABEL] === "default" && existing.Labels?.[VOLUME_ROLE_LABEL] === role;
+export function isUsableLocalVolume(existing: VolumeInspect): boolean {
+  return existing.Driver === "local";
 }

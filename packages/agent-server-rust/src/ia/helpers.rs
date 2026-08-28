@@ -1,5 +1,5 @@
 use super::selectors::{is_send_button_name, query_selector};
-use super::types::{A11yNode, Bounds, FrameHint};
+use super::types::{A11yNode, Bounds, FrameHint, IdentifiedStates};
 
 /// Generate a stable hash from a string.
 fn hash_string(s: &str) -> String {
@@ -148,6 +148,15 @@ pub fn frame_hint_from_node(node: &A11yNode) -> Option<FrameHint> {
         bounds,
         pid: node.window.as_ref().map(|w| w.pid),
     })
+}
+
+/// Prefer a popup frame when one is identified; fall back to the main window.
+pub fn action_frame(identified: &IdentifiedStates) -> Option<FrameHint> {
+    identified
+        .popup
+        .as_ref()
+        .and_then(|popup| popup.frame.clone())
+        .or_else(|| identified.main_window.as_ref().and_then(|main| main.frame.clone()))
 }
 
 /// Find the innermost frame ancestor that contains a node matching `selector`.
