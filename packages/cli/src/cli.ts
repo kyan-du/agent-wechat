@@ -31,7 +31,6 @@ import {
   secureRegularFile,
 } from "./instance-inventory.js";
 import {
-  assertOwnedContainer,
   clearContainerIdentity,
   dockerAvailable,
   inspectContainer,
@@ -194,7 +193,6 @@ function programStatus(): Record<string, unknown> {
   const container = inspectContainer();
   if (container) {
     if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
-    assertOwnedContainer(container, inventory);
   }
   return {
     cliVersion: VERSION,

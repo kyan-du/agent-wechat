@@ -22,8 +22,8 @@ import {
   IMAGE_LABEL,
   INSTANCE_LABEL,
   VOLUME_ROLE_LABEL,
-  containerOwnershipError,
-  volumeOwnershipError,
+  hasOwnedContainer,
+  hasOwnedVolume,
   type VolumeInspect,
 } from "./lifecycle-policy.js";
 
@@ -110,8 +110,13 @@ function ensureOwnedVolumes(inventory: InstanceInventory): void {
       docker(["volume", "create", "--driver", "local", "--label", `${INSTANCE_LABEL}=default`, "--label", `${VOLUME_ROLE_LABEL}=${roles[index]}`, name]);
       continue;
     }
-    const violation = volumeOwnershipError(existing, name, roles[index]);
-    if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
+    assertVolumeOwnership(existing, name, roles[index]);
+  }
+}
+
+function assertVolumeOwnership(existing: VolumeInspect, name: string, role: "data" | "wechat-home"): void {
+  if (!hasOwnedVolume(existing, role)) {
+    throw new CliError("VOLUME_OWNERSHIP_MISMATCH", `refusing to use volume ${name} without trusted ownership`, EXIT.ENVIRONMENT);
   }
 }
 
@@ -120,15 +125,18 @@ function assertOwnedVolumes(inventory: InstanceInventory): void {
   for (const [index, name] of inventory.volumes.entries()) {
     const existing = inspectVolume(name);
     if (!existing) continue;
-    const violation = volumeOwnershipError(existing, name, roles[index]);
-    if (violation) throw new CliError(violation.code, violation.message, EXIT.CLEANUP);
+    assertVolumeOwnership(existing, name, roles[index]);
   }
+}
+
+function assertOwnedContainer(info: DockerInspect): void {
+  if (!hasOwnedContainer(info)) throw new CliError("CONTAINER_OWNERSHIP_MISMATCH", "refusing to operate on an unowned container with the fixed name", EXIT.ENVIRONMENT);
 }
 
 export function clearContainerIdentity(inventory: InstanceInventory): void {
   const info = inspectContainer();
   if (!info) throw new CliError("INSTANCE_NOT_RUNNING", "trusted container is required to clear container identity", EXIT.CLEANUP);
-  assertOwnedContainer(info, inventory);
+  assertOwnedContainer(info);
   if (!info.State?.Running) docker(["start", info.Id]);
   try {
     docker(["exec", info.Id, "/opt/reset-device-identity.sh"]);
@@ -146,8 +154,7 @@ export function removeOwnedVolume(
   const name = inventory.volumes[index];
   const existing = inspectVolume(name);
   if (!existing) return false;
-  const violation = volumeOwnershipError(existing, name, role);
-  if (violation) throw new CliError(violation.code, violation.message, EXIT.CLEANUP);
+  assertVolumeOwnership(existing, name, role);
   docker(["volume", "rm", name]);
   return true;
 }
@@ -174,21 +181,6 @@ export function resolveImage(options: {
   const digest = published ? imageRepoDigest(requested) : undefined;
   if (published && !digest) throw new CliError("IMAGE_DIGEST_UNRESOLVED", "published image did not resolve to a fork repo digest", EXIT.ENVIRONMENT);
   return { runReference: digest || requested, requestedReference: requested, digest };
-}
-
-export function assertOwnedContainer(info: DockerInspect, inventory: InstanceInventory): void {
-  const violation = containerOwnershipError(info, inventory);
-  if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
-}
-
-/** Adopt an externally recreated container only after all trusted resources match. */
-function reconcileContainerId(info: DockerInspect, inventory: InstanceInventory): InstanceInventory {
-  if (!inventory.containerId || info.Id === inventory.containerId) return inventory;
-  const violation = containerOwnershipError(info, inventory, { ignoreContainerId: true });
-  if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
-  const reconciled = { ...inventory, containerId: info.Id, updatedAt: new Date().toISOString() };
-  saveInventory(reconciled);
-  return reconciled;
 }
 
 export async function waitCompatible(token: string, timeoutMs = 30_000): Promise<void> {
@@ -223,21 +215,16 @@ export async function startInstance(options: {
   localDefault: string;
 }): Promise<InstanceInventory> {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
-  const selected = resolveImage({ explicit: options.image, pull: options.pull, noPull: options.noPull, localDefault: options.localDefault });
   const existing = inspectContainer();
   const current = loadInventory();
   if (existing) {
+    assertOwnedContainer(existing);
     if (!current) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
-    const reconciled = reconcileContainerId(existing, current);
-    const expected = selected.digest || selected.runReference;
-    const recorded = existing.Config?.Labels?.["dev.visionclaw.agent-wechat.image"];
-    if (existing.Config?.Image !== expected || recorded !== expected) {
-      throw new CliError("IMAGE_COMPATIBILITY_MISMATCH", "existing container image does not match requested compatible image", EXIT.ENVIRONMENT);
-    }
-    if (!existing.State?.Running) docker(["start", existing.Id], { inherit: true });
+    if (!existing.State?.Running) docker(["start", CONTAINER_NAME], { inherit: true });
     await waitCompatible(options.token);
-    return reconciled;
+    return current;
   }
+  const selected = resolveImage({ explicit: options.image, pull: options.pull, noPull: options.noPull, localDefault: options.localDefault });
   const provisional = createInventory(selected.requestedReference, options.identity, selected.digest);
   saveInventory(provisional);
   ensureOwnedVolumes(provisional);
@@ -266,9 +253,9 @@ export function stopInstance(): { stopped: boolean } {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
   const info = inspectContainer();
   if (!info) return { stopped: false };
+  assertOwnedContainer(info);
   const inventory = loadInventory();
   if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "refusing to remove an unowned container", EXIT.ENVIRONMENT);
-  assertOwnedContainer(info, inventory);
   docker(["rm", "-f", info.Id], { inherit: true });
   return { stopped: true };
 }
@@ -296,7 +283,8 @@ export async function replaceImage(options: { image: string; identity: DeviceIde
   const previous = loadInventory();
   if (!previous) throw new CliError("INSTANCE_INVENTORY_MISSING", "start the instance before image upgrade", EXIT.ENVIRONMENT);
   const info = inspectContainer();
-  const reconciled = info ? reconcileContainerId(info, previous) : previous;
+  if (info) assertOwnedContainer(info);
+  const reconciled = previous;
   const selected = resolveImage({ explicit: options.image, pull: true, localDefault: previous.imageRef });
   if (selected.digest === reconciled.imageDigest) return reconciled;
   if (info) {
