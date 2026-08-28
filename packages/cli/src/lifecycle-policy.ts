@@ -19,8 +19,9 @@ function exactEnv(env: string[] | undefined, key: string): string | undefined {
 export function containerOwnershipError(
   info: OwnershipInspect,
   inventory: InstanceInventory,
+  options: { ignoreContainerId?: boolean } = {},
 ): { code: string; message: string } | undefined {
-  if (inventory.containerId && info.Id !== inventory.containerId) {
+  if (!options.ignoreContainerId && inventory.containerId && info.Id !== inventory.containerId) {
     return { code: "CONTAINER_ID_MISMATCH", message: "container identity changed" };
   }
   if (info.Config?.Labels?.[INSTANCE_LABEL] !== "default") {
