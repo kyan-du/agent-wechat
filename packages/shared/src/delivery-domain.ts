@@ -78,6 +78,10 @@ function validateAttempt(attempt: DeliveryAttempt): DeliveryAttempt {
   if (parsed.transitions.length === 0 && parsed.state !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_TAIL");
   if (parsed.transitions.length > 0 && parsed.state === "queued") throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   if (parsed.transitions.length > 0 && parsed.transitions[0]?.from !== "queued") throw new Error("INVALID_DELIVERY_TRANSITION_ORIGIN");
+  if (parsed.state === "observed_in_chat" || parsed.state === "confirmed") {
+    const observationTransitions = parsed.transitions.filter((transition) => transition.to === "observed_in_chat" || transition.to === "confirmed");
+    if (observationTransitions.length === 0 || parsed.observationEvidence === undefined) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
+  }
   if ((parsed.state === "queued" || parsed.state === "composing") && (parsed.initialOutcome !== undefined || parsed.observationEvidence !== undefined)) throw new Error("INVALID_DELIVERY_INITIAL_OUTCOME");
   if (parsed.state === "observed_in_chat" && parsed.observationEvidence === undefined) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
   if (parsed.state === "confirmed" && (parsed.observationEvidence === undefined || parsed.observedLocalId === undefined)) throw new Error("INVALID_DELIVERY_OBSERVATION_AUTHORITY");
