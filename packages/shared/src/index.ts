@@ -11,6 +11,20 @@ export {
   type MessageEnvelope,
 } from "./message-domain.js";
 
+export {
+  DELIVERY_DOMAIN_SCHEMA_VERSION,
+  advanceDelivery,
+  canAdvanceDelivery,
+  createQueuedDelivery,
+  deliveryAfterSend,
+  observeDelivery,
+  payloadDigest,
+  type DeliveryAttempt,
+  type DeliveryCause,
+  type DeliveryObservation,
+  type DeliveryState,
+} from "./delivery-domain.js";
+
 // Export HTTP client
 export {
   WeChatClient,
@@ -45,6 +59,10 @@ export {
   sendResultSchema,
   getMediaParamsSchema,
   mediaResultSchema,
+  deliveryStateSchema,
+  deliveryTransitionSchema,
+  deliveryAttemptSchema,
+  deliveryObservationSchema,
   // Agent config schema
   agentConfigSchema,
 } from "./schemas/index.js";
