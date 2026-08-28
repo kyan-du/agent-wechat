@@ -35,6 +35,7 @@ assert.deepEqual(workflow.jobs.build.strategy.matrix.include.map(x => [x.runner,
 assert.match(text, /test "\$GITHUB_REF" = refs\/heads\/main/);
 assert.match(text, /test "\$GITHUB_SHA" = "\$\(git rev-parse origin\/main\)"/);
 assert.match(text, /push-by-digest=true,name-canonical=true,push=true/);
+assert.match(text, /build-args:\s*\|\s*VERSION=\$\{\{ needs\.authorize\.outputs\.version \}\}/);
 assert.match(text, /imagetools create --tag "\$IMAGE:\$VERSION"/);
 assert.doesNotMatch(text, /(?:^|[:\s])(latest|next)(?:$|[:\s])/m, 'floating image tags are forbidden');
 assert.equal((text.match(/--tag /g) ?? []).length, 1, 'only the merge job may create a tag');
