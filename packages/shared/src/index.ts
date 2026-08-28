@@ -16,17 +16,12 @@ export {
   advanceDelivery,
   canAdvanceDelivery,
   createQueuedDelivery,
-  isAllowedEdge,
   deliveryAfterSend,
   observeDelivery,
   payloadDigest,
-  submitComposingDelivery,
-  type AuthenticatedSenderIdentity,
   type DeliveryAttempt,
   type DeliveryCause,
-  type DeliveryInitialOutcome,
   type DeliveryObservation,
-  type DeliveryObservationEvidence,
   type DeliveryState,
 } from "./delivery-domain.js";
 
@@ -66,8 +61,6 @@ export {
   mediaResultSchema,
   deliveryStateSchema,
   deliveryTransitionSchema,
-  deliveryInitialOutcomeSchema,
-  deliveryObservationEvidenceSchema,
   deliveryAttemptSchema,
   deliveryObservationSchema,
   // Agent config schema
