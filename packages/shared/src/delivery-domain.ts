@@ -157,6 +157,14 @@ export async function deliveryAfterSend(result: Pick<SendResult, "success" | "co
   return validateAttempt({ schemaVersion: 1, senderId, targetChatId, payloadDigest: await payloadDigest(payload), attemptId, state, commitAttempted: result.commitAttempted === true, initialOutcome: { source: "send_result", success: result.success, commitAttempted: result.commitAttempted === true, resultId, attemptId }, createdAt: timestamp, updatedAt: timestamp, ...(idempotencyKey ? { idempotencyKey } : {}), transitions: [{ from: "queued", to: state, at: timestamp, reason }] });
 }
 
+function buildObservedDelivery(current: DeliveryAttempt, evidence: DeliveryObservationEvidence, now: Date): DeliveryAttempt {
+  return advanceDeliveryInternal(current, "observed_in_chat", "target_sender_and_payload_match", now, evidence);
+}
+
+function buildConfirmedDelivery(current: DeliveryAttempt, evidence: DeliveryObservationEvidence, now: Date): DeliveryAttempt {
+  return advanceDeliveryInternal({ ...current, observedLocalId: evidence.localId }, "confirmed", "observation_confirmed", now, evidence);
+}
+
 export async function observeDelivery(attempt: DeliveryAttempt, observation: DeliveryObservation, now = new Date()): Promise<DeliveryAttempt> {
   const current = validateAttempt(attempt);
   const checkedObservation = deliveryObservationSchema.strict().parse(observation);
@@ -168,8 +176,8 @@ export async function observeDelivery(attempt: DeliveryAttempt, observation: Del
   if (checkedObservation.sender !== current.senderId) return advanceDelivery(current, "uncertain", "sender_unverified", now);
   if (normalizeDeliveryType(checkedObservation.type) !== 1 || await payloadDigest(checkedObservation.content) !== current.payloadDigest) return advanceDelivery(current, "uncertain", "payload_mismatch", now);
   const evidence: DeliveryObservationEvidence = { chatId: checkedObservation.chatId, localId: checkedObservation.localId, serverId: checkedObservation.serverId, timestamp: checkedObservation.timestamp, sender: checkedObservation.sender, type: checkedObservation.type, payloadDigest: current.payloadDigest };
-  const observed = advanceDeliveryInternal(current, "observed_in_chat", "target_sender_and_payload_match", now, evidence);
-  return advanceDeliveryInternal({ ...observed, observedLocalId: checkedObservation.localId }, "confirmed", "observation_confirmed", now, evidence);
+  const observed = buildObservedDelivery(current, evidence, now);
+  return buildConfirmedDelivery(observed, evidence, now);
 }
 
 function normalizeDeliveryType(type: number): number {
