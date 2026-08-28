@@ -187,9 +187,10 @@ test("runtime validation rejects histories that bypass the queued origin", async
     senderId: "wxid_self",
     targetChatId: "chat",
     payloadDigest: digest,
+    attemptId: "00000000-0000-4000-8000-000000000001",
     state: "confirmed" as const,
     commitAttempted: false,
-    initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false },
+    initialOutcome: { source: "send_result" as const, success: false, commitAttempted: false, resultId: "forged", attemptId: "00000000-0000-4000-8000-000000000001" },
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:02Z",
     transitions: [
