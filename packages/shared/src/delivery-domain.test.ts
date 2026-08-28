@@ -48,7 +48,7 @@ test("advanceDelivery handles ordinary edges but cannot claim terminal outcomes"
   assert.equal(composing.state, "composing");
   assert.equal((await advanceDelivery(composing, "submitted", "send_accepted")).state, "submitted");
   const submitted = await deliveryAfterSend({ success: true, commitAttempted: true }, "chat", "hello", "wxid_self", new Date());
-  assert.equal((await advanceDelivery(submitted, "observed_in_chat", "target_sender_and_payload_match")).state, "observed_in_chat");
+  await assert.rejects(() => advanceDelivery(submitted, "observed_in_chat", "target_sender_and_payload_match"), /INVALID_DELIVERY_OBSERVATION_AUTHORITY/);
   assert.equal(canAdvanceDelivery("submitted", "observed_in_chat", "target_sender_and_payload_match"), true);
 });
 
