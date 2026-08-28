@@ -181,6 +181,16 @@ export function assertOwnedContainer(info: DockerInspect, inventory: InstanceInv
   if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
 }
 
+/** Adopt an externally recreated container only after all trusted resources match. */
+function reconcileContainerId(info: DockerInspect, inventory: InstanceInventory): InstanceInventory {
+  if (!inventory.containerId || info.Id === inventory.containerId) return inventory;
+  const violation = containerOwnershipError(info, inventory, { ignoreContainerId: true });
+  if (violation) throw new CliError(violation.code, violation.message, EXIT.ENVIRONMENT);
+  const reconciled = { ...inventory, containerId: info.Id, updatedAt: new Date().toISOString() };
+  saveInventory(reconciled);
+  return reconciled;
+}
+
 export async function waitCompatible(token: string, timeoutMs = 30_000): Promise<void> {
   await waitHealthy(timeoutMs);
   try {
@@ -218,7 +228,7 @@ export async function startInstance(options: {
   const current = loadInventory();
   if (existing) {
     if (!current) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
-    assertOwnedContainer(existing, current);
+    const reconciled = reconcileContainerId(existing, current);
     const expected = selected.digest || selected.runReference;
     const recorded = existing.Config?.Labels?.["dev.visionclaw.agent-wechat.image"];
     if (existing.Config?.Image !== expected || recorded !== expected) {
@@ -226,7 +236,7 @@ export async function startInstance(options: {
     }
     if (!existing.State?.Running) docker(["start", existing.Id], { inherit: true });
     await waitCompatible(options.token);
-    return current;
+    return reconciled;
   }
   const provisional = createInventory(selected.requestedReference, options.identity, selected.digest);
   saveInventory(provisional);
@@ -286,9 +296,9 @@ export async function replaceImage(options: { image: string; identity: DeviceIde
   const previous = loadInventory();
   if (!previous) throw new CliError("INSTANCE_INVENTORY_MISSING", "start the instance before image upgrade", EXIT.ENVIRONMENT);
   const info = inspectContainer();
-  if (info) assertOwnedContainer(info, previous);
+  const reconciled = info ? reconcileContainerId(info, previous) : previous;
   const selected = resolveImage({ explicit: options.image, pull: true, localDefault: previous.imageRef });
-  if (selected.digest === previous.imageDigest) return previous;
+  if (selected.digest === reconciled.imageDigest) return reconciled;
   if (info) {
     if (info.State?.Running) docker(["stop", info.Id], { inherit: true });
     docker(["rename", info.Id, `${CONTAINER_NAME}-rollback`]);
@@ -302,7 +312,7 @@ export async function replaceImage(options: { image: string; identity: DeviceIde
       const failed = inspectContainer();
       if (failed) docker(["rm", "-f", failed.Id]);
       if (info) docker(["rename", info.Id, CONTAINER_NAME]);
-      saveInventory(previous);
+      saveInventory(reconciled);
       if (info?.State?.Running) docker(["start", CONTAINER_NAME]);
     } catch {
       throw new CliError("ROLLBACK_FAILED", "image upgrade failed and rollback was incomplete", EXIT.ROLLBACK);

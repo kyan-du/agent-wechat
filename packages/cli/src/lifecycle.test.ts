@@ -43,7 +43,10 @@ const inspect = {
 
 test("container actions require exact inventory ownership", () => {
   assert.equal(containerOwnershipError(inspect, inventory), undefined);
-  assert.equal(containerOwnershipError({ ...inspect, Id: "c".repeat(64) }, inventory)?.code, "CONTAINER_ID_MISMATCH");
+  const recreated = { ...inspect, Id: "c".repeat(64) };
+  assert.equal(containerOwnershipError(recreated, inventory)?.code, "CONTAINER_ID_MISMATCH");
+  assert.equal(containerOwnershipError(recreated, inventory, { ignoreContainerId: true }), undefined);
+  assert.equal(containerOwnershipError({ ...recreated, Mounts: [] }, inventory, { ignoreContainerId: true })?.code, "CONTAINER_RESOURCE_MISMATCH");
   assert.equal(containerOwnershipError({ ...inspect, Config: { Labels: {} } }, inventory)?.code, "CONTAINER_OWNERSHIP_MISMATCH");
   assert.equal(containerOwnershipError({ ...inspect, Config: { ...inspect.Config, Image: "agent-wechat:amd64" } }, inventory)?.code, "CONTAINER_IMAGE_MISMATCH");
   assert.equal(containerOwnershipError({ ...inspect, Config: { ...inspect.Config, Env: [...inspect.Config.Env, `AGENT_WECHAT_MAC=${inventory.identity.mac}`] } }, inventory)?.code, "CONTAINER_IDENTITY_MISMATCH");
