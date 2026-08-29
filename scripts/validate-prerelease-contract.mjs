@@ -81,7 +81,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
       const inertBlueprint = name === "npm-release.yml" && where === "job publish" && job?.environment === "npm-production";
-      const approvedWrite = (name === "ghcr-prerelease.yml" && where === "workflow" && scope === "packages")
+      const approvedWrite = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint;
       if (permissions[scope] === "write" && !approvedWrite) forbidden.push(`${name}: ${where} ${scope} write permission`);
@@ -93,9 +93,9 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     for (const step of job?.steps ?? []) {
       const uses = String(step?.uses ?? "");
       const command = String(step?.run ?? "");
-      if (/docker\/login-action/i.test(uses) && name !== "ghcr-prerelease.yml") forbidden.push(`${name}: registry login action`);
+      if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name)) forbidden.push(`${name}: registry login action`);
       if (/softprops\/action-gh-release|actions\/create-release/i.test(uses)) forbidden.push(`${name}: GitHub Release action`);
-      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && name !== "ghcr-prerelease.yml") forbidden.push(`${name}: image push action`);
+      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name)) forbidden.push(`${name}: image push action`);
       const commands = [
         [/\b(?:npm|pnpm)\s+publish\b/i, "npm publish"],
         [/\bchangeset\s+publish\b/i, "changeset publish"],
@@ -104,7 +104,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
         [/\bdocker\s+(?:push|buildx\s+build[^\n]*--push)\b/i, "image push"],
       ];
       for (const [pattern, label] of commands) {
-        const approvedPublish = (name === "ghcr-prerelease.yml" && label === "image push")
+        const approvedPublish = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && label === "image push")
           || (name === "npm-release.yml" && jobName === "publish" && job?.environment === "npm-production");
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }

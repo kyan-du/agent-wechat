@@ -10,10 +10,12 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const cli = fs.readFileSync(path.join(repo, "packages/cli/src/cli.ts"), "utf8");
 const lifecycle = fs.readFileSync(path.join(repo, "packages/cli/src/lifecycle.ts"), "utf8");
 
-test("accepts exact fork semver tags and sha256 digests", () => {
+test("accepts exact fork semver, commit, and sha256 references", () => {
   const tag = "ghcr.io/kyan-du/agent-wechat:1.2.3-rc.1";
+  const commitTag = "ghcr.io/kyan-du/agent-wechat:09ca8f2";
   const digest = `ghcr.io/kyan-du/agent-wechat@sha256:${"a".repeat(64)}`;
   assert.equal(validatePublishedImageReference(tag), tag);
+  assert.equal(validatePublishedImageReference(commitTag), commitTag);
   assert.equal(validatePublishedImageReference(digest), digest);
 });
 
@@ -23,8 +25,15 @@ test("rejects floating, foreign, malformed, and shell-like image references", ()
     "ghcr.io/other/image:1.2.3",
     "ghcr.io/kyan-du/agent-wechat:<version>",
     `ghcr.io/kyan-du/agent-wechat@sha256:${"A".repeat(64)}`,
+    "ghcr.io/kyan-du/agent-wechat:09ca8f",
+    "ghcr.io/kyan-du/agent-wechat:09ca8f20",
+    "ghcr.io/kyan-du/agent-wechat:09CA8F2",
     "ghcr.io/kyan-du/agent-wechat:1.2.3;touch /tmp/pwned",
   ]) assert.throws(() => validatePublishedImageReference(value), /Invalid image reference/);
+});
+
+test("commit verification references remain distinct from local and release defaults", () => {
+  assert.match(validatePublishedImageReference("ghcr.io/kyan-du/agent-wechat:09ca8f2"), /:09ca8f2$/);
 });
 
 test("default CLI path selects a usable local build and never falls back to a registry tag", () => {
@@ -33,6 +42,7 @@ test("default CLI path selects a usable local build and never falls back to a re
   assert.doesNotMatch(cli, /return `\$\{GHCR_IMAGE\}:\$\{VERSION\}`/);
   assert.match(cli, /localDefault: localBuildImage\(\)/);
   assert.match(lifecycle, /inventory\?\.imageDigest \|\| options\.localDefault/);
+  assert.match(cli, /semver\/commit tag or digest/);
 });
 
 test("Docker operations preserve the selected image as one argv value", () => {

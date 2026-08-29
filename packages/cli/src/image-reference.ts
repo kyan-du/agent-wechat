@@ -1,19 +1,20 @@
 const FORK_IMAGE = "ghcr.io/kyan-du/agent-wechat";
 const VERSION_TAG = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
+const COMMIT_TAG = /^[a-f0-9]{7}$/;
 
-/** Accept only immutable, release-shaped references from the fork registry. */
+/** Accept only exact fork release or commit-verification references. */
 export function validatePublishedImageReference(reference: string): string {
   const tagPrefix = `${FORK_IMAGE}:`;
   const digestPrefix = `${FORK_IMAGE}@`;
-  if (reference.startsWith(tagPrefix) && VERSION_TAG.test(reference.slice(tagPrefix.length))) {
+  if (reference.startsWith(tagPrefix) && (VERSION_TAG.test(reference.slice(tagPrefix.length)) || COMMIT_TAG.test(reference.slice(tagPrefix.length)))) {
     return reference;
   }
   if (reference.startsWith(digestPrefix) && DIGEST.test(reference.slice(digestPrefix.length))) {
     return reference;
   }
   throw new Error(
-    `Invalid image reference. Use ${FORK_IMAGE}:<semver> or ${FORK_IMAGE}@sha256:<64 lowercase hex characters>.`,
+    `Invalid image reference. Use ${FORK_IMAGE}:<semver>, ${FORK_IMAGE}:<7-character commit SHA>, or ${FORK_IMAGE}@sha256:<64 lowercase hex characters>.`,
   );
 }
 

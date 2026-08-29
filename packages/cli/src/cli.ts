@@ -230,7 +230,7 @@ program.exitOverride();
 
 program.command("start")
   .description("Start the compatible single-instance container")
-  .option("--image <reference>", `exact ${GHCR_IMAGE} semver tag or digest`)
+  .option("--image <reference>", `exact ${GHCR_IMAGE} semver/commit tag or digest`)
   .option("--pull", "pull and resolve the selected image")
   .option("--offline", "offline mode; never pull")
   .option("--proxy <url>", "transparent proxy URL")
@@ -363,7 +363,7 @@ program.command("send <chat-id>").description("Send exactly one payload to a sta
 program.command("upgrade").description("Check CLI/image upgrades without claiming atomic self-upgrade")
   .addOption(new Option("--check", "read-only upgrade check"))
   .addOption(new Option("--cli", "print an exact npm CLI upgrade command"))
-  .addOption(new Option("--image <reference>", "transactionally rebuild with an exact compatible image"))
+  .addOption(new Option("--image <reference>", "transactionally rebuild with an exact semver/commit tag or digest"))
   .action((options) => action(async () => {
     const selected = [options.check === true, options.cli === true, typeof options.image === "string"].filter(Boolean).length;
     if (selected > 1) throw new CliError("ARGUMENT_CONFLICT", "--check, --cli, and --image are mutually exclusive", EXIT.ARGUMENT);

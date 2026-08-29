@@ -138,13 +138,15 @@ const workflows = readdirSync(".github/workflows").filter((name) => /\.ya?ml$/.t
 for (const name of workflows) {
   const path = join(".github/workflows", name);
   const text = readFileSync(path, "utf8");
-  if (name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
+  const approvedCommitVerification = name === "docker-commit-verification.yml";
+  if (!approvedCommitVerification && name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
     failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
   }
   if (name.startsWith("npm-agent-") && !/deploymentEnabled!==false/.test(text)) {
     failures.push(`${path} lacks the inactive Agent release contract guard`);
   }
   if (GHCR_LATEST.test(text) || LOCAL_LATEST.test(text)) failures.push(`${path} can reference or move :latest before first-release authorization`);
+  if (approvedCommitVerification && !/Publish Docker Commit Verification Image/.test(text)) failures.push(`${path} lacks the commit-verification publication boundary label`);
 }
 
 for (const path of ["src/cli.ts", "src/lib/session.ts", "packages/cli/src/cli.ts", "packages/cli/src/image-reference.ts", "docker-compose.yml"]) {
