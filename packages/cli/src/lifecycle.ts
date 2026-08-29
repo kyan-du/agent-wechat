@@ -23,7 +23,7 @@ import {
   INSTANCE_LABEL,
   VOLUME_ROLE_LABEL,
   hasOwnedContainer,
-  isUsableLocalVolume,
+  hasOwnedVolume,
   isReconcileableContainer,
   type VolumeInspect,
 } from "./lifecycle-policy.js";
@@ -111,13 +111,13 @@ function ensureOwnedVolumes(inventory: InstanceInventory): void {
       docker(["volume", "create", "--driver", "local", "--label", `${INSTANCE_LABEL}=default`, "--label", `${VOLUME_ROLE_LABEL}=${roles[index]}`, name]);
       continue;
     }
-    assertVolumeOwnership(existing, name);
+    assertVolumeOwnership(existing, name, roles[index]);
   }
 }
 
-function assertVolumeOwnership(existing: VolumeInspect, name: string): void {
-  if (!isUsableLocalVolume(existing)) {
-    throw new CliError("VOLUME_DRIVER_UNSUPPORTED", `refusing to use non-local Docker volume ${name}`, EXIT.ENVIRONMENT);
+function assertVolumeOwnership(existing: VolumeInspect, name: string, role: "data" | "wechat-home"): void {
+  if (!hasOwnedVolume(existing, name, role)) {
+    throw new CliError("VOLUME_OWNERSHIP_MISMATCH", `refusing to use volume ${name} without trusted ownership`, EXIT.ENVIRONMENT);
   }
 }
 
@@ -126,7 +126,7 @@ function assertOwnedVolumes(inventory: InstanceInventory): void {
   for (const [index, name] of inventory.volumes.entries()) {
     const existing = inspectVolume(name);
     if (!existing) continue;
-    assertVolumeOwnership(existing, name);
+    assertVolumeOwnership(existing, name, roles[index]);
   }
 }
 
@@ -158,7 +158,7 @@ export function removeOwnedVolume(
   const name = inventory.volumes[index];
   const existing = inspectVolume(name);
   if (!existing) return false;
-  assertVolumeOwnership(existing, name);
+  assertVolumeOwnership(existing, name, role);
   docker(["volume", "rm", name]);
   return true;
 }
