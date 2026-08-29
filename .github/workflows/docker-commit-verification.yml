@@ -128,6 +128,20 @@ jobs:
           test "${#files[@]}" -eq 2
           refs=()
           for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
+
+          # A seven-character prefix can collide. Never retarget an existing tag:
+          # accept only an exact manifest replay, and fail closed on a mismatch.
+          existing_status=0
+          docker buildx imagetools inspect "$IMAGE:$TAG" --raw > existing.json 2>existing.err || existing_status=$?
+          if [ "$existing_status" -eq 0 ]; then
+            EXPECTED_DIGESTS="$(printf '%s\n' "${files[@]}" | xargs -n1 basename | sort | paste -sd, -)" \
+              node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("existing.json"));const expected=new Set(process.env.EXPECTED_DIGESTS.split(","));const ms=j.manifests??j.manifest?.manifests??[];const actual=new Set(ms.filter(x=>x.platform?.os!=="unknown"&&x.digest).map(x=>x.digest.replace("sha256:","")));if(actual.size!==2||actual.size!==expected.size||[...actual].some(x=>!expected.has(x)))throw Error(`existing tag $IMAGE:$TAG is bound to a different manifest`);console.log(`commit tag already matches exact manifest: $IMAGE:$TAG`)'
+            exit 0
+          fi
+          if ! grep -Eqi 'manifest unknown|no such manifest|not found' existing.err; then
+            cat existing.err >&2
+            exit "$existing_status"
+          fi
           docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
           docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .}}' > manifest.json
           node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ms=j.manifest?.manifests??j.manifests??[];const ps=ms.filter(x=>x.platform?.os!=="unknown").map(x=>`${x.platform?.os}/${x.platform?.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`image platforms: ${ps}`)'
