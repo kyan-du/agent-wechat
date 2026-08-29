@@ -1,8 +1,8 @@
 name: Docker Build Validation
 
-# P1-A fail-closed boundary: this workflow only validates local image builds.
-# Publication, manifests, release tags, and the floating tag remain disabled until the
-# documented P1-B/P1-C release gates are explicitly completed.
+# P1-A fail-closed boundary: pull-request runs only validate local image builds.
+# Post-merge commit verification publication is isolated in docker-commit-verification.yml;
+# formal semver publication remains behind the manually authorized release workflow.
 on:
   pull_request:
     paths:

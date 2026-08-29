@@ -56,7 +56,7 @@ mutate_and_reject .github/workflows/npm-release.yml \
   'extra dispatch input'
 
 node scripts/check-npm-production-release.mjs
-if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-release.yml >/dev/null; then
+if grep -RInE 'changeset publish|push:[[:space:]]*true|docker/login-action|git tag|packages:[[:space:]]*write' .github/workflows --exclude=ghcr-prerelease.yml --exclude=npm-release.yml --exclude=docker-commit-verification.yml >/dev/null; then
   echo "workflow source contains forbidden publication capability outside the reviewed release workflows" >&2
   exit 1
 fi

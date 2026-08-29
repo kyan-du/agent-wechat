@@ -45,6 +45,8 @@ jobs:
               - 'scripts/test-ghcr-release.mjs'
               - '.github/workflows/ghcr-prerelease.yml'
               - '.github/workflows/docker-rebuild.yml'
+              - '.github/workflows/docker-commit-verification.yml'
+              - 'scripts/validate-commit-image-workflow.mjs'
               - '.github/workflows/ci.yml'
               - 'scripts/validate-docker-context.mjs'
               - 'scripts/validate-prerelease-contract.mjs'

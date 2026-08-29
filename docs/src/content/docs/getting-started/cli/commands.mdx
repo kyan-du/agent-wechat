@@ -17,7 +17,7 @@ description: The single-instance wx command contract.
 | `pnpm cli doctor` | Read-only Docker, architecture, compatibility, permission, token, and health checks |
 | `pnpm cli logs` | Follow logs for the exact trusted container |
 
-`latest` and foreign image repositories are rejected. Tags are resolved to and run by immutable fork digest. `--offline` never accesses the registry. `status` and `doctor` never pull, start, migrate, or repair.
+`latest` and foreign image repositories are rejected. Semver tags and seven-character commit-verification tags are resolved to and run by immutable fork digest; commit tags identify post-merge validation images and are not formal releases. `--offline` never accesses the registry. `status` and `doctor` never pull, start, migrate, or repair.
 
 ## Authentication
 
@@ -59,7 +59,7 @@ The recipient must be a stable chat ID. Exactly one payload is accepted. The CLI
 |---|---|
 | `pnpm cli upgrade --check` | Read-only current CLI/image report |
 | `pnpm cli upgrade --cli` | Fail closed until P1-B npm publication is independently verified; never print or execute a premature install command |
-| `pnpm cli upgrade --image <ref>` | Resolve a digest, recreate, health-check, and roll back the container/image on failure |
+| `pnpm cli upgrade --image <ref>` | Resolve a semver, seven-character commit-verification tag, or digest; recreate, health-check, and roll back the container/image on failure |
 
 CLI installation and image rollback are separate boundaries. The hidden development command `pnpm cli dev sync-server --binary <path> --sha256 <hex>` checksum-verifies local output and restores the old binary on health failure.
 

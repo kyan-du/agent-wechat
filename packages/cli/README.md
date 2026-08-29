@@ -24,7 +24,7 @@ Uninstall with npm after a real install exists. The CLI intentionally has no uni
 ## Command surface
 
 ```text
-pnpm cli start [--image <fork-semver-or-digest>] [--pull | --offline] [--proxy <url>]
+pnpm cli start [--image <fork-semver-commit-or-digest>] [--pull | --offline] [--proxy <url>]
 pnpm cli stop [--purge] [--yes]
 pnpm cli restart
 pnpm cli status
@@ -46,14 +46,14 @@ pnpm cli messages <chat-id> [--limit <n>] [--cursor <cursor>]
 pnpm cli send <chat-id> (--text <message> | --image <path> | --file <path>)
   [--idempotency-key <key>] [--confirm-similar]
 
-pnpm cli upgrade [--check | --cli | --image <fork-semver-or-digest>]
+pnpm cli upgrade [--check | --cli | --image <fork-semver-commit-or-digest>]
 ```
 
 The first fork prerelease is deliberately single-instance. Removed `up`, `down`, `update`, and `session` commands exit nonzero with migration guidance; they never execute old behavior and do not migrate historical state.
 
 ### Lifecycle guarantees
 
-- `start` runs a local architecture build during source development, or an explicit fork semver/digest. Floating `latest`, foreign repositories, and malformed references are rejected.
+- `start` runs a local architecture build during source development, or an explicit fork semver, seven-character commit tag, or digest. Floating `latest`, foreign repositories, and malformed references are rejected.
 - A published tag is pulled and resolved to its immutable fork repository digest. The inventory records the exact container ID, digest, port, volumes, token path, and identity directory.
 - Offline `--offline` succeeds only when the selected compatible image already exists locally.
 - Existing containers are reused only when their ID, ownership label, volumes, identity, port, and requested image match the trusted inventory.
@@ -78,7 +78,7 @@ Global `--json` emits exactly one versioned JSON envelope on stdout. Diagnostics
 
 - `wx upgrade --check` is read-only.
 - `pnpm cli upgrade --cli` fails with `CLI_UPGRADE_UNAVAILABLE` until P1-B npm publication is independently verified; it never prints or executes a premature install command.
-- `wx upgrade --image <reference>` resolves an immutable digest, rebuilds the container with persistent volumes, verifies health, and rolls the container/image back on failure. It does not claim atomic CLI+image rollback.
+- `wx upgrade --image <reference>` accepts a fork semver tag, seven-character commit-verification tag, or digest; it resolves the selected image to an immutable digest, rebuilds the container with persistent volumes, verifies health, and rolls the container/image back on failure. Commit tags are verification artifacts, not formal releases.
 
 The hidden `pnpm cli dev sync-server --binary <path> --sha256 <hex>` command is only for checked local development artifacts. It checksum-verifies the binary and restores the previous server if health validation fails.
 
