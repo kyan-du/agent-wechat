@@ -209,20 +209,19 @@ pub async fn auth_status() -> Json<serde_json::Value> {
     };
 
     let composer_ready =
-        context.state.main_window.is_logged_in && find_edit_and_send_button(&a11y).is_some();
-    let readiness = if !context.state.main_window.is_logged_in {
-        "not_logged_in"
-    } else if composer_ready {
-        "ready"
-    } else {
-        "composer_unavailable"
-    };
+        context.state.main_window.is_logged_in && context.state.popup.is_none() && find_edit_and_send_button(&a11y).is_some();
+    let readiness = classify_auth_readiness(
+        context.state.main_window.is_logged_in,
+        context.state.popup.is_some(),
+        composer_ready,
+    );
 
     tracing::info!(
-        "[auth_status] view={:?}, status={}, readiness={}",
+        "[auth_status] view={:?}, status={}, readiness={}, popup={}",
         context.state.main_window.view,
         status,
         readiness,
+        context.state.popup.is_some(),
     );
 
     Json(serde_json::json!({
@@ -234,6 +233,18 @@ pub async fn auth_status() -> Json<serde_json::Value> {
             "errorCode": if readiness == "composer_unavailable" { Some("COMPOSER_UNAVAILABLE") } else { None },
         },
     }))
+}
+
+fn classify_auth_readiness(is_logged_in: bool, popup_present: bool, composer_ready: bool) -> &'static str {
+    if !is_logged_in {
+        "not_logged_in"
+    } else if popup_present {
+        "popup_blocked"
+    } else if composer_ready {
+        "ready"
+    } else {
+        "composer_unavailable"
+    }
 }
 
 /// Log out of WeChat via FSM execution loop.
@@ -632,5 +643,13 @@ mod tests {
         });
         assert!(!called);
         assert!(!result.success);
+    }
+
+    #[test]
+    fn auth_readiness_prefers_popup_blocked_over_composer_unavailable() {
+        assert_eq!(classify_auth_readiness(true, true, false), "popup_blocked");
+        assert_eq!(classify_auth_readiness(true, false, false), "composer_unavailable");
+        assert_eq!(classify_auth_readiness(true, false, true), "ready");
+        assert_eq!(classify_auth_readiness(false, true, true), "not_logged_in");
     }
 }

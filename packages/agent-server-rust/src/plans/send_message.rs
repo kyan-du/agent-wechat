@@ -2,7 +2,7 @@ use super::Plan;
 use crate::db::get_db;
 use crate::execution::actions::ActionExecutionResult;
 use crate::ia::actions;
-use crate::ia::helpers::{find_edit_and_send_button, node_has_state};
+use crate::ia::helpers::{action_frame, find_edit_and_send_button, node_has_state};
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::sessions::manager::current_session;
@@ -288,12 +288,14 @@ impl Plan for SendMessagePlan {
             if reset_after_popup(plan_state).is_err() {
                 return None;
             }
+            let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
+                actions::close_window()
+            } else {
+                actions::dismiss_popup()
+            };
             return Some(SelectedAction {
-                action: actions::dismiss_popup(),
-                frame: identified
-                    .main_window
-                    .as_ref()
-                    .and_then(|m| m.frame.clone()),
+                action,
+                frame: action_frame(identified),
             });
         }
 

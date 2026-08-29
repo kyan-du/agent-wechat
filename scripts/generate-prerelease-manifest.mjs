@@ -84,6 +84,7 @@ try {
     const relativeDir = packageDirs.get(name)?.relativeDir;
     const manifest = JSON.parse(readFileSync(join(stage, relativeDir, "package.json"), "utf8"));
     if (!manifest.version.includes(`-${contract.versionPrerelease}.`)) throw new Error(`${name} did not receive a next prerelease version`);
+    if (manifest.version === packageDirs.get(name).manifest.version) throw new Error(`${name} prerelease version did not advance`);
     const pack = JSON.parse(run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], join(stage, relativeDir)))[0];
     if (!pack?.filename || !pack.integrity) throw new Error(`incomplete npm dry-run report for ${name}`);
     packages.push({
