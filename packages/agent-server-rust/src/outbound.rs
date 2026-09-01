@@ -193,7 +193,7 @@ impl OutboundError {
             kind: OutboundErrorKind::QuietHours,
             retry_after: Some(retry_after),
             code: "QUIET_HOURS".to_string(),
-            message: "Quiet hours: outbound sends are deferred".to_string(),
+            message: format!("静默时间内，预计可重试时间：{} 秒后", retry_after.as_secs()),
             commit_attempted: false,
         }
     }
@@ -203,7 +203,11 @@ impl OutboundError {
             kind: OutboundErrorKind::Budget,
             retry_after: Some(retry_after),
             code: code.to_string(),
-            message: "Outbound send budget exhausted".to_string(),
+            message: match code {
+                "HOURLY_BUDGET" => "已达到小时发送预算，预计下一小时可重试".to_string(),
+                "DAILY_BUDGET" => "已达到日发送预算，预计下一日可重试".to_string(),
+                _ => "已达到发送预算，预计稍后可重试".to_string(),
+            },
             commit_attempted: false,
         }
     }

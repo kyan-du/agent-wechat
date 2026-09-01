@@ -90,7 +90,19 @@ function output<T>(data: T, human: () => void): void { if (isJson()) printJson(s
 function mapHttpError(error: WeChatHttpError): CliError {
   if (error.status === 400) return new CliError(error.errorCode || "INVALID_ARGUMENT", "request arguments are invalid", EXIT.ARGUMENT);
   if (error.status === 401) return new CliError("AUTH_REQUIRED", "authentication is required", EXIT.AUTH);
-  if (error.status === 429) return new CliError(error.errorCode || "RATE_LIMITED", "request is rate limited", EXIT.RATE_LIMITED, { retryAfter: error.retryAfter });
+  if (error.status === 429) {
+    const messages: Record<string, string> = {
+      QUIET_HOURS: "outbound send is deferred during quiet hours",
+      HOURLY_BUDGET: "hourly outbound send budget is exhausted",
+      DAILY_BUDGET: "daily outbound send budget is exhausted",
+      CHAT_COOLDOWN: "this chat is in cooldown",
+      QUEUE_FULL: "outbound send queue is full",
+      IDEMPOTENCY_CAPACITY: "outbound idempotency capacity is full",
+      IDEMPOTENCY_IN_PROGRESS: "this idempotency request is already pending",
+    };
+    const code = error.errorCode || "RATE_LIMITED";
+    return new CliError(code, messages[code] || "outbound request was throttled", EXIT.RATE_LIMITED, { retryAfter: error.retryAfter });
+  }
   if (error.status === 409) return new CliError(error.errorCode || "CONFIRMATION_REQUIRED", "operator confirmation is required", EXIT.CONFIRMATION);
   return new CliError(error.errorCode || "SERVICE_REQUEST_FAILED", `service request failed (${error.status})`, EXIT.SERVICE);
 }
