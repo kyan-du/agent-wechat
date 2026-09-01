@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { hasOwnedContainer, hasOwnedVolume, isReconcileableContainer } from "./lifecycle-policy.ts";
+import { outboundFromEnvEntries, OUTBOUND_ENV_KEYS } from "./outbound-config.ts";
+
+test("restart extraction preserves every supported outbound policy key and rejects lookalikes", () => {
+  const env = OUTBOUND_ENV_KEYS.map((key, i) => `${key}=value-${i}`);
+  env.push("AGENT_WECHAT_NOT_A_POLICY=secret");
+  const extracted = outboundFromEnvEntries(env);
+  assert.deepEqual(extracted, Object.fromEntries(OUTBOUND_ENV_KEYS.map((key, i) => [key, `value-${i}`])));
+});
 
 test("fixed-name containers require the CLI instance label", () => {
   const owned = { Id: "a".repeat(64), Image: "sha256:x", Config: { Labels: { "dev.visionclaw.agent-wechat.instance": "default" } } };

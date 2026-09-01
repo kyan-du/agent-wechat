@@ -26,6 +26,16 @@ export function readOutboundConfig(file: string): OutboundConfig {
   for (const key of OUTBOUND_ENV_KEYS) if (parsed[key] !== undefined) result[key] = String(parsed[key]);
   return result;
 }
+export function outboundFromEnvEntries(entries: readonly string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  const allowed = new Set<string>(OUTBOUND_ENV_KEYS);
+  for (const entry of entries) {
+    const index = entry.indexOf("=");
+    if (index > 0 && allowed.has(entry.slice(0, index))) result[entry.slice(0, index)] = entry.slice(index + 1);
+  }
+  return result;
+}
+
 export function resolveOutboundConfig(file?: string, cli: OutboundConfig = {}): OutboundConfig {
   const config = file ? readOutboundConfig(file) : {};
   const env: OutboundConfig = {};

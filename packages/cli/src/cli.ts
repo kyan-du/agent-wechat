@@ -40,6 +40,9 @@ import {
   startInstance,
   stopInstance,
   outboundFromContainer,
+  renameContainer,
+  removeContainer,
+  startContainer,
   waitHealthy,
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
@@ -285,11 +288,20 @@ program.command("restart").description("Restart while preserving data")
   const cliOverrides = Object.fromEntries([["AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", options.outboundQueueCapacity], ["AGENT_WECHAT_OUTBOUND_DISABLED", options.outboundDisabled ? "true" : undefined]].filter(([, v]) => v !== undefined));
   const outbound = resolveOutboundConfig(options.outboundConfig, cliOverrides);
   const oldOutbound = oldContainer ? outboundFromContainer(oldContainer) : {};
-  stopInstance();
+  const rollbackName = `${CONTAINER_NAME}-rollback`;
+  if (oldContainer) renameContainer(oldContainer.Id, rollbackName);
   try {
     const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: Object.keys(outbound).length ? outbound : oldOutbound });
+    if (oldContainer) removeContainer(rollbackName);
     output({ restarted: true, imageDigest: result.imageDigest }, () => console.log("Instance restarted"));
-  } catch (error) { throw error; }
+  } catch (error) {
+    try {
+      const failed = inspectContainer();
+      if (failed) removeContainer(failed.Id);
+      if (oldContainer) { renameContainer(rollbackName, CONTAINER_NAME); if (oldContainer.State?.Running) startContainer(CONTAINER_NAME); }
+    } catch { throw new CliError("ROLLBACK_FAILED", "restart failed and rollback was incomplete", EXIT.ROLLBACK); }
+    throw error;
+  }
 }));
 
 program.command("status").description("Show read-only lifecycle and authentication status").action(() => action(async () => {

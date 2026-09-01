@@ -18,6 +18,7 @@ import type { DeviceIdentity } from "./device-identity.js";
 import { buildDockerRunArgs } from "./device-identity.js";
 import { validatePublishedImageReference } from "./image-reference.js";
 import { CliError, EXIT } from "./exit-contract.js";
+import { outboundFromEnvEntries } from "./outbound-config.js";
 import {
   IMAGE_LABEL,
   INSTANCE_LABEL,
@@ -259,13 +260,12 @@ export async function startInstance(options: {
 }
 
 export function outboundFromContainer(info: DockerInspect): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const entry of info.Config?.Env ?? []) {
-    const index = entry.indexOf("=");
-    if (index > 0 && entry.startsWith("AGENT_WECHAT_OUTBOUND_") || entry.startsWith("AGENT_WECHAT_QUIET_") || entry.startsWith("AGENT_WECHAT_CHAT_COOLDOWN_MS")) result[entry.slice(0, index)] = entry.slice(index + 1);
-  }
-  return result;
+  return outboundFromEnvEntries(info.Config?.Env ?? []);
 }
+
+export function renameContainer(id: string, name: string): void { docker(["rename", id, name], { inherit: true }); }
+export function removeContainer(id: string): void { docker(["rm", "-f", id], { inherit: true }); }
+export function startContainer(idOrName: string): void { docker(["start", idOrName], { inherit: true }); }
 
 export function stopInstance(): { stopped: boolean } {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
