@@ -267,7 +267,6 @@ export function stopContainer(idOrName: string): void { docker(["stop", idOrName
 export function renameContainer(id: string, name: string): void { docker(["rename", id, name], { inherit: true }); }
 export function removeContainer(id: string): void { docker(["rm", "-f", id], { inherit: true }); }
 export function startContainer(idOrName: string): void { docker(["start", idOrName], { inherit: true }); }
-export function stopContainer(idOrName: string): void { docker(["stop", idOrName], { inherit: true }); }
 
 export function stopInstance(): { stopped: boolean } {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
