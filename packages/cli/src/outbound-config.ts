@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import TOML from "smol-toml";
 
 export const OUTBOUND_ENV_KEYS = [
   "AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", "AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", "AGENT_WECHAT_OUTBOUND_JITTER_MS",
@@ -16,7 +17,7 @@ const aliases: Record<string, typeof OUTBOUND_ENV_KEYS[number]> = {
 };
 export function readOutboundConfig(file: string): OutboundConfig {
   if (!file) return {};
-  const parsed = JSON.parse(fs.readFileSync(path.resolve(file), "utf8")) as Record<string, unknown>;
+  const parsed = TOML.parse(fs.readFileSync(path.resolve(file), "utf8")) as Record<string, unknown>;
   const result: OutboundConfig = {};
   for (const [key, env] of Object.entries(aliases)) if (parsed[key] !== undefined) result[env] = String(parsed[key]);
   for (const key of OUTBOUND_ENV_KEYS) if (parsed[key] !== undefined) result[key] = String(parsed[key]);
