@@ -1,4 +1,4 @@
-import type { PluginRuntime } from "openclaw/plugin-sdk/core";
+import type { PluginRuntime } from "openclaw/plugin-sdk/channel-core";
 
 let runtime: PluginRuntime | null = null;
 
