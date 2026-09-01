@@ -1,4 +1,4 @@
-import type { ChannelPlugin } from "openclaw/plugin-sdk";
+import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
 import type { ResolvedWeChatAccount } from "./types.js";
