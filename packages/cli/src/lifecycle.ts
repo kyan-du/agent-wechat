@@ -263,6 +263,7 @@ export function outboundFromContainer(info: DockerInspect): Record<string, strin
   return outboundFromEnvEntries(info.Config?.Env ?? []);
 }
 
+export function stopContainer(idOrName: string): void { docker(["stop", idOrName], { inherit: true }); }
 export function renameContainer(id: string, name: string): void { docker(["rename", id, name], { inherit: true }); }
 export function removeContainer(id: string): void { docker(["rm", "-f", id], { inherit: true }); }
 export function startContainer(idOrName: string): void { docker(["start", idOrName], { inherit: true }); }
