@@ -25,6 +25,17 @@ test("media polling transitions from pending to success", async () => {
   assert.equal(result?.type, "image");
 });
 
+test("media polling retries FILE_NOT_STABLE until a stable snapshot is available", async () => {
+  let calls = 0;
+  const client = { getMedia: async () => ++calls < 3
+    ? { type: "file", format: "pdf", filename: "report.pdf", errorCode: "FILE_NOT_STABLE" }
+    : { type: "file", data: "JVBERi0x", format: "pdf", filename: "report.pdf" }
+  };
+  const result = await pollMedia(client as never, "redacted", 2, undefined, 3, 0);
+  assert.equal(calls, 3);
+  assert.equal(result?.data, "JVBERi0x");
+});
+
 test("media polling preserves stable terminal diagnostics", async () => {
   const client = { getMedia: async () => ({
     type: "file", format: "pdf", filename: "报告.pdf", errorCode: "FILE_TOO_LARGE",
