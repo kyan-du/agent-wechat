@@ -1,6 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pollMedia } from "./inbound-media-poll.ts";
+import fs from "node:fs";
+import path from "node:path";
+
+test("inbound downloaded media populates singular and plural runtime fields", () => {
+  const source = fs.readFileSync(path.join(import.meta.dirname, "monitor.ts"), "utf8");
+  assert.match(source, /MediaPath:\s*mediaPath/);
+  assert.match(source, /MediaUrl:\s*mediaPath/);
+  assert.match(source, /MediaType:\s*mediaMime/);
+  assert.match(source, /MediaPaths:\s*\[mediaPath\]/);
+  assert.match(source, /MediaUrls:\s*\[mediaPath\]/);
+  assert.match(source, /MediaTypes:\s*mediaMime \? \[mediaMime\] : \[\]/);
+});
 
 test("media polling transitions from pending to success", async () => {
   let calls = 0;
