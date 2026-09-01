@@ -19,5 +19,5 @@ test("restart stops a running old container before renaming it or starting repla
 test("restart rollback restores inventory and the old running state", () => {
   const restart = cli.slice(cli.indexOf('program.command("restart")'), cli.indexOf('program.command("status")'));
   assert.ok(restart.indexOf("saveInventory(previousInventory)") > restart.indexOf("renameContainer(rollbackName, CONTAINER_NAME)"));
-  assert.match(restart, /if \(oldContainer\.State\?\.Running\) startContainer\(CONTAINER_NAME\)/);
+  assert.match(restart, /oldStopped && oldContainer\.State\?\.Running\) startContainer\(CONTAINER_NAME\)/);
 });
