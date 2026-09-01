@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 /// WeChat .dat file magic bytes: 07 08 56 32 08 07
 const DAT_MAGIC: [u8; 6] = [0x07, 0x08, 0x56, 0x32, 0x08, 0x07];
@@ -63,21 +65,37 @@ fn pending_image(local_id: i64, code: &str) -> MediaResult {
     )
 }
 
-/// Avoid decoding a file while WeChat is still writing it.
+/// Read a snapshot only after observing the complete file twice across a small
+/// stability window. A metadata check surrounding one read is not sufficient:
+/// a producer can pause between writes and make a truncated file look stable.
+/// Returning `None` is intentional: callers map it to their bounded retry path.
 fn read_stable_file(path: &Path) -> Option<Vec<u8>> {
-    let before = fs::metadata(path).ok()?;
-    if !before.is_file() || before.len() == 0 {
+    const STABILITY_WINDOW: Duration = Duration::from_millis(25);
+
+    let first_meta = fs::metadata(path).ok()?;
+    if !first_meta.is_file() || first_meta.len() == 0 {
         return None;
     }
-    let before_modified = before.modified().ok()?;
-    let data = fs::read(path).ok()?;
-    let after = fs::metadata(path).ok()?;
-    if before.len() != after.len()
-        || before_modified != after.modified().ok()?
-        || after.len() != data.len() as u64 {
+    let first = fs::read(path).ok()?;
+    if first.len() as u64 != first_meta.len() {
         return None;
     }
-    Some(data)
+
+    thread::sleep(STABILITY_WINDOW);
+
+    let second_meta = fs::metadata(path).ok()?;
+    if !second_meta.is_file() || second_meta.len() == 0 {
+        return None;
+    }
+    let second = fs::read(path).ok()?;
+    if second.len() as u64 != second_meta.len()
+        || first_meta.len() != second_meta.len()
+        || first_meta.modified().ok()? != second_meta.modified().ok()?
+        || first != second
+    {
+        return None;
+    }
+    Some(second)
 }
 
 fn account_base_paths(account_dir: &str) -> [String; 2] {
@@ -976,8 +994,8 @@ fn get_file_attachment(
         if metadata.len() > MAX_INBOUND_FILE_BYTES {
             return pending_with("file", ext, filename, "FILE_TOO_LARGE");
         }
-        return match fs::read(&file_path) {
-            Ok(data) => media_result(
+        return match read_stable_file(&file_path) {
+            Some(data) => media_result(
                 "file",
                 Some(base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
@@ -986,7 +1004,7 @@ fn get_file_attachment(
                 ext,
                 filename,
             ),
-            Err(_) => pending_with("file", ext, filename, "FILE_READ_FAILED"),
+            None => pending_with("file", ext, filename, "FILE_NOT_STABLE"),
         };
     }
 
@@ -1101,6 +1119,50 @@ pub fn get_message_media(
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn stable_file_requires_identical_reads_across_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("complete.pdf");
+        fs::write(&path, b"%PDF-1.7\ncomplete").unwrap();
+        assert_eq!(read_stable_file(&path).unwrap(), b"%PDF-1.7\ncomplete");
+    }
+
+    #[test]
+    fn stable_file_rejects_write_during_stability_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("growing.pdf");
+        fs::write(&path, b"%PDF-1.7\ntruncated").unwrap();
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .append(true)
+                .open(writer_path)
+                .unwrap()
+                .write_all(b"\ncompleted")
+                .unwrap();
+        });
+        assert!(read_stable_file(&path).is_none());
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn stable_file_does_not_return_temporarily_paused_truncated_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paused.pdf");
+        let truncated = b"%PDF-1.7\ntruncated";
+        fs::write(&path, truncated).unwrap();
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            // The first full read sees a temporarily motionless, truncated file.
+            thread::sleep(Duration::from_millis(15));
+            fs::write(writer_path, b"%PDF-1.7\ncomplete document").unwrap();
+        });
+        assert_ne!(read_stable_file(&path).as_deref(), Some(truncated.as_slice()));
+        writer.join().unwrap();
+    }
 
     struct LogBuffer(Arc<Mutex<Vec<u8>>>);
 
