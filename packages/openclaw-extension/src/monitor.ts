@@ -747,9 +747,16 @@ async function dispatchSegment(
       OriginatingChannel: OPENCLAW_CHANNEL_ID,
       OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
       ...(mediaPath ? {
+        // OpenClaw's media-understanding and transcript paths consume the plural
+        // attachment fields. Keep the legacy singular fields for older runtimes,
+        // but populate both so an inbound image is actually offered to OCR/image
+        // processing instead of being reduced to the textual <media:image> marker.
         MediaPath: mediaPath,
         MediaUrl: mediaPath,
         MediaType: mediaMime,
+        MediaPaths: [mediaPath],
+        MediaUrls: [mediaPath],
+        MediaTypes: mediaMime ? [mediaMime] : [],
         ...(mediaMsg?.mediaHash ? { MediaHash: mediaMsg.mediaHash } : {}),
         ...(mediaMsg?.mediaPreviewPath ? { MediaPreviewPath: mediaMsg.mediaPreviewPath } : {}),
       } : {}),
