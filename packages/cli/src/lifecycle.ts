@@ -224,6 +224,9 @@ export async function startInstance(options: {
   const current = loadInventory();
   if (existing) {
     assertOwnedContainer(existing, current);
+    if (options.outbound && Object.keys(options.outbound).length > 0) {
+      throw new CliError("OUTBOUND_RESTART_REQUIRED", "outbound policy changed; run wx restart to recreate the container", EXIT.ARGUMENT);
+    }
     if (!current) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
     if (!existing.State?.Running) docker(["start", CONTAINER_NAME], { inherit: true });
     await waitCompatible(options.token);

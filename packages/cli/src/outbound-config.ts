@@ -13,7 +13,10 @@ export type OutboundConfig = Partial<Record<typeof OUTBOUND_ENV_KEYS[number], st
 const aliases: Record<string, typeof OUTBOUND_ENV_KEYS[number]> = {
   queueCapacity: "AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", minSpacingMs: "AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", jitterMs: "AGENT_WECHAT_OUTBOUND_JITTER_MS",
   chatCooldownMs: "AGENT_WECHAT_CHAT_COOLDOWN_MS", hourlyBudget: "AGENT_WECHAT_HOURLY_BUDGET", dailyBudget: "AGENT_WECHAT_DAILY_BUDGET",
-  quietStartMin: "AGENT_WECHAT_QUIET_START_MIN", quietEndMin: "AGENT_WECHAT_QUIET_END_MIN", disabled: "AGENT_WECHAT_OUTBOUND_DISABLED",
+  quietStartMin: "AGENT_WECHAT_QUIET_START_MIN", quietEndMin: "AGENT_WECHAT_QUIET_END_MIN",
+  longTailJitterMs: "AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS", longTailChancePercent: "AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT",
+  taskTtlMs: "AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", idempotencyTtlMs: "AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS",
+  idempotencyMaxRows: "AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS", disabled: "AGENT_WECHAT_OUTBOUND_DISABLED",
 };
 export function readOutboundConfig(file: string): OutboundConfig {
   if (!file) return {};
