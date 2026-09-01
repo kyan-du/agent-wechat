@@ -976,8 +976,8 @@ fn get_file_attachment(
         if metadata.len() > MAX_INBOUND_FILE_BYTES {
             return pending_with("file", ext, filename, "FILE_TOO_LARGE");
         }
-        return match fs::read(&file_path) {
-            Ok(data) => media_result(
+        return match read_stable_file(&file_path) {
+            Some(data) => media_result(
                 "file",
                 Some(base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
@@ -986,7 +986,7 @@ fn get_file_attachment(
                 ext,
                 filename,
             ),
-            Err(_) => pending_with("file", ext, filename, "FILE_READ_FAILED"),
+            None => pending_with("file", ext, filename, "FILE_NOT_STABLE"),
         };
     }
 
