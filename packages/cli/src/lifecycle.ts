@@ -258,6 +258,15 @@ export async function startInstance(options: {
   return inventory;
 }
 
+export function outboundFromContainer(info: DockerInspect): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const entry of info.Config?.Env ?? []) {
+    const index = entry.indexOf("=");
+    if (index > 0 && entry.startsWith("AGENT_WECHAT_OUTBOUND_") || entry.startsWith("AGENT_WECHAT_QUIET_") || entry.startsWith("AGENT_WECHAT_CHAT_COOLDOWN_MS")) result[entry.slice(0, index)] = entry.slice(index + 1);
+  }
+  return result;
+}
+
 export function stopInstance(): { stopped: boolean } {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
   const info = inspectContainer();

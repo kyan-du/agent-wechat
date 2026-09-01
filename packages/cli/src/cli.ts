@@ -39,6 +39,7 @@ import {
   replaceImage,
   startInstance,
   stopInstance,
+  outboundFromContainer,
   waitHealthy,
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
@@ -236,6 +237,8 @@ program.command("start")
   .option("--offline", "offline mode; never pull")
   .option("--proxy <url>", "transparent proxy URL")
   .option("--outbound-config <file>", "TOML outbound policy file (never logged)")
+  .option("--outbound-queue-capacity <count>", "outbound queue capacity")
+  .option("--outbound-disabled", "disable outbound sending")
   .option("--outbound-quiet-start <minutes>", "quiet-hours start minute")
   .option("--outbound-quiet-end <minutes>", "quiet-hours end minute")
   .option("--outbound-hourly-budget <count>", "hourly outbound budget")
@@ -250,7 +253,7 @@ program.command("start")
   .option("--outbound-idempotency-max-rows <rows>", "idempotency max rows")
   .action((options) => action(async () => {
     if (options.pull && options.offline) throw new CliError("ARGUMENT_CONFLICT", "--pull and --offline are mutually exclusive", EXIT.ARGUMENT);
-    const inventory = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), localDefault: localBuildImage(), noPull: options.offline === true, outbound: resolveOutboundConfig(options.outboundConfig, Object.fromEntries([["AGENT_WECHAT_QUIET_START_MIN", options.outboundQuietStart], ["AGENT_WECHAT_QUIET_END_MIN", options.outboundQuietEnd], ["AGENT_WECHAT_HOURLY_BUDGET", options.outboundHourlyBudget], ["AGENT_WECHAT_DAILY_BUDGET", options.outboundDailyBudget], ["AGENT_WECHAT_CHAT_COOLDOWN_MS", options.outboundChatCooldownMs], ["AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", options.outboundMinSpacingMs], ["AGENT_WECHAT_OUTBOUND_JITTER_MS", options.outboundJitterMs], ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS", options.outboundLongTailJitterMs], ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT", options.outboundLongTailChancePercent], ["AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", options.outboundTaskTtlMs], ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS", options.outboundIdempotencyTtlMs], ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS", options.outboundIdempotencyMaxRows]].filter(([, v]) => v !== undefined))), ...options });
+    const inventory = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), localDefault: localBuildImage(), noPull: options.offline === true, outbound: resolveOutboundConfig(options.outboundConfig, Object.fromEntries([["AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", options.outboundQueueCapacity], ["AGENT_WECHAT_OUTBOUND_DISABLED", options.outboundDisabled ? "true" : undefined], ["AGENT_WECHAT_QUIET_START_MIN", options.outboundQuietStart], ["AGENT_WECHAT_QUIET_END_MIN", options.outboundQuietEnd], ["AGENT_WECHAT_HOURLY_BUDGET", options.outboundHourlyBudget], ["AGENT_WECHAT_DAILY_BUDGET", options.outboundDailyBudget], ["AGENT_WECHAT_CHAT_COOLDOWN_MS", options.outboundChatCooldownMs], ["AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", options.outboundMinSpacingMs], ["AGENT_WECHAT_OUTBOUND_JITTER_MS", options.outboundJitterMs], ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS", options.outboundLongTailJitterMs], ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT", options.outboundLongTailChancePercent], ["AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", options.outboundTaskTtlMs], ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS", options.outboundIdempotencyTtlMs], ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS", options.outboundIdempotencyMaxRows]].filter(([, v]) => v !== undefined))), ...options });
     output({ container: inventory.containerName, imageDigest: inventory.imageDigest, port: inventory.port }, () => console.log(`Started ${inventory.containerName} on port ${inventory.port}`));
   }));
 
@@ -273,12 +276,20 @@ program.command("stop")
 
 program.command("restart").description("Restart while preserving data")
   .option("--outbound-config <file>", "TOML outbound policy file (never logged)")
+  .option("--outbound-queue-capacity <count>", "outbound queue capacity")
+  .option("--outbound-disabled", "disable outbound sending")
   .action((options) => action(async () => {
   const inventory = loadInventory();
   if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "start the instance first", EXIT.SERVICE);
+  const oldContainer = inspectContainer();
+  const cliOverrides = Object.fromEntries([["AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", options.outboundQueueCapacity], ["AGENT_WECHAT_OUTBOUND_DISABLED", options.outboundDisabled ? "true" : undefined]].filter(([, v]) => v !== undefined));
+  const outbound = resolveOutboundConfig(options.outboundConfig, cliOverrides);
+  const oldOutbound = oldContainer ? outboundFromContainer(oldContainer) : {};
   stopInstance();
-  const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: resolveOutboundConfig(options.outboundConfig) });
-  output({ restarted: true, imageDigest: result.imageDigest }, () => console.log("Instance restarted"));
+  try {
+    const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: Object.keys(outbound).length ? outbound : oldOutbound });
+    output({ restarted: true, imageDigest: result.imageDigest }, () => console.log("Instance restarted"));
+  } catch (error) { throw error; }
 }));
 
 program.command("status").description("Show read-only lifecycle and authentication status").action(() => action(async () => {
