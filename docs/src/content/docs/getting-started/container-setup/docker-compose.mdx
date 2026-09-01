@@ -90,3 +90,20 @@ PROXY=user:pass@host:port docker compose up -d
 ```
 
 Prefix with `socks5://` for SOCKS5 proxies.
+
+### Outbound policy
+
+Outbound policy is read when the container is created. Compose accepts a checked-in `.env` file, shell/CI environment variables, or explicit `-e` values; for example:
+
+```bash
+AGENT_WECHAT_QUIET_START_MIN=30 \
+AGENT_WECHAT_QUIET_END_MIN=450 \
+AGENT_WECHAT_HOURLY_BUDGET=40 \
+AGENT_WECHAT_DAILY_BUDGET=200 \
+AGENT_WECHAT_CHAT_COOLDOWN_MS=3000 \
+AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS=1500 \
+AGENT_WECHAT_OUTBOUND_JITTER_MS=250 \
+docker compose up -d --force-recreate
+```
+
+The same `AGENT_WECHAT_*` variables listed in the repository `docker-compose.yml` cover queue capacity, long-tail jitter, task/idempotency TTLs, similarity checks, and the emergency `AGENT_WECHAT_OUTBOUND_DISABLED=true` switch. CLI users can pass `wx start --outbound-config policy.toml` (TOML keys may be the short names `quietStartMin`, `quietEndMin`, `hourlyBudget`, `dailyBudget`, `chatCooldownMs`, `minSpacingMs`, `jitterMs`) or the corresponding `--outbound-*` options. Priority is command-line options > process environment > TOML file > server defaults. `wx status --json` and `GET /api/status/outbound` expose effective non-sensitive state only; tokens, proxy credentials, and config file contents are never printed. Changes require container recreation/restart; they do not change a running scheduler.

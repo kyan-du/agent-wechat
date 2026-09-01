@@ -18,6 +18,7 @@ import type { DeviceIdentity } from "./device-identity.js";
 import { buildDockerRunArgs } from "./device-identity.js";
 import { validatePublishedImageReference } from "./image-reference.js";
 import { CliError, EXIT } from "./exit-contract.js";
+import { outboundFromEnvEntries } from "./outbound-config.js";
 import {
   IMAGE_LABEL,
   INSTANCE_LABEL,
@@ -217,12 +218,16 @@ export async function startInstance(options: {
   pull?: boolean;
   noPull?: boolean;
   localDefault: string;
+  outbound?: Record<string, string>;
 }): Promise<InstanceInventory> {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
   const existing = inspectContainer();
   const current = loadInventory();
   if (existing) {
     assertOwnedContainer(existing, current);
+    if (options.outbound && Object.keys(options.outbound).length > 0) {
+      throw new CliError("OUTBOUND_RESTART_REQUIRED", "outbound policy changed; run wx restart to recreate the container", EXIT.ARGUMENT);
+    }
     if (!current) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
     if (!existing.State?.Running) docker(["start", CONTAINER_NAME], { inherit: true });
     await waitCompatible(options.token);
@@ -238,6 +243,7 @@ export async function startInstance(options: {
     tokenPath: TOKEN_PATH,
     port: DEFAULT_PORT,
     proxy: options.proxy,
+    outbound: options.outbound,
   });
   args.splice(args.length - 1, 0, "--label", `${INSTANCE_LABEL}=default`, "--label", `${IMAGE_LABEL}=${selected.digest || selected.runReference}`);
   docker(args, { inherit: true });
@@ -252,6 +258,15 @@ export async function startInstance(options: {
   }
   return inventory;
 }
+
+export function outboundFromContainer(info: DockerInspect): Record<string, string> {
+  return outboundFromEnvEntries(info.Config?.Env ?? []);
+}
+
+export function stopContainer(idOrName: string): void { docker(["stop", idOrName], { inherit: true }); }
+export function renameContainer(id: string, name: string): void { docker(["rename", id, name], { inherit: true }); }
+export function removeContainer(id: string): void { docker(["rm", "-f", id], { inherit: true }); }
+export function startContainer(idOrName: string): void { docker(["start", idOrName], { inherit: true }); }
 
 export function stopInstance(): { stopped: boolean } {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);

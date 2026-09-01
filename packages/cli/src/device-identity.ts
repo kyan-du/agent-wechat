@@ -267,6 +267,7 @@ export function buildDockerRunArgs(
     tokenPath: string;
     port: number;
     proxy?: string;
+    outbound?: Record<string, string>;
   },
 ): string[] {
   const args = [
@@ -297,9 +298,8 @@ export function buildDockerRunArgs(
     "-e",
     `AGENT_WECHAT_MAC=${identity.mac}`,
   ];
-  if (opts.proxy) {
-    args.push("-e", `PROXY=${opts.proxy}`);
-  }
+  if (opts.proxy) args.push("-e", `PROXY=${opts.proxy}`);
+  for (const [key, value] of Object.entries(opts.outbound ?? {})) args.push("-e", `${key}=${value}`);
   args.push(opts.image);
   return args;
 }
