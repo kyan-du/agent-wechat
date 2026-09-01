@@ -214,11 +214,11 @@ export async function startInstance(options: {
   identity: DeviceIdentity;
   token: string;
   proxy?: string;
-  outbound?: Record<string, string>;
   image?: string;
   pull?: boolean;
   noPull?: boolean;
   localDefault: string;
+  outbound?: Record<string, string>;
 }): Promise<InstanceInventory> {
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT);
   const existing = inspectContainer();

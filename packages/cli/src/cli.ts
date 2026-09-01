@@ -281,17 +281,33 @@ program.command("restart").description("Restart while preserving data")
   .option("--outbound-config <file>", "TOML outbound policy file (never logged)")
   .option("--outbound-queue-capacity <count>", "outbound queue capacity")
   .option("--outbound-disabled", "disable outbound sending")
+  .option("--outbound-quiet-start <minutes>").option("--outbound-quiet-end <minutes>")
+  .option("--outbound-hourly-budget <count>").option("--outbound-daily-budget <count>")
+  .option("--outbound-chat-cooldown-ms <ms>").option("--outbound-min-spacing-ms <ms>")
+  .option("--outbound-jitter-ms <ms>").option("--outbound-long-tail-jitter-ms <ms>")
+  .option("--outbound-long-tail-chance-percent <percent>").option("--outbound-task-ttl-ms <ms>")
+  .option("--outbound-idempotency-ttl-ms <ms>").option("--outbound-idempotency-max-rows <rows>")
   .action((options) => action(async () => {
   const inventory = loadInventory();
   if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "start the instance first", EXIT.SERVICE);
   const oldContainer = inspectContainer();
-  const cliOverrides = Object.fromEntries([["AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", options.outboundQueueCapacity], ["AGENT_WECHAT_OUTBOUND_DISABLED", options.outboundDisabled ? "true" : undefined]].filter(([, v]) => v !== undefined));
+  const cliOverrides = Object.fromEntries([
+    ["AGENT_WECHAT_OUTBOUND_QUEUE_CAPACITY", options.outboundQueueCapacity], ["AGENT_WECHAT_OUTBOUND_DISABLED", options.outboundDisabled ? "true" : undefined],
+    ["AGENT_WECHAT_QUIET_START_MIN", options.outboundQuietStart], ["AGENT_WECHAT_QUIET_END_MIN", options.outboundQuietEnd],
+    ["AGENT_WECHAT_HOURLY_BUDGET", options.outboundHourlyBudget], ["AGENT_WECHAT_DAILY_BUDGET", options.outboundDailyBudget],
+    ["AGENT_WECHAT_CHAT_COOLDOWN_MS", options.outboundChatCooldownMs], ["AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", options.outboundMinSpacingMs],
+    ["AGENT_WECHAT_OUTBOUND_JITTER_MS", options.outboundJitterMs], ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_JITTER_MS", options.outboundLongTailJitterMs],
+    ["AGENT_WECHAT_OUTBOUND_LONG_TAIL_CHANCE_PERCENT", options.outboundLongTailChancePercent], ["AGENT_WECHAT_OUTBOUND_TASK_TTL_MS", options.outboundTaskTtlMs],
+    ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_TTL_MS", options.outboundIdempotencyTtlMs], ["AGENT_WECHAT_OUTBOUND_IDEMPOTENCY_MAX_ROWS", options.outboundIdempotencyMaxRows],
+  ].filter(([, v]) => v !== undefined));
   const outbound = resolveOutboundConfig(options.outboundConfig, cliOverrides);
   const oldOutbound = oldContainer ? outboundFromContainer(oldContainer) : {};
+  const effectiveOutbound = { ...oldOutbound, ...outbound };
+  const previousInventory = inventory;
   const rollbackName = `${CONTAINER_NAME}-rollback`;
   if (oldContainer) renameContainer(oldContainer.Id, rollbackName);
   try {
-    const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: Object.keys(outbound).length ? outbound : oldOutbound });
+    const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: effectiveOutbound });
     if (oldContainer) removeContainer(rollbackName);
     output({ restarted: true, imageDigest: result.imageDigest }, () => console.log("Instance restarted"));
   } catch (error) {
@@ -299,6 +315,7 @@ program.command("restart").description("Restart while preserving data")
       const failed = inspectContainer();
       if (failed) removeContainer(failed.Id);
       if (oldContainer) { renameContainer(rollbackName, CONTAINER_NAME); if (oldContainer.State?.Running) startContainer(CONTAINER_NAME); }
+      saveInventory(previousInventory);
     } catch { throw new CliError("ROLLBACK_FAILED", "restart failed and rollback was incomplete", EXIT.ROLLBACK); }
     throw error;
   }
