@@ -323,9 +323,7 @@ program.command("restart").description("Restart while preserving data")
       if (failed && failed.Id !== oldContainer?.Id) removeContainer(failed.Id);
       if (oldContainer) {
         if (oldRenamed) renameContainer(rollbackName, CONTAINER_NAME);
-        if (oldStopped) {
-          startContainer(CONTAINER_NAME);
-        }
+        if (oldStopped && oldContainer.State?.Running) startContainer(CONTAINER_NAME);
       }
       saveInventory(previousInventory);
     } catch { throw new CliError("ROLLBACK_FAILED", "restart failed and rollback was incomplete", EXIT.ROLLBACK); }
