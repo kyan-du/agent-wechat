@@ -43,6 +43,7 @@ import {
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
 import { checkCliUpgrade, CliUpgradeError } from "./cli-upgrade.js";
+import { resolveOutboundConfig, OUTBOUND_ENV_KEYS } from "./outbound-config.js";
 
 declare const PKG_VERSION: string;
 const VERSION = typeof PKG_VERSION === "undefined" ? "0.0.0-test" : PKG_VERSION;
@@ -234,9 +235,17 @@ program.command("start")
   .option("--pull", "pull and resolve the selected image")
   .option("--offline", "offline mode; never pull")
   .option("--proxy <url>", "transparent proxy URL")
+  .option("--outbound-config <file>", "JSON outbound policy file (never logged)")
+  .option("--outbound-quiet-start <minutes>", "quiet-hours start minute")
+  .option("--outbound-quiet-end <minutes>", "quiet-hours end minute")
+  .option("--outbound-hourly-budget <count>", "hourly outbound budget")
+  .option("--outbound-daily-budget <count>", "daily outbound budget")
+  .option("--outbound-chat-cooldown-ms <ms>", "per-chat cooldown")
+  .option("--outbound-min-spacing-ms <ms>", "minimum spacing")
+  .option("--outbound-jitter-ms <ms>", "spacing jitter")
   .action((options) => action(async () => {
     if (options.pull && options.offline) throw new CliError("ARGUMENT_CONFLICT", "--pull and --offline are mutually exclusive", EXIT.ARGUMENT);
-    const inventory = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), localDefault: localBuildImage(), noPull: options.offline === true, ...options });
+    const inventory = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), localDefault: localBuildImage(), noPull: options.offline === true, outbound: resolveOutboundConfig(options.outboundConfig, Object.fromEntries([["AGENT_WECHAT_QUIET_START_MIN", options.outboundQuietStart], ["AGENT_WECHAT_QUIET_END_MIN", options.outboundQuietEnd], ["AGENT_WECHAT_HOURLY_BUDGET", options.outboundHourlyBudget], ["AGENT_WECHAT_DAILY_BUDGET", options.outboundDailyBudget], ["AGENT_WECHAT_CHAT_COOLDOWN_MS", options.outboundChatCooldownMs], ["AGENT_WECHAT_OUTBOUND_MIN_SPACING_MS", options.outboundMinSpacingMs], ["AGENT_WECHAT_OUTBOUND_JITTER_MS", options.outboundJitterMs]].filter(([, v]) => v !== undefined))), ...options });
     output({ container: inventory.containerName, imageDigest: inventory.imageDigest, port: inventory.port }, () => console.log(`Started ${inventory.containerName} on port ${inventory.port}`));
   }));
 

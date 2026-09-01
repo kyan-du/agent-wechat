@@ -213,6 +213,7 @@ export async function startInstance(options: {
   identity: DeviceIdentity;
   token: string;
   proxy?: string;
+  outbound?: Record<string, string>;
   image?: string;
   pull?: boolean;
   noPull?: boolean;
@@ -238,6 +239,7 @@ export async function startInstance(options: {
     tokenPath: TOKEN_PATH,
     port: DEFAULT_PORT,
     proxy: options.proxy,
+    outbound: options.outbound,
   });
   args.splice(args.length - 1, 0, "--label", `${INSTANCE_LABEL}=default`, "--label", `${IMAGE_LABEL}=${selected.digest || selected.runReference}`);
   docker(args, { inherit: true });
