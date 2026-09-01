@@ -747,9 +747,15 @@ async function dispatchSegment(
       OriginatingChannel: OPENCLAW_CHANNEL_ID,
       OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
       ...(mediaPath ? {
+        // The runtime media consumers read the plural attachment contract. Keep
+        // the legacy singular aliases for older runtimes, but always populate
+        // both forms for downloaded inbound media.
         MediaPath: mediaPath,
         MediaUrl: mediaPath,
         MediaType: mediaMime,
+        MediaPaths: [mediaPath],
+        MediaUrls: [mediaPath],
+        MediaTypes: mediaMime ? [mediaMime] : [],
         ...(mediaMsg?.mediaHash ? { MediaHash: mediaMsg.mediaHash } : {}),
         ...(mediaMsg?.mediaPreviewPath ? { MediaPreviewPath: mediaMsg.mediaPreviewPath } : {}),
       } : {}),
