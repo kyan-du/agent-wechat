@@ -13,7 +13,7 @@ test("restart stops a running old container before renaming it or starting repla
   assert.ok(stop >= 0 && rename >= 0 && start >= 0);
   assert.ok(stop < rename, "old container must stop before rename");
   assert.ok(rename < start, "replacement must start after old container is moved aside");
-  assert.match(restart, /if \(oldContainer\.State\?\.Running\) stopContainer\(oldContainer\.Id\)/);
+  assert.match(restart, /oldContainer\.State\?\.Running\) \{ stopContainer\(oldContainer\.Id\);/);
 });
 
 test("restart rollback restores inventory and the old running state", () => {
