@@ -43,6 +43,7 @@ import {
   renameContainer,
   removeContainer,
   startContainer,
+  stopContainer,
   waitHealthy,
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
@@ -305,7 +306,12 @@ program.command("restart").description("Restart while preserving data")
   const effectiveOutbound = { ...oldOutbound, ...outbound };
   const previousInventory = inventory;
   const rollbackName = `${CONTAINER_NAME}-rollback`;
-  if (oldContainer) renameContainer(oldContainer.Id, rollbackName);
+  if (oldContainer) {
+    // Release the published host port before moving the old container aside.
+    // Keep its original running state for an exact rollback if replacement fails.
+    if (oldContainer.State?.Running) stopContainer(oldContainer.Id);
+    renameContainer(oldContainer.Id, rollbackName);
+  }
   try {
     const result = await startInstance({ identity: ensureDeviceIdentity(CONFIG_DIR), token: ensureToken(), image: inventory.imageDigest || inventory.imageRef, noPull: true, localDefault: localBuildImage(), outbound: effectiveOutbound });
     if (oldContainer) removeContainer(rollbackName);
@@ -314,7 +320,10 @@ program.command("restart").description("Restart while preserving data")
     try {
       const failed = inspectContainer();
       if (failed) removeContainer(failed.Id);
-      if (oldContainer) { renameContainer(rollbackName, CONTAINER_NAME); if (oldContainer.State?.Running) startContainer(CONTAINER_NAME); }
+      if (oldContainer) {
+        renameContainer(rollbackName, CONTAINER_NAME);
+        if (oldContainer.State?.Running) startContainer(CONTAINER_NAME);
+      }
       saveInventory(previousInventory);
     } catch { throw new CliError("ROLLBACK_FAILED", "restart failed and rollback was incomplete", EXIT.ROLLBACK); }
     throw error;
