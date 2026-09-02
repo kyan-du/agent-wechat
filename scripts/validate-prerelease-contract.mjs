@@ -81,9 +81,13 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     if (!permissions || typeof permissions !== "object") return;
     for (const scope of ["packages", "contents", "id-token"]) {
       const inertBlueprint = name === "npm-release.yml" && where === "job publish" && job?.environment === "npm-production";
+      const stableGhcrRelease = name === "npm-release.yml" &&
+        ["job publish-ghcr", "job publish-ghcr-manifest"].includes(where) &&
+        job?.environment === "npm-production";
       const approvedWrite = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
-        || inertBlueprint;
+        || inertBlueprint
+        || (stableGhcrRelease && scope === "packages");
       if (permissions[scope] === "write" && !approvedWrite) forbidden.push(`${name}: ${where} ${scope} write permission`);
     }
   };
@@ -93,9 +97,12 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
     for (const step of job?.steps ?? []) {
       const uses = String(step?.uses ?? "");
       const command = String(step?.run ?? "");
-      if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name)) forbidden.push(`${name}: registry login action`);
+      const stableGhcrJob = name === "npm-release.yml" &&
+        ["publish-ghcr", "publish-ghcr-manifest"].includes(jobName) &&
+        job?.environment === "npm-production";
+      if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: registry login action`);
       if (/softprops\/action-gh-release|actions\/create-release/i.test(uses)) forbidden.push(`${name}: GitHub Release action`);
-      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name)) forbidden.push(`${name}: image push action`);
+      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: image push action`);
       const commands = [
         [/\b(?:npm|pnpm)\s+publish\b/i, "npm publish"],
         [/\bchangeset\s+publish\b/i, "changeset publish"],
@@ -125,7 +132,7 @@ const npmTriggers = npmWorkflow.on ?? npmWorkflow.true ?? {};
 if (JSON.stringify(Object.keys(npmTriggers)) !== JSON.stringify(["workflow_dispatch"])) fail("npm-release.yml: only explicit dispatch is allowed");
 const npmInputs = npmTriggers.workflow_dispatch?.inputs ?? {};
 if (JSON.stringify(Object.keys(npmInputs)) !== JSON.stringify(["version"])) fail(`npm-release.yml: expected only version input, found ${Object.keys(npmInputs).join(", ")}`);
-if (workflowDir && /release_sha|operation|reconciliation_sha256|manifest|artifact_id|artifact-digest|cmp |diff -qr|reconcile-npm-release|prepare-agent-release/.test(npmText)) {
+if (workflowDir && /release_sha|reconciliation_sha256|artifact_id|artifact-digest|reconcile-npm-release|prepare-agent-release/.test(npmText)) {
   fail("npm-release.yml: obsolete manifest/artifact/reconcile machinery remains");
 }
 if (npmWorkflow.permissions?.contents !== "read" || npmWorkflow.permissions?.["id-token"] !== "none") fail("npm-release.yml: top-level permissions drift");
