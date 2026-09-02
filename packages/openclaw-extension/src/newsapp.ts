@@ -1,6 +1,7 @@
 import type { Chat, Message } from "@kyan-du/agent-wechat-shared";
 
 export const NEWSAPP_USERNAME = "newsapp";
+export const MAX_NEWSAPP_PREVIEW_CHARS = 4_000;
 
 export function isNewsappChat(chat: Pick<Chat, "id" | "username">): boolean {
   return (chat.username || chat.id) === NEWSAPP_USERNAME;
@@ -21,7 +22,8 @@ type NewsappChat = Pick<Chat, "id" | "username"> & {
 };
 
 export function newsappFallbackMessage(chat: NewsappChat): Message | null {
-  const preview = chat.lastMessagePreview?.trim();
+  const rawPreview = chat.lastMessagePreview?.trim();
+  const preview = rawPreview?.slice(0, MAX_NEWSAPP_PREVIEW_CHARS);
   const localId = chat.lastMsgLocalId;
   if (!preview || typeof localId !== "number" || !Number.isSafeInteger(localId) || localId <= 0) return null;
   const urls = extractNewsappUrls(preview);

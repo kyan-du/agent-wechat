@@ -270,7 +270,7 @@ export async function startWeChatMonitor(
       const unreadChats = chats.filter(
         (c) =>
           c.unreadCount > 0 &&
-          (!isOfficialAccount(c.username ?? c.id) || isNewsappChat(c)),
+          !isOfficialAccount(c.username ?? c.id),
       );
       for (const chat of unreadChats) {
         const chatId = chat.username ?? chat.id;

@@ -4,14 +4,13 @@ import {
   extractNewsappUrls,
   isNewsappChat,
   newsappFallbackMessage,
+  MAX_NEWSAPP_PREVIEW_CHARS,
   shouldBypassNewsappAuthorization,
-  shouldSkipNewsappOpen,
 } from "./newsapp.ts";
 
 test("recognizes only the newsapp system chat", () => {
   assert.equal(isNewsappChat({ id: "newsapp", username: "newsapp" }), true);
   assert.equal(isNewsappChat({ id: "wxid_newsapp", username: "wxid_newsapp" }), false);
-  assert.equal(shouldSkipNewsappOpen({ id: "newsapp", username: "newsapp" }), true);
   assert.equal(shouldBypassNewsappAuthorization({ id: "newsapp", username: "newsapp" }), true);
   assert.equal(shouldBypassNewsappAuthorization({ id: "wxid_other", username: "wxid_other" }), false);
 });
@@ -42,4 +41,23 @@ test("does not synthesize a message without a preview or stable local id", () =>
     newsappFallbackMessage({ id: "newsapp", username: "newsapp", lastMessagePreview: "news" }),
     null,
   );
+  assert.equal(
+    newsappFallbackMessage({ id: "newsapp", username: "newsapp", lastMessagePreview: "news", lastMsgLocalId: Number.NaN }),
+    null,
+  );
+});
+
+test("bounds the preview before creating the inbound body", () => {
+  const message = newsappFallbackMessage({
+    id: "newsapp",
+    username: "newsapp",
+    lastMessagePreview: "x".repeat(MAX_NEWSAPP_PREVIEW_CHARS + 100),
+    lastMsgLocalId: 7,
+  });
+  assert.equal(message?.content.length, "[Tencent News]\n".length + MAX_NEWSAPP_PREVIEW_CHARS);
+});
+
+test("fallback identity is stable when activity time is absent", () => {
+  const input = { id: "newsapp", username: "newsapp", lastMessagePreview: "news", lastMsgLocalId: 9 };
+  assert.deepEqual(newsappFallbackMessage(input), newsappFallbackMessage(input));
 });
