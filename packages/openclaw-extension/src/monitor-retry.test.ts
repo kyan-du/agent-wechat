@@ -307,3 +307,15 @@ test("equal-tail second reset identities merge instead of hiding behind numeric 
   const merged = mergePendingResetMessages(retry, "wxid_reset", chat(1), [message(100, 2)]);
   assert.deepEqual(merged.map((item) => item.serverId), [10_100, 20_100]);
 });
+
+test("chat processing predicate can suppress a sticky newsapp unread", () => {
+  const newsapp = {
+    ...chat(1, 42),
+    id: "newsapp",
+    username: "newsapp",
+    lastMessagePreview: "same",
+  };
+  const retry = state();
+  const result = monitorChatsToProcess([newsapp], retry, 0, () => false);
+  assert.equal(result.has("newsapp"), false);
+});
