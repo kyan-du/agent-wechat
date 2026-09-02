@@ -40,3 +40,10 @@ export function newsappFallbackMessage(chat: NewsappChat): Message | null {
 export function shouldSkipNewsappOpen(chat: Pick<Chat, "id" | "username">): boolean {
   return isNewsappChat(chat);
 }
+
+/** System-feed messages do not require a user pairing/allowlist grant. */
+export function shouldBypassNewsappAuthorization(
+  chat: Pick<Chat, "id" | "username">,
+): boolean {
+  return isNewsappChat(chat);
+}

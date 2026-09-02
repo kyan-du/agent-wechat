@@ -4,6 +4,7 @@ import {
   extractNewsappUrls,
   isNewsappChat,
   newsappFallbackMessage,
+  shouldBypassNewsappAuthorization,
   shouldSkipNewsappOpen,
 } from "./newsapp.ts";
 
@@ -11,6 +12,8 @@ test("recognizes only the newsapp system chat", () => {
   assert.equal(isNewsappChat({ id: "newsapp", username: "newsapp" }), true);
   assert.equal(isNewsappChat({ id: "wxid_newsapp", username: "wxid_newsapp" }), false);
   assert.equal(shouldSkipNewsappOpen({ id: "newsapp", username: "newsapp" }), true);
+  assert.equal(shouldBypassNewsappAuthorization({ id: "newsapp", username: "newsapp" }), true);
+  assert.equal(shouldBypassNewsappAuthorization({ id: "wxid_other", username: "wxid_other" }), false);
 });
 
 test("extracts and de-duplicates URLs from a news preview", () => {

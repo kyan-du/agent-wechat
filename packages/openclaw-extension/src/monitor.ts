@@ -47,7 +47,11 @@ import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import { pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
-import { isNewsappChat, newsappFallbackMessage } from "./newsapp.js";
+import {
+  isNewsappChat,
+  newsappFallbackMessage,
+  shouldBypassNewsappAuthorization,
+} from "./newsapp.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -421,7 +425,7 @@ async function prepareMessage(
   const senderName = msg.senderName ?? msg.sender ?? chat.name;
   const wasMentioned = isGroup && (msg.isMentioned === true);
 
-  const access = isNewsappChat(chat)
+  const access = shouldBypassNewsappAuthorization(chat)
     ? { allowed: true as const, reason: "newsapp-system-feed" }
     : resolveWeChatInboundAccessDecision({
         isGroup,
