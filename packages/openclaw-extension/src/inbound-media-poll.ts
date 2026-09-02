@@ -14,8 +14,21 @@ const RETRYABLE_MEDIA_ERRORS = new Set([
   "IMAGE_NOT_STABLE",
 ]);
 
-export const DEFAULT_MEDIA_POLL_ATTEMPTS = 30;
-export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 1000;
+// Keep a missing local image from serially blocking the rest of an inbound batch.
+export const DEFAULT_MEDIA_POLL_ATTEMPTS = 6;
+export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 500;
+
+export function createImageMaterializationTrigger(
+  client: { openChat(chatId: string, clearUnreads?: boolean): Promise<unknown> },
+  chatId: string,
+  log?: { info?: (...args: any[]) => void },
+): MediaRetryTrigger {
+  return async (result, attempt) => {
+    if (result.type === "file") return;
+    log?.info?.(`[wechat:media] triggering chat reopen for image attempt=${attempt}`);
+    await client.openChat(chatId, true);
+  };
+}
 
 function isRetryable(result: MediaResult): boolean {
   if (result.data !== undefined) return false;
@@ -54,6 +67,8 @@ export async function pollMedia(
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
   }
-  log?.info?.(`[wechat:media] pending exhausted attempts=${maxAttempts} elapsedMs=${Date.now() - startedAt}`);
+  log?.info?.(
+    `[wechat:media] retry exhausted attempts=${maxAttempts} elapsedMs=${Date.now() - startedAt} code=${lastResult?.errorCode ?? "MEDIA_NOT_DOWNLOADED"}`,
+  );
   return lastResult ?? null;
 }

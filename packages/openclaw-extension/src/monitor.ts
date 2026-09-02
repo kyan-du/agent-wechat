@@ -44,7 +44,7 @@ import {
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
-import { pollMedia } from "./inbound-media-poll.js";
+import { createImageMaterializationTrigger, pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 import {
@@ -478,11 +478,7 @@ async function prepareMessage(
         log,
         undefined,
         undefined,
-        async (pending) => {
-          if (baseType !== 3 || pending.type === "file") return;
-          log?.info?.(`[wechat:media] triggering chat reopen for image download`);
-          await client.openChat(chatId, true);
-        },
+        baseType === 3 ? createImageMaterializationTrigger(client, chatId, log) : undefined,
       );
       if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;

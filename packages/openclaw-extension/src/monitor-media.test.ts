@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pollMedia } from "./inbound-media-poll.ts";
+import { createImageMaterializationTrigger, pollMedia } from "./inbound-media-poll.ts";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -97,18 +97,23 @@ test("media polling returns the last transient diagnostic after bounded exhausti
 
 test("media polling triggers materialization once before bounded retries", async () => {
   let calls = 0;
-  let triggers = 0;
+  let opens = 0;
   const client = { getMedia: async () => {
     calls += 1;
     return calls < 3
       ? { type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" }
       : { type: "image", data: "/9j/AA==", format: "jpeg", filename: "late.jpg" };
   } };
-  const result = await pollMedia(client as never, "wxid_direct", 101, undefined, 3, 0, async () => {
-    triggers += 1;
-  });
+  const trigger = createImageMaterializationTrigger({
+    openChat: async (chatId, clearUnreads) => {
+      assert.equal(chatId, "wxid_direct");
+      assert.equal(clearUnreads, true);
+      opens += 1;
+    },
+  }, "wxid_direct");
+  const result = await pollMedia(client as never, "wxid_direct", 101, undefined, 3, 0, trigger);
   assert.equal(calls, 3);
-  assert.equal(triggers, 1);
+  assert.equal(opens, 1);
   assert.equal(result?.data, "/9j/AA==");
 });
 
