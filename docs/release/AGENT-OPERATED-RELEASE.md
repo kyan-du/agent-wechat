@@ -46,11 +46,17 @@ After registry verification succeeds, the workflow creates or verifies:
 - exact tag `vX.Y.Z` pointing at the dispatch/current-main SHA;
 - GitHub Release `vX.Y.Z`.
 
-The same approved `npm-production` workflow then builds the Rust server for both
-`linux/amd64` and `linux/arm64`, passing the exact `X.Y.Z` as the Docker `VERSION`
-build argument, and publishes the exact GHCR tag `ghcr.io/kyan-du/agent-wechat:X.Y.Z`.
+After `publish` succeeds, the same workflow builds the Rust server for both
+`linux/amd64` and `linux/arm64` on native `ubuntu-latest` and `ubuntu-24.04-arm`
+runners. The GHCR jobs use `packages: write` and the completed `publish` job as their
+authorization boundary; they do not create additional `npm-production` environment
+approvals. The exact `X.Y.Z` is passed as the Docker `VERSION` build argument and
+published as `ghcr.io/kyan-du/agent-wechat:X.Y.Z`.
 The tag is assembled from content-addressed digests and verified to contain both
-architectures. The workflow is not successful until this GHCR publication succeeds.
+architectures. Before creating it, the workflow checks the exact tag: an absent tag is
+created, an existing tag is accepted only when its two platform digests exactly match,
+and any mismatch fails without retargeting the tag. The workflow is not successful until
+this GHCR publication succeeds.
 The existing prerelease and commit-verification workflows remain separate and do not
 publish stable semver tags.
 

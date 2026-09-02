@@ -83,7 +83,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       const inertBlueprint = name === "npm-release.yml" && where === "job publish" && job?.environment === "npm-production";
       const stableGhcrRelease = name === "npm-release.yml" &&
         ["job publish-ghcr", "job publish-ghcr-manifest"].includes(where) &&
-        job?.environment === "npm-production";
+        job?.needs !== undefined;
       const approvedWrite = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint
@@ -99,7 +99,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       const command = String(step?.run ?? "");
       const stableGhcrJob = name === "npm-release.yml" &&
         ["publish-ghcr", "publish-ghcr-manifest"].includes(jobName) &&
-        job?.environment === "npm-production";
+        job?.needs !== undefined;
       if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: registry login action`);
       if (/softprops\/action-gh-release|actions\/create-release/i.test(uses)) forbidden.push(`${name}: GitHub Release action`);
       if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: image push action`);
@@ -112,7 +112,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       ];
       for (const [pattern, label] of commands) {
         const approvedPublish = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && label === "image push")
-          || (name === "npm-release.yml" && jobName === "publish" && job?.environment === "npm-production");
+          || (name === "npm-release.yml" && (jobName === "publish" && job?.environment === "npm-production" || stableGhcrJob));
         if (pattern.test(command) && !approvedPublish) forbidden.push(`${name}: ${label}`);
       }
     }

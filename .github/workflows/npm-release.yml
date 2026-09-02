@@ -169,9 +169,8 @@ jobs:
   publish-ghcr:
     name: Publish stable GHCR image
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
-    environment: npm-production
     permissions:
       contents: read
       packages: write
@@ -179,9 +178,11 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - arch: amd64
+          - runner: ubuntu-latest
+            arch: amd64
             platform: linux/amd64
-          - arch: arm64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
             platform: linux/arm64
     env:
       IMAGE: ghcr.io/kyan-du/agent-wechat
@@ -246,7 +247,6 @@ jobs:
     needs: [publish, publish-ghcr]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: npm-production
     permissions:
       contents: read
       packages: write
@@ -272,6 +272,17 @@ jobs:
           test "${#files[@]}" -eq 2
           refs=()
           for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
+          existing_status=0
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > existing.json 2>existing.err || existing_status=$?
+          if [ "$existing_status" -eq 0 ]; then
+            EXPECTED_DIGESTS="$(printf '%s\n' "${files[@]}" | xargs -n1 basename | sort | paste -sd, -)" \
+              node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("existing.json"));const expected=new Set(process.env.EXPECTED_DIGESTS.split(","));const ms=j.manifests??j.manifest?.manifests??[];const actual=new Set(ms.filter(x=>x.platform?.os!=="unknown"&&x.digest).map(x=>x.digest.replace("sha256:","")));if(actual.size!==2||actual.size!==expected.size||[...actual].some(x=>!expected.has(x)))throw Error(`existing stable tag $IMAGE:$VERSION is bound to a different manifest`);console.log(`stable tag already matches exact manifest: $IMAGE:$VERSION`)'
+            exit 0
+          fi
+          if ! grep -Eqi 'manifest unknown|no such manifest|not found' existing.err; then
+            cat existing.err >&2
+            exit "$existing_status"
+          fi
           docker buildx imagetools create --tag "$IMAGE:$VERSION" "${refs[@]}"
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .}}' > manifest.json
           VERSION="$VERSION" node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ms=j.manifest?.manifests??j.manifests??[];const images=ms.filter(x=>x.platform?.os!=="unknown");const ps=images.map(x=>`${x.platform?.os}/${x.platform?.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`image platforms: ${ps}`);if(images.length!==2)throw Error("stable tag must contain exactly two image manifests");'
