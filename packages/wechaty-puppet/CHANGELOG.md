@@ -1,5 +1,7 @@
 # @agent-wechat/wechaty-puppet
 
+## 0.14.0
+
 ## 0.13.3
 
 ### Patch Changes

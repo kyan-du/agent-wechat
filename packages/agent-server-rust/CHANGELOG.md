@@ -1,5 +1,15 @@
 # @agent-wechat/agent-server
 
+## 0.14.0
+
+### Patch Changes
+
+- [#76](https://github.com/kyan-du/agent-wechat/pull/76) [`eeee686`](https://github.com/kyan-du/agent-wechat/commit/eeee68659315699f2fdad615509aad059c772df1) Thanks [@audrey-blake](https://github.com/audrey-blake)! - Recognize an open chat from the live main-window composer when its selected sidebar row is outside the accessibility viewport, while preserving independent target confirmation and bounded fail-closed send diagnostics.
+
+- [#100](https://github.com/kyan-du/agent-wechat/pull/100) [`07ecc4a`](https://github.com/kyan-du/agent-wechat/commit/07ecc4a4d9771c78c2b1cf718586993858cf03a1) Thanks [@kyan-du](https://github.com/kyan-du)! - Treat the WeChat update/about overlay as a blocking popup so auth status reports `popup_blocked` instead of `composer_unavailable`, and keep the CLI's volume cleanup limited to practical local-Docker checks.
+
+- [#77](https://github.com/kyan-du/agent-wechat/pull/77) [`dabab58`](https://github.com/kyan-du/agent-wechat/commit/dabab580f29cdfa2109e64b9664f81951cefb934) Thanks [@audrey-blake](https://github.com/audrey-blake)! - Validate supported inbound PDF payloads while rejecting unverified file formats, preserve safe Unicode filenames, expose stable media diagnostics and image provenance, and report quoted-image resource limitations without dropping message text.
+
 ## 0.13.3
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @kyan-du/agent-wechat-shared
 
+## 0.1.2
+
+### Patch Changes
+
+- [#77](https://github.com/kyan-du/agent-wechat/pull/77) [`dabab58`](https://github.com/kyan-du/agent-wechat/commit/dabab580f29cdfa2109e64b9664f81951cefb934) Thanks [@audrey-blake](https://github.com/audrey-blake)! - Validate supported inbound PDF payloads while rejecting unverified file formats, preserve safe Unicode filenames, expose stable media diagnostics and image provenance, and report quoted-image resource limitations without dropping message text.
+
 ## 0.1.1
 
 ### Patch Changes
