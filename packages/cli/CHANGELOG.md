@@ -1,5 +1,15 @@
 # @agent-wechat/cli
 
+## 0.14.0
+
+### Minor Changes
+
+- [#78](https://github.com/kyan-du/agent-wechat/pull/78) [`27fcc5c`](https://github.com/kyan-du/agent-wechat/commit/27fcc5c0b1d4f8b7b13e2f4249a77fc9699865be) Thanks [@violet-hastings](https://github.com/violet-hastings)! - Add a privacy-minimized, read-only, paginated group member API, shared client method, CLI command, and explicit OpenClaw tool.
+
+### Patch Changes
+
+- [#100](https://github.com/kyan-du/agent-wechat/pull/100) [`07ecc4a`](https://github.com/kyan-du/agent-wechat/commit/07ecc4a4d9771c78c2b1cf718586993858cf03a1) Thanks [@kyan-du](https://github.com/kyan-du)! - Treat the WeChat update/about overlay as a blocking popup so auth status reports `popup_blocked` instead of `composer_unavailable`, and keep the CLI's volume cleanup limited to practical local-Docker checks.
+
 ## 0.13.3
 
 ### Patch Changes

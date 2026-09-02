@@ -1,6 +1,6 @@
 {
   "name": "@kyan-du/agent-wechat-wechaty-gateway",
-  "version": "0.13.3",
+  "version": "0.14.0",
   "private": true,
   "description": "Wechaty gRPC gateway wrapping @kyan-du/agent-wechat-wechaty-puppet",
   "type": "module",

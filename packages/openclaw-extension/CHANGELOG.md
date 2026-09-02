@@ -1,5 +1,19 @@
 # @agent-wechat/wechat
 
+## 0.14.0
+
+### Minor Changes
+
+- [#78](https://github.com/kyan-du/agent-wechat/pull/78) [`27fcc5c`](https://github.com/kyan-du/agent-wechat/commit/27fcc5c0b1d4f8b7b13e2f4249a77fc9699865be) Thanks [@violet-hastings](https://github.com/violet-hastings)! - Add a privacy-minimized, read-only, paginated group member API, shared client method, CLI command, and explicit OpenClaw tool.
+
+- [`54457a8`](https://github.com/kyan-du/agent-wechat/commit/54457a87944755716d0ad98422ead9e1f4cce350) - Deliver Tencent News (newsapp) feed previews as inbound text, with a hot-loop exit after skipped unread chats.
+
+### Patch Changes
+
+- [`54457a8`](https://github.com/kyan-du/agent-wechat/commit/54457a87944755716d0ad98422ead9e1f4cce350) - Import OpenClaw 2026.8.2 plugin-sdk subpaths and add a typecheck shim for channel-outbound.
+
+- [#77](https://github.com/kyan-du/agent-wechat/pull/77) [`dabab58`](https://github.com/kyan-du/agent-wechat/commit/dabab580f29cdfa2109e64b9664f81951cefb934) Thanks [@audrey-blake](https://github.com/audrey-blake)! - Validate supported inbound PDF payloads while rejecting unverified file formats, preserve safe Unicode filenames, expose stable media diagnostics and image provenance, and report quoted-image resource limitations without dropping message text.
+
 ## 0.13.3
 
 ### Patch Changes
