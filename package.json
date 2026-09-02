@@ -35,6 +35,7 @@
     "test:npm-packages": "node scripts/smoke-npm-packages.mjs",
     "test:npm-production-release": "node scripts/check-npm-production-release.mjs && node --test scripts/npm-release-utils.test.mjs",
     "test:ghcr-release": "node scripts/validate-ghcr-release.mjs && node scripts/test-ghcr-release.mjs",
+    "test:npm-release-workflow": "node scripts/test-npm-release-workflow.mjs",
     "test:release-consistency": "node --test scripts/validate-release-consistency.test.mjs"
   },
   "devDependencies": {
