@@ -147,6 +147,8 @@ export async function startWeChatMonitor(
     persist: () => persistPendingResetRetries(account.accountId, pendingMessageScans),
   };
   trimPendingResetRetries(retryState);
+  // Sticky system-feed unread counters must not cause a listMessages call every tick.
+  const newsappHandled = new Map<string, string>();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -280,7 +282,14 @@ export async function startWeChatMonitor(
           startupBaselines.set(chatId, { localId: 0 });
         }
       }
-      const chatsToProcess = monitorChatsToProcess(chats, retryState);
+      const chatsToProcess = monitorChatsToProcess(
+        chats,
+        retryState,
+        Date.now(),
+        (chat) => !isNewsappChat(chat) ||
+          newsappHandled.get(chat.username ?? chat.id) !==
+            `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`,
+      );
       for (const chatId of chatsToProcess.keys()) {
         if (isOfficialAccount(chatId) && chatId !== "newsapp")
           chatsToProcess.delete(chatId);
@@ -324,6 +333,12 @@ export async function startWeChatMonitor(
           }
           if (result === "deferred") {
             deferredThisTick += 1;
+          }
+          if (isNewsappChat(chat) && result !== "deferred") {
+            newsappHandled.set(
+              chat.username ?? chat.id,
+              `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`,
+            );
           }
         }
       }
@@ -817,7 +832,7 @@ async function dispatchSegment(
             tableMode,
           );
 
-          if (mediaList.length > 0) {
+          if (mediaList.length > 0 && !isNewsappChat(chat)) {
             const media: MediaPart[] = [];
             for (const mediaUrl of mediaList) {
               const fsmod = await import("fs/promises");
@@ -859,7 +874,7 @@ async function dispatchSegment(
               inboundChars: lastMsg.rawBody.length,
               source: "openclaw",
             });
-          } else if (text) {
+          } else if (text && !isNewsappChat(chat)) {
             const result = await client.sendMessage({
               chatId,
               text,
@@ -1049,15 +1064,23 @@ async function processUnreadChat(
     startupBaselines.set(chatId, enrichedBaseline);
   }
 
-  const selected = selectCursorMessages(
-    chatId,
-    chat,
-    messages,
-    lastSeenId,
-    equalCursorUnreadHandled,
-    enrichedBaseline,
-    generationResetConfirmed,
-  );
+  const selected = isNewsappChat(chat)
+    ? {
+        firstPoll,
+        prevLastSeen,
+        messages,
+        seedLastSeen: undefined,
+        generationReset: false,
+      }
+    : selectCursorMessages(
+        chatId,
+        chat,
+        messages,
+        lastSeenId,
+        equalCursorUnreadHandled,
+        enrichedBaseline,
+        generationResetConfirmed,
+      );
   let newMessages = selected.messages;
   if (selected.generationReset && !pendingMessageScans.get(chatId)?.readyForDispatch) {
     queueResetGenerationRetry(
@@ -1122,8 +1145,9 @@ async function processUnreadChat(
     maxAgeMs: liveAccount.catchUpMaxAgeMs,
   };
   const isRecovery =
-    (firstPoll && startupBaseline === undefined) ||
-    (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits));
+    !isNewsappChat(chat) &&
+    ((firstPoll && startupBaseline === undefined) ||
+      (skipOpen === true && isCatchUpBatch(newMessages, catchUpLimits)));
   if (isRecovery) {
     const selection = selectCatchUpMessages(
       newMessages,

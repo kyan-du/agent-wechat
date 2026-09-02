@@ -287,6 +287,7 @@ export function monitorChatsToProcess(
   chats: Chat[],
   state: MonitorRetryState,
   now = Date.now(),
+  shouldProcessChat: (chat: Chat) => boolean = () => true,
 ): Map<string, Chat> {
   const result = new Map<string, Chat>();
   for (const pending of state.pendingMessageScans.values()) {
@@ -295,7 +296,7 @@ export function monitorChatsToProcess(
   }
   for (const chat of chats) {
     const chatId = chat.username ?? chat.id;
-    if (chat.unreadCount > 0 || state.pendingMessageScans.has(chatId)) result.set(chatId, chat);
+    if (shouldProcessChat(chat) && (chat.unreadCount > 0 || state.pendingMessageScans.has(chatId))) result.set(chatId, chat);
   }
   return result;
 }

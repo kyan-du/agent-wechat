@@ -22,16 +22,17 @@ type NewsappChat = Pick<Chat, "id" | "username"> & {
 
 export function newsappFallbackMessage(chat: NewsappChat): Message | null {
   const preview = chat.lastMessagePreview?.trim();
-  if (!preview || typeof chat.lastMsgLocalId !== "number") return null;
+  const localId = chat.lastMsgLocalId;
+  if (!preview || typeof localId !== "number" || !Number.isSafeInteger(localId) || localId <= 0) return null;
   const urls = extractNewsappUrls(preview);
   const urlBlock = urls.length > 0 ? `\nLinks:\n${urls.join("\n")}` : "";
   return {
-    localId: chat.lastMsgLocalId,
-    serverId: chat.lastMsgLocalId,
+    localId,
+    serverId: localId,
     chatId: chat.username || chat.id,
     type: 1,
     content: `[Tencent News]\n${preview}${urlBlock}`,
-    timestamp: chat.lastActivityAt || new Date().toISOString(),
+    timestamp: chat.lastActivityAt || `1970-01-01T00:00:${String(localId % 60).padStart(2, "0")}.000Z`,
     sender: NEWSAPP_USERNAME,
     senderName: "腾讯新闻",
   };
