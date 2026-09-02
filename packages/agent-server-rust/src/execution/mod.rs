@@ -151,7 +151,10 @@ where
         // 2. IDENTIFY: find current states
         let identified = identify_states(&a11y, &screenshot);
 
-        if identified.main_window.is_none() {
+        // A recognized popup is actionable even when it covers the main window.
+        // In particular, Weixin's changelog overlay exposes only the popup frame;
+        // treating that snapshot as Unknown prevents the plan from clicking Disable.
+        if identified.main_window.is_none() && identified.popup.is_none() {
             if unknown_state_since.is_none() {
                 unknown_state_since = Some(std::time::Instant::now());
                 unknown_state_last_diagnostic = None;

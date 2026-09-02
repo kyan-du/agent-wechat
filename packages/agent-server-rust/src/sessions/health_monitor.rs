@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
+use crate::ia::actions::close_window;
+use crate::ia::helpers::action_frame;
 use crate::sessions::manager::current_session;
 use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
@@ -291,12 +293,37 @@ pub fn spawn_health_monitor() {
             let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
             let identified = identify_states(&a11y, &screenshot);
 
-            if identified.main_window.is_some() {
+            if identified.main_window.is_some() || identified.popup.is_some() {
                 // State identified — WeChat is responsive
                 last_identified = Instant::now();
             } else {
                 // No state identified — check timeout
                 check_and_kill(wechat_pid, &last_identified);
+            }
+
+            if identified
+                .popup
+                .as_ref()
+                .is_some_and(|popup| popup.state_id == "popup_weixin_update")
+            {
+                let action = close_window();
+                let frame = action_frame(&identified);
+                match crate::execution::actions::execute_action(
+                    &action,
+                    frame.as_ref(),
+                    &exec_options,
+                    &a11y,
+                    &|_event: crate::ia::types::SubscriptionEvent| {},
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!("[health] Closed Weixin update overlay"),
+                    Err(error) => tracing::warn!(
+                        "[health] Failed to close Weixin update overlay code={}",
+                        error.diagnostic
+                    ),
+                }
+                continue;
             }
 
             let candidate = LoginResumeSnapshot::from_identified(

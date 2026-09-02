@@ -68,7 +68,7 @@ impl Plan for LoginPlan {
         let frame = || identified.main_window.as_ref().and_then(|m| m.frame.clone());
 
         // Dismiss popups first
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
                 actions::close_window()
             } else {

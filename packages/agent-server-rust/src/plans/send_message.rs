@@ -284,7 +284,7 @@ impl Plan for SendMessagePlan {
         }
         // Dismiss other popups, then restart target selection. The conversation
         // may have changed while the popup was in front.
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             if reset_after_popup(plan_state).is_err() {
                 return None;
             }

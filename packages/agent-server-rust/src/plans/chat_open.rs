@@ -68,7 +68,7 @@ impl Plan for ChatOpenPlan {
 
     async fn select_action(
         &self,
-        state: &AppState,
+        _state: &AppState,
         params: &ChatOpenParams,
         identified: &IdentifiedStates,
         plan_state: &mut ChatOpenPlanState,
@@ -76,7 +76,7 @@ impl Plan for ChatOpenPlan {
         _session_id: &str,
     ) -> Option<SelectedAction> {
         // Dismiss popups
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
                 actions::close_window()
             } else {
