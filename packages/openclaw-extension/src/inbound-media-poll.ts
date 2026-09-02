@@ -2,6 +2,9 @@ import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
+type ImageMaterializationClient = {
+  openChat(chatId: string, clearUnreads?: boolean): Promise<unknown>;
+};
 
 // These errors mean WeChat has not finished materializing the local media yet.
 // Validation and authentication failures remain terminal and are returned immediately.
@@ -17,17 +20,71 @@ const RETRYABLE_MEDIA_ERRORS = new Set([
 // Keep a missing local image from serially blocking the rest of an inbound batch.
 export const DEFAULT_MEDIA_POLL_ATTEMPTS = 6;
 export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 500;
+// Overlay openChat can stall ~60s on UNKNOWN_UI_STATE_TIMEOUT. Bound the trigger
+// so the short media poll window still returns even if UI never settles.
+export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
+
+export type ImageMaterializationTriggerOptions = {
+  log?: { info?: (...args: any[]) => void };
+  timeoutMs?: number;
+  // Catch-up processUnreadChat(..., skipOpen=true) must still reopen for type=3.
+  // This flag is accepted so callers can pass skipOpen without gating the trigger.
+  skipOpen?: boolean;
+};
 
 export function createImageMaterializationTrigger(
-  client: { openChat(chatId: string, clearUnreads?: boolean): Promise<unknown> },
+  client: ImageMaterializationClient,
   chatId: string,
-  log?: { info?: (...args: any[]) => void },
+  options?: ImageMaterializationTriggerOptions,
 ): MediaRetryTrigger {
+  const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
   return async (result, attempt) => {
     if (result.type === "file") return;
-    log?.info?.(`[wechat:media] triggering chat reopen for image attempt=${attempt}`);
-    await client.openChat(chatId, true);
+    options?.log?.info?.(
+      `[wechat:media] triggering chat reopen for image attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
+    );
+    const opened = Promise.resolve(client.openChat(chatId, true));
+    // Prevent a later overlay timeout from becoming an unhandled rejection after we move on.
+    void opened.catch(() => undefined);
+    await raceWithTimeout(opened, timeoutMs);
   };
+}
+
+export function imageMaterializationTriggerForMessage(opts: {
+  client: ImageMaterializationClient;
+  chatId: string;
+  messageType: number;
+  log?: { info?: (...args: any[]) => void };
+  timeoutMs?: number;
+  skipOpen?: boolean;
+}): MediaRetryTrigger | undefined {
+  const baseType = opts.messageType & 0x7fffffff;
+  if (baseType !== 3) return undefined;
+  return createImageMaterializationTrigger(opts.client, opts.chatId, {
+    log: opts.log,
+    timeoutMs: opts.timeoutMs,
+    skipOpen: opts.skipOpen,
+  });
+}
+
+function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(Object.assign(new Error("IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT"), {
+        code: "IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT",
+      }));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function isRetryable(result: MediaResult): boolean {

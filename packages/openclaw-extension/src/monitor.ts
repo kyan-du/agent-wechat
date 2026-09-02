@@ -44,7 +44,7 @@ import {
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
-import { createImageMaterializationTrigger, pollMedia } from "./inbound-media-poll.js";
+import { imageMaterializationTriggerForMessage, pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 import {
@@ -426,6 +426,7 @@ async function prepareMessage(
   liveAccount: ResolvedWeChatAccount,
   policy: WeChatPolicyContext,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
+  skipOpen?: boolean,
 ): Promise<ProcessedMessage | null> {
   const core = getWeChatRuntime();
 
@@ -478,7 +479,13 @@ async function prepareMessage(
         log,
         undefined,
         undefined,
-        baseType === 3 ? createImageMaterializationTrigger(client, chatId, log) : undefined,
+        imageMaterializationTriggerForMessage({
+          client,
+          chatId,
+          messageType: baseType,
+          log,
+          skipOpen,
+        }),
       );
       if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;
@@ -1204,7 +1211,7 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
     );
-    const pm = await prepareMessage(client, mediaPipeline, msg, chatId, chat, liveAccount, policy, log);
+    const pm = await prepareMessage(client, mediaPipeline, msg, chatId, chat, liveAccount, policy, log, skipOpen);
     if (pm) {
       processed.push(pm);
     } else {
