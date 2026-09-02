@@ -95,6 +95,23 @@ test("media polling returns the last transient diagnostic after bounded exhausti
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
 });
 
+test("media polling triggers materialization once before bounded retries", async () => {
+  let calls = 0;
+  let triggers = 0;
+  const client = { getMedia: async () => {
+    calls += 1;
+    return calls < 3
+      ? { type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" }
+      : { type: "image", data: "/9j/AA==", format: "jpeg", filename: "late.jpg" };
+  } };
+  const result = await pollMedia(client as never, "wxid_direct", 101, undefined, 3, 0, async () => {
+    triggers += 1;
+  });
+  assert.equal(calls, 3);
+  assert.equal(triggers, 1);
+  assert.equal(result?.data, "/9j/AA==");
+});
+
 test("media polling stops immediately for permanent image key and decryption failures", async () => {
   for (const errorCode of ["IMAGE_XOR_KEY_UNAVAILABLE", "IMAGE_DECRYPTION_FAILED"]) {
     let calls = 0;

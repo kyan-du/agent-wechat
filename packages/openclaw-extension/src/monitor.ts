@@ -471,7 +471,19 @@ async function prepareMessage(
   if (mayHaveMedia) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
     try {
-      const result = await pollMedia(client, chatId, msg.localId, log);
+      const result = await pollMedia(
+        client,
+        chatId,
+        msg.localId,
+        log,
+        undefined,
+        undefined,
+        async (pending) => {
+          if (baseType !== 3 || pending.type === "file") return;
+          log?.info?.(`[wechat:media] triggering chat reopen for image download`);
+          await client.openChat(chatId, true);
+        },
+      );
       if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;
         mediaSource = result.source;
