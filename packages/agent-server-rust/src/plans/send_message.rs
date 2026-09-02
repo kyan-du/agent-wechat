@@ -276,6 +276,10 @@ impl Plan for SendMessagePlan {
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
         // Security popups freeze outbound; do not click them away.
+        if identified.popup.as_ref().is_some_and(|popup| popup.state_id == "popup_security") {
+            crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+            return None;
+        }
         if let Some(popup) = &state.popup {
             if crate::risk::is_security_popup(popup) {
                 crate::outbound::outbound_sender().trip_kill_switch("security_popup");

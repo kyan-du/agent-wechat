@@ -67,6 +67,11 @@ impl Plan for LoginPlan {
     ) -> Option<SelectedAction> {
         let frame = || identified.main_window.as_ref().and_then(|m| m.frame.clone());
 
+        // Security popups freeze automation; never dismiss them.
+        if identified.popup.as_ref().is_some_and(|popup| popup.state_id == "popup_security") {
+            crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+            return None;
+        }
         // Dismiss popups first
         if identified.popup.is_some() {
             let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {

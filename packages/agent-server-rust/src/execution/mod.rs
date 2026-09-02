@@ -154,7 +154,7 @@ where
         // A recognized popup is actionable even when it covers the main window.
         // In particular, Weixin's changelog overlay exposes only the popup frame;
         // treating that snapshot as Unknown prevents the plan from clicking Disable.
-        if identified.main_window.is_none() && identified.popup.is_none() {
+        if !has_actionable_state(&identified) {
             if unknown_state_since.is_none() {
                 unknown_state_since = Some(std::time::Instant::now());
                 unknown_state_last_diagnostic = None;
@@ -368,4 +368,29 @@ where
         success: false,
         error: Some("Max steps reached".to_string()),
     }, plan_state)
+}
+
+fn has_actionable_state(identified: &IdentifiedStates) -> bool {
+    identified.main_window.is_some() || identified.popup.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_actionable_state;
+    use crate::ia::types::{IdentifiedState, IdentifiedStates};
+
+    #[test]
+    fn popup_is_actionable_without_main_window() {
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState {
+                state_id: "popup_weixin_update".to_string(),
+                fsm: "popup".to_string(),
+                frame: None,
+            }),
+            contact_card: None,
+            settings: None,
+        };
+        assert!(has_actionable_state(&identified));
+    }
 }

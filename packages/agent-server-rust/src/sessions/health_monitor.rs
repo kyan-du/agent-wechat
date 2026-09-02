@@ -167,6 +167,13 @@ pub fn resume_monitoring() {
     MONITORING_PAUSED.store(false, Ordering::Relaxed);
 }
 
+fn should_close_weixin_update(identified: &crate::ia::types::IdentifiedStates) -> bool {
+    identified
+        .popup
+        .as_ref()
+        .is_some_and(|popup| popup.state_id == "popup_weixin_update")
+}
+
 /// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
     // Use DBUS_SESSION_BUS_ADDRESS from our own environment (inherited from
@@ -301,11 +308,7 @@ pub fn spawn_health_monitor() {
                 check_and_kill(wechat_pid, &last_identified);
             }
 
-            if identified
-                .popup
-                .as_ref()
-                .is_some_and(|popup| popup.state_id == "popup_weixin_update")
-            {
+            if should_close_weixin_update(&identified) {
                 let action = close_window();
                 let frame = action_frame(&identified);
                 match crate::execution::actions::execute_action(
@@ -496,6 +499,13 @@ mod tests {
             contact_card: card.then(|| state("contact_card", "contactCard")),
             settings: settings.then(|| state("settings", "settings")),
         }
+    }
+
+    #[test]
+    fn update_popup_is_closed_but_other_popups_are_not() {
+        assert!(should_close_weixin_update(&identified(None, Some("popup_weixin_update"), false, false)));
+        assert!(!should_close_weixin_update(&identified(None, Some("popup_security"), false, false)));
+        assert!(!should_close_weixin_update(&identified(Some("chat"), Some("popup_confirm"), false, false)));
     }
 
     #[test]
