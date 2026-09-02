@@ -1,7 +1,7 @@
 import { unlink } from "node:fs/promises";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wechat-shared";
-import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { createChannelMessageReplyPipeline as createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { OPENCLAW_CHANNEL_ID, resolveWeChatAccount } from "./types.js";
