@@ -160,10 +160,13 @@ test("slow openChat does not consume the short media poll window", async () => {
   let opens = 0;
   let getMediaCalls = 0;
   const startedAt = Date.now();
+  let aborted = false;
   const trigger = createImageMaterializationTrigger({
-    openChat: (chatId, clearUnreads) => {
+    openChat: (chatId, clearUnreads, signal) => {
       assert.equal(chatId, "vangie");
       assert.equal(clearUnreads, true);
+      assert.ok(signal instanceof AbortSignal);
+      signal.addEventListener("abort", () => { aborted = true; }, { once: true });
       opens += 1;
       return new Promise(() => {});
     },
@@ -177,6 +180,7 @@ test("slow openChat does not consume the short media poll window", async () => {
   const elapsedMs = Date.now() - startedAt;
   assert.equal(opens, 1);
   assert.equal(getMediaCalls, 2);
+  assert.equal(aborted, true, "timed-out openChat must receive cancellation");
   assert.ok(elapsedMs < 1000, `pollMedia stalled on openChat for ${elapsedMs}ms`);
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
 });

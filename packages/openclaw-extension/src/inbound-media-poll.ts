@@ -3,8 +3,9 @@ import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
 type ImageMaterializationClient = {
-  openChat(chatId: string, clearUnreads?: boolean): Promise<unknown>;
+  openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal): Promise<unknown>;
 };
+
 
 // These errors mean WeChat has not finished materializing the local media yet.
 // Validation and authentication failures remain terminal and are returned immediately.
@@ -43,10 +44,15 @@ export function createImageMaterializationTrigger(
     options?.log?.info?.(
       `[wechat:media] triggering chat reopen for image attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
     );
-    const opened = Promise.resolve(client.openChat(chatId, true));
+    const controller = new AbortController();
+    const opened = Promise.resolve(client.openChat(chatId, true, controller.signal));
     // Prevent a later overlay timeout from becoming an unhandled rejection after we move on.
     void opened.catch(() => undefined);
-    await raceWithTimeout(opened, timeoutMs);
+    try {
+      await raceWithTimeout(opened, timeoutMs);
+    } finally {
+      controller.abort();
+    }
   };
 }
 

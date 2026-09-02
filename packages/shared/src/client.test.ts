@@ -192,6 +192,28 @@ test("listGroupMembersPage rejects malformed successful payloads", async () => {
   });
 });
 
+test("openChat forwards AbortSignal so a timed-out GUI request can be cancelled", async () => {
+  const original = globalThis.fetch;
+  let receivedSignal: AbortSignal | undefined;
+  globalThis.fetch = (async (_input, init) => {
+    receivedSignal = init?.signal ?? undefined;
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const client = new WeChatClient({ baseUrl: "http://agent-wechat.local" });
+    const controller = new AbortController();
+    const pending = client.openChat("wxid_slow", true, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    await assert.rejects(pending, /aborted|AbortError|fetch failed/i);
+    assert.equal(receivedSignal, controller.signal);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("sendMessage exposes IDEMPOTENCY_CAPACITY on 429", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () =>
