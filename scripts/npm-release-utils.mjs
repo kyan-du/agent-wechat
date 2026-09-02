@@ -55,9 +55,11 @@ export function runResult(command, args, cwd = process.cwd()) {
 export function classifyNpmFailure(result) {
   const text = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
   const code = text.match(/\bnpm ERR! code ([A-Z0-9_]+)/)?.[1]
+    ?? text.match(/\bnpm error code ([A-Z0-9_]+)/i)?.[1]
+    ?? text.match(/"code"\s*:\s*"([A-Z][A-Z0-9_]+)"/)?.[1]
     ?? text.match(/\b(?:code|statusCode|error)\s*[=:]\s*['"]?([A-Z][A-Z0-9_]+)\b/)?.[1]
     ?? "";
-  const transient = transientCodes.has(code) || /\b(?:404 Not Found|5\d\d|not in this registry|No matching version found|network timeout|socket timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(text);
+  const transient = transientCodes.has(code) || /\b(?:404 Not Found|5\d\d|not in this registry|No matching version found|No match found for version|network timeout|socket timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND)\b/i.test(text);
   const alreadyExists = /\b(?:E403|EPUBLISHCONFLICT)\b/i.test(text) || /cannot publish over the previously published versions|You cannot publish over the previously published versions/i.test(text);
   return { code, transient, alreadyExists, text: text.trim() };
 }

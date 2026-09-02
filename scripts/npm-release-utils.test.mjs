@@ -25,6 +25,20 @@ test("classifies npm propagation and network errors as transient", () => {
   }
 });
 
+test("classifies npm 11 CI E404 wording as transient", () => {
+  const ci = classifyNpmFailure({
+    stderr: "npm error code E404\nnpm error 404 No match found for version 0.14.0",
+  });
+  assert.equal(ci.code, "E404");
+  assert.equal(ci.transient, true);
+
+  const json = classifyNpmFailure({
+    stdout: '{"error":{"code":"E404","summary":"No match found for version 0.14.0"}}',
+  });
+  assert.equal(json.code, "E404");
+  assert.equal(json.transient, true);
+});
+
 test("classifies existing-version publish rejection for reconciliation", () => {
   const failure = classifyNpmFailure({
     stderr: "npm ERR! code E403\nnpm ERR! 403 You cannot publish over the previously published versions: 1.2.3.",
