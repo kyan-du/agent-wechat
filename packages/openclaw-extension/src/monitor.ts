@@ -47,6 +47,7 @@ import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import { pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
+import { isNewsappChat, newsappFallbackMessage } from "./newsapp.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -259,9 +260,11 @@ export async function startWeChatMonitor(
         }
       }
 
-      // Filter to chats with unreads (skip official accounts)
+      // newsapp is a system feed with an unread counter but may expose no message rows.
       const unreadChats = chats.filter(
-        (c) => c.unreadCount > 0 && !isOfficialAccount(c.username ?? c.id),
+        (c) =>
+          c.unreadCount > 0 &&
+          (!isOfficialAccount(c.username ?? c.id) || isNewsappChat(c)),
       );
       for (const chat of unreadChats) {
         const chatId = chat.username ?? chat.id;
@@ -275,7 +278,8 @@ export async function startWeChatMonitor(
       }
       const chatsToProcess = monitorChatsToProcess(chats, retryState);
       for (const chatId of chatsToProcess.keys()) {
-        if (isOfficialAccount(chatId)) chatsToProcess.delete(chatId);
+        if (isOfficialAccount(chatId) && chatId !== "newsapp")
+          chatsToProcess.delete(chatId);
       }
       if (unreadChats.length > 0) {
         log?.info?.(
@@ -417,11 +421,13 @@ async function prepareMessage(
   const senderName = msg.senderName ?? msg.sender ?? chat.name;
   const wasMentioned = isGroup && (msg.isMentioned === true);
 
-  const access = resolveWeChatInboundAccessDecision({
-    isGroup,
-    senderId,
-    policy,
-  });
+  const access = isNewsappChat(chat)
+    ? { allowed: true as const, reason: "newsapp-system-feed" }
+    : resolveWeChatInboundAccessDecision({
+        isGroup,
+        senderId,
+        policy,
+      });
   if (!access.allowed) {
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Blocked by policy (${access.reason}) from ${senderId}`,
@@ -1027,6 +1033,11 @@ async function processUnreadChat(
     `[wechat:${liveAccount.accountId}] ${chatId}: fetched ${messages.length} msgs, firstPoll=${firstPoll}, prevLastSeen=${prevLastSeen}, unreadCount=${chat.unreadCount}`,
   );
 
+  // newsapp may expose unreadCount/lastMessagePreview without message rows.
+  if (messages.length === 0 && isNewsappChat(chat)) {
+    const fallback = newsappFallbackMessage(chat);
+    if (fallback) messages = [fallback];
+  }
   if (messages.length === 0) return "skipped";
 
   const enrichedBaseline = enrichStartupBaselineFromMessages(startupBaseline, messages);
@@ -1089,7 +1100,7 @@ async function processUnreadChat(
         chatId,
       );
     }
-    if (chat.unreadCount > 0) {
+    if (chat.unreadCount > 0 && !isNewsappChat(chat)) {
       await openChatIfNeeded();
     }
     // Don't update lastSeenId — if session.db reports a newer message
@@ -1100,7 +1111,7 @@ async function processUnreadChat(
 
   // Open after the durable read-only scan, so clearing unreads cannot erase the
   // only signal telling us that older unread pages still need to be fetched.
-  await openChatIfNeeded();
+  if (!isNewsappChat(chat)) await openChatIfNeeded();
 
   const catchUpLimits = {
     maxMessages: liveAccount.catchUpMaxMessages,
