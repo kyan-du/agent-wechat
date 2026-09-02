@@ -139,7 +139,11 @@ for (const name of workflows) {
   const path = join(".github/workflows", name);
   const text = readFileSync(path, "utf8");
   const approvedCommitVerification = name === "docker-commit-verification.yml";
-  if (!approvedCommitVerification && name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
+  const approvedStableRelease = name === "npm-release.yml" &&
+    /name: Publish stable GHCR image/.test(text) &&
+    /needs: publish/.test(text) &&
+    /environment: npm-production/.test(text);
+  if (!approvedCommitVerification && !approvedStableRelease && name !== "ghcr-prerelease.yml" && /docker\/login-action|push-by-digest|imagetools\s+create|push:\s*true|packages:\s*write/.test(text)) {
     failures.push(`${path} contains a Docker publication capability before P1-B/P1-C authorization`);
   }
   if (name.startsWith("npm-agent-") && !/deploymentEnabled!==false/.test(text)) {

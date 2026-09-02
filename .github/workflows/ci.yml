@@ -55,6 +55,7 @@ jobs:
               - 'scripts/test-prerelease-contract.sh'
               - 'scripts/test-prerelease-manifest.sh'
               - 'scripts/check-npm-production-release.mjs'
+              - 'scripts/test-npm-release-workflow.mjs'
               - 'scripts/npm-release-utils.mjs'
               - 'scripts/npm-release-utils.test.mjs'
               - 'scripts/verify-published-npm-release.mjs'
@@ -142,6 +143,7 @@ jobs:
       - name: Guard unreleased channels and root CLI image behavior
         run: |
           pnpm test:release-boundary -- --require-rendered
+          pnpm test:npm-release-workflow
           pnpm test:ghcr-release
           pnpm test:root-cli-image
 
