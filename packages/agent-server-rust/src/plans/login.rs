@@ -386,3 +386,22 @@ async fn handle_extracting_keys(
         frame: frame.clone(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = LoginPlan;
+        let mut state = plan.initial_plan_state();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        };
+        let selected = plan.select_action(&AppState::default(), &LoginParams { new_account: false }, &identified, &mut state, &A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }, "test").await.expect("update popup must be actionable");
+        assert!(matches!(selected.action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
+    }
+}

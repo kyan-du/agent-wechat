@@ -225,4 +225,40 @@ mod tests {
         assert_eq!(state.diagnostic_error, Some(COMPOSER_UNAVAILABLE));
         assert!(!plan.is_goal_reached(&AppState::default(), &state));
     }
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = ChatOpenPlan;
+        let mut state = plan.initial_plan_state();
+        let identified = update_popup_only_states();
+        let selected = plan
+            .select_action(
+                &AppState::default(),
+                &ChatOpenParams { chat_id: "wxid_test".into(), clear_unreads: true },
+                &identified,
+                &mut state,
+                &empty_a11y_window(),
+                "test",
+            )
+            .await
+            .expect("update popup must be actionable");
+        assert_disable_action(selected.action);
+    }
+
+    fn update_popup_only_states() -> IdentifiedStates {
+        IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        }
+    }
+
+    fn empty_a11y_window() -> A11yNode {
+        A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }
+    }
+
+    fn assert_disable_action(action: Action) {
+        assert!(matches!(action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
+    }
 }

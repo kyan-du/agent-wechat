@@ -855,4 +855,18 @@ mod tests {
         );
         assert!(state.send_action_executed);
     }
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = SendMessagePlan;
+        let mut state = plan.initial_plan_state();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        };
+        let selected = plan.select_action(&AppState::default(), &SendMessageParams { chat_id: "wxid_test".into(), message: Some("hello".into()), image_path: None, image_mime: None, file_path: None, inbound_chars: None, source: None, similarity_confirmed: true }, &identified, &mut state, &A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }, "test").await.expect("update popup must be actionable");
+        assert!(matches!(selected.action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
+    }
 }
