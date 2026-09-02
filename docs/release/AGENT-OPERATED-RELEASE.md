@@ -41,14 +41,20 @@ a fresh project, imports both packages, and runs the `wx --version` binary smoke
 
 ## Finalization
 
-Only after registry verification succeeds, the workflow creates or verifies:
+After registry verification succeeds, the workflow creates or verifies:
 
 - exact tag `vX.Y.Z` pointing at the dispatch/current-main SHA;
 - GitHub Release `vX.Y.Z`.
 
-There is no manifest summary protocol, cross-job producer identity protocol, byte-for-byte
-double build, release/reconcile state machine, or partial-publication auto-recovery. If npm
-publishing is interrupted, stop and decide manually whether to use a new version or perform
-a targeted operator repair outside this workflow.
+The same approved `npm-production` workflow then builds the Rust server for both
+`linux/amd64` and `linux/arm64`, passing the exact `X.Y.Z` as the Docker `VERSION`
+build argument, and publishes the exact GHCR tag `ghcr.io/kyan-du/agent-wechat:X.Y.Z`.
+The tag is assembled from content-addressed digests and verified to contain both
+architectures. The workflow is not successful until this GHCR publication succeeds.
+The existing prerelease and commit-verification workflows remain separate and do not
+publish stable semver tags.
 
-GHCR remains independent and is not triggered by this npm workflow.
+There is no manifest summary protocol, cross-job producer identity protocol, byte-for-byte
+ double build, release/reconcile state machine, or partial-publication auto-recovery. If npm
+ publishing or GHCR publishing is interrupted, stop and decide manually whether to use a new
+ version or perform a targeted operator repair outside this workflow.
