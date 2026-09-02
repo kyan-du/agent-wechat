@@ -67,8 +67,13 @@ impl Plan for LoginPlan {
     ) -> Option<SelectedAction> {
         let frame = || identified.main_window.as_ref().and_then(|m| m.frame.clone());
 
+        // Security popups freeze automation; never dismiss them.
+        if identified.popup.as_ref().is_some_and(|popup| popup.state_id == "popup_security") {
+            crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+            return None;
+        }
         // Dismiss popups first
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
                 actions::close_window()
             } else {
@@ -380,4 +385,23 @@ async fn handle_extracting_keys(
         ]),
         frame: frame.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = LoginPlan;
+        let mut state = plan.initial_plan_state();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        };
+        let selected = plan.select_action(&AppState::default(), &LoginParams { new_account: false }, &identified, &mut state, &A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }, "test").await.expect("update popup must be actionable");
+        assert!(matches!(selected.action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
+    }
 }

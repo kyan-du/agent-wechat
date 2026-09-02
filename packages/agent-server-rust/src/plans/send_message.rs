@@ -276,6 +276,10 @@ impl Plan for SendMessagePlan {
         let main_state_id = identified.main_window.as_ref().map(|m| m.state_id.as_str());
 
         // Security popups freeze outbound; do not click them away.
+        if identified.popup.as_ref().is_some_and(|popup| popup.state_id == "popup_security") {
+            crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+            return None;
+        }
         if let Some(popup) = &state.popup {
             if crate::risk::is_security_popup(popup) {
                 crate::outbound::outbound_sender().trip_kill_switch("security_popup");
@@ -284,7 +288,7 @@ impl Plan for SendMessagePlan {
         }
         // Dismiss other popups, then restart target selection. The conversation
         // may have changed while the popup was in front.
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             if reset_after_popup(plan_state).is_err() {
                 return None;
             }
@@ -850,5 +854,19 @@ mod tests {
             Some("popup_after_send_action")
         );
         assert!(state.send_action_executed);
+    }
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = SendMessagePlan;
+        let mut state = plan.initial_plan_state();
+        let identified = IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        };
+        let selected = plan.select_action(&AppState::default(), &SendMessageParams { chat_id: "wxid_test".into(), message: Some("hello".into()), image_path: None, image_mime: None, file_path: None, inbound_chars: None, source: None, similarity_confirmed: true }, &identified, &mut state, &A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }, "test").await.expect("update popup must be actionable");
+        assert!(matches!(selected.action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
     }
 }

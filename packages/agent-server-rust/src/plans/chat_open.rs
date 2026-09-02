@@ -68,15 +68,20 @@ impl Plan for ChatOpenPlan {
 
     async fn select_action(
         &self,
-        state: &AppState,
+        _state: &AppState,
         params: &ChatOpenParams,
         identified: &IdentifiedStates,
         plan_state: &mut ChatOpenPlanState,
         a11y: &A11yNode,
         _session_id: &str,
     ) -> Option<SelectedAction> {
+        // Security popups freeze automation; never dismiss them.
+        if identified.popup.as_ref().is_some_and(|popup| popup.state_id == "popup_security") {
+            crate::outbound::outbound_sender().trip_kill_switch("security_popup");
+            return None;
+        }
         // Dismiss popups
-        if state.popup.is_some() && identified.popup.is_some() {
+        if identified.popup.is_some() {
             let action = if identified.popup.as_ref().map(|popup| popup.state_id.as_str()) == Some("popup_weixin_update") {
                 actions::close_window()
             } else {
@@ -219,5 +224,41 @@ mod tests {
         assert_eq!(state.focus_attempts, MAX_FOCUS_ATTEMPTS);
         assert_eq!(state.diagnostic_error, Some(COMPOSER_UNAVAILABLE));
         assert!(!plan.is_goal_reached(&AppState::default(), &state));
+    }
+
+    #[tokio::test]
+    async fn update_popup_without_main_window_selects_disable() {
+        let plan = ChatOpenPlan;
+        let mut state = plan.initial_plan_state();
+        let identified = update_popup_only_states();
+        let selected = plan
+            .select_action(
+                &AppState::default(),
+                &ChatOpenParams { chat_id: "wxid_test".into(), clear_unreads: true },
+                &identified,
+                &mut state,
+                &empty_a11y_window(),
+                "test",
+            )
+            .await
+            .expect("update popup must be actionable");
+        assert_disable_action(selected.action);
+    }
+
+    fn update_popup_only_states() -> IdentifiedStates {
+        IdentifiedStates {
+            main_window: None,
+            popup: Some(IdentifiedState { state_id: "popup_weixin_update".into(), fsm: "popup".into(), frame: None }),
+            contact_card: None,
+            settings: None,
+        }
+    }
+
+    fn empty_a11y_window() -> A11yNode {
+        A11yNode { role: "window".into(), name: "Weixin".into(), bounds: None, children: None, parent_index: None, window: None, states: None }
+    }
+
+    fn assert_disable_action(action: Action) {
+        assert!(matches!(action, Action::ClickSelector { selector } if selector == r##"tool-bar push-button[name="Disable"]"##));
     }
 }

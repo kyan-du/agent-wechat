@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::ia::identify_states;
+use crate::ia::actions::close_window;
+use crate::ia::helpers::action_frame;
 use crate::sessions::manager::current_session;
 use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
@@ -165,6 +167,13 @@ pub fn resume_monitoring() {
     MONITORING_PAUSED.store(false, Ordering::Relaxed);
 }
 
+fn should_close_weixin_update(identified: &crate::ia::types::IdentifiedStates) -> bool {
+    identified
+        .popup
+        .as_ref()
+        .is_some_and(|popup| popup.state_id == "popup_weixin_update")
+}
+
 /// Spawn WeChat process for the given session using the shared launch script.
 fn spawn_wechat(session: &crate::ia::types::Session) {
     // Use DBUS_SESSION_BUS_ADDRESS from our own environment (inherited from
@@ -291,12 +300,33 @@ pub fn spawn_health_monitor() {
             let screenshot = capture_screenshot(&exec_options).await.unwrap_or_default();
             let identified = identify_states(&a11y, &screenshot);
 
-            if identified.main_window.is_some() {
+            if identified.main_window.is_some() || identified.popup.is_some() {
                 // State identified — WeChat is responsive
                 last_identified = Instant::now();
             } else {
                 // No state identified — check timeout
                 check_and_kill(wechat_pid, &last_identified);
+            }
+
+            if should_close_weixin_update(&identified) {
+                let action = close_window();
+                let frame = action_frame(&identified);
+                match crate::execution::actions::execute_action(
+                    &action,
+                    frame.as_ref(),
+                    &exec_options,
+                    &a11y,
+                    &|_event: crate::ia::types::SubscriptionEvent| {},
+                )
+                .await
+                {
+                    Ok(_) => tracing::info!("[health] Closed Weixin update overlay"),
+                    Err(error) => tracing::warn!(
+                        "[health] Failed to close Weixin update overlay code={}",
+                        error.diagnostic
+                    ),
+                }
+                continue;
             }
 
             let candidate = LoginResumeSnapshot::from_identified(
@@ -469,6 +499,13 @@ mod tests {
             contact_card: card.then(|| state("contact_card", "contactCard")),
             settings: settings.then(|| state("settings", "settings")),
         }
+    }
+
+    #[test]
+    fn update_popup_is_closed_but_other_popups_are_not() {
+        assert!(should_close_weixin_update(&identified(None, Some("popup_weixin_update"), false, false)));
+        assert!(!should_close_weixin_update(&identified(None, Some("popup_security"), false, false)));
+        assert!(!should_close_weixin_update(&identified(Some("chat"), Some("popup_confirm"), false, false)));
     }
 
     #[test]
