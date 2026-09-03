@@ -133,6 +133,8 @@ pub async fn find_chats(Query(params): Query<FindParams>) -> Json<Vec<Chat>> {
 pub struct OpenChatParams {
     #[serde(default, rename = "clearUnreads")]
     clear_unreads: bool,
+    #[serde(default, rename = "executionTimeoutMs")]
+    execution_timeout_ms: Option<u64>,
 }
 
 fn chat_open_execution_error_code(error: Option<&str>) -> &'static str {
@@ -270,6 +272,7 @@ pub async fn open_chat(
     };
 
     let plan = ChatOpenPlan;
+    let execution_timeout_ms = params.execution_timeout_ms;
     let params = ChatOpenParams {
         chat_id,
         clear_unreads,
@@ -277,8 +280,26 @@ pub async fn open_chat(
     let cancel = CancellationToken::new();
     let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
 
-    let (result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await;
+    let execution = run_execution_loop(&plan, &params, &mut context, noop_emit, cancel.clone());
+    let (result, plan_state) = if let Some(timeout_ms) = execution_timeout_ms {
+        tokio::pin!(execution);
+        let timeout = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms.min(60_000)));
+        tokio::pin!(timeout);
+        tokio::select! {
+            value = &mut execution => value,
+            _ = &mut timeout => {
+                cancel.cancel();
+                let _ = (&mut execution).await;
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "errorCode": "IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT",
+                    "error": "Chat open timed out"
+                }));
+            }
+        }
+    } else {
+        execution.await
+    };
 
     if result.success {
         if let Some(open_result) = plan_state.result {

@@ -204,9 +204,10 @@ export class WeChatClient {
     chatId: string,
     clearUnreads?: boolean,
     signal?: AbortSignal,
+    executionTimeoutMs?: number,
   ): Promise<OpenChatResult> {
     return this.post(
-      `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads })}`,
+      `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads, executionTimeoutMs })}`,
       undefined,
       signal,
     );

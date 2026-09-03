@@ -3,7 +3,7 @@ import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
 type ImageMaterializationClient = {
-  openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal): Promise<unknown>;
+  openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
 };
 
 
@@ -45,7 +45,7 @@ export function createImageMaterializationTrigger(
       `[wechat:media] triggering chat reopen for image attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
     );
     const controller = new AbortController();
-    const opened = Promise.resolve(client.openChat(chatId, true, controller.signal));
+    const opened = Promise.resolve(client.openChat(chatId, true, controller.signal, timeoutMs));
     // Prevent a later overlay timeout from becoming an unhandled rejection after we move on.
     void opened.catch(() => undefined);
     try {
