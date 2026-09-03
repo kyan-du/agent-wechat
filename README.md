@@ -182,18 +182,18 @@ pnpm build:image:amd64       # Build Docker image (Intel)
 
 GitHub Actions provides a manual **Build Docker Image from Ref** workflow. In
 Actions, choose `Build Docker Image from Ref`, enter a branch, tag, or full
-commit SHA, and optionally provide a short lowercase label. The workflow builds
-both `linux/amd64` and `linux/arm64`, then publishes an immutable GHCR tag of
-this form:
+commit SHA. The workflow builds
+both `linux/amd64` and `linux/arm64`, then publishes an immutable GHCR tag
+using the resolved production seven-character commit ID:
 
 ```text
-ghcr.io/kyan-du/agent-wechat:manual-<label>-<resolved-sha12>
+ghcr.io/kyan-du/agent-wechat:<resolved-sha7>
 ```
 
-If no label is supplied, the tag is `manual-<resolved-sha12>`. The workflow
-summary prints the exact `docker pull`, digest-pinned pull, and `docker run`
-commands. The SHA suffix binds the image to the resolved commit and prevents a
-human label from silently retargeting an older image. This is a disposable
+The tag is the exact first seven characters of the resolved commit ID. The
+workflow summary prints the exact `docker pull`, digest-pinned pull, and
+`docker run` commands. The commit tag binds the image to the resolved commit.
+This is a disposable
 validation artifact, not a semver release; it never moves `latest`, `next`, or
 release tags.
 

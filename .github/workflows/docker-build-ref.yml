@@ -1,7 +1,8 @@
 name: Build Docker Image from Ref
 
 # Build a pullable, non-release image from any branch, tag, or commit.
-# This workflow intentionally uses SHA-qualified manual tags and never moves
+# This workflow intentionally uses the resolved production seven-character
+# commit tag and never moves
 # latest, next, semver, or post-merge commit-verification tags.
 on:
   workflow_dispatch:
@@ -11,11 +12,7 @@ on:
         required: true
         type: string
         default: main
-      tag:
-        description: Optional human label; it is always suffixed with the resolved SHA
-        required: false
-        type: string
-        default: ""
+
 
 permissions:
   contents: read
@@ -35,6 +32,7 @@ jobs:
     outputs:
       sha: ${{ steps.identity.outputs.sha }}
       tag: ${{ steps.identity.outputs.tag }}
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -45,19 +43,15 @@ jobs:
         name: Bind build to exact commit
         env:
           REQUESTED_REF: ${{ inputs.ref }}
-          REQUESTED_TAG: ${{ inputs.tag }}
+
         run: |
           set -euo pipefail
           test -n "$REQUESTED_REF"
           sha="$(git rev-parse HEAD)"
           test "${#sha}" -eq 40
           test "$sha" = "$(git rev-parse HEAD^{commit})"
-          short_sha="${sha:0:12}"
-          tag="manual-${short_sha}"
-          if [ -n "$REQUESTED_TAG" ]; then
-            printf '%s' "$REQUESTED_TAG" | grep -Eq '^[a-z0-9][a-z0-9._-]{0,49}$'
-            tag="manual-${REQUESTED_TAG}-${short_sha}"
-          fi
+          tag="${sha:0:7}"
+          test "$tag" = "$(git rev-parse --short=7 HEAD)"
           printf 'sha=%s\ntag=%s\n' "$sha" "$tag" >> "$GITHUB_OUTPUT"
           {
             echo "Requested ref: \`$REQUESTED_REF\`"
@@ -151,6 +145,20 @@ jobs:
           test "${#files[@]}" -eq 2
           refs=()
           for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
+
+          # Seven-character prefixes can theoretically collide. Never retarget
+          # an existing tag: accept only an exact manifest replay.
+          existing_status=0
+          docker buildx imagetools inspect "$IMAGE:$TAG" --raw > existing.json 2>existing.err || existing_status=$?
+          if [ "$existing_status" -eq 0 ]; then
+            EXPECTED_DIGESTS="$(printf '%s\n' "${files[@]}" | xargs -n1 basename | sort | paste -sd, -)" \
+              node -e 'const fs=require("fs");const expected=new Set(process.env.EXPECTED_DIGESTS.split(",").map(x=>`sha256:${x}`));const j=JSON.parse(fs.readFileSync("existing.json"));const ms=j.manifests??j.manifest?.manifests??[];const actual=new Set(ms.filter(x=>x.platform?.os!=="unknown"&&x.digest).map(x=>x.digest));if(actual.size!==2||actual.size!==expected.size||[...actual].some(x=>!expected.has(x)))throw Error(`existing tag $IMAGE:$TAG is bound to a different manifest`);console.log(`image tag already matches exact manifest: $IMAGE:$TAG`)'
+            exit 0
+          fi
+          if ! grep -Eqi 'manifest unknown|no such manifest|not found' existing.err; then
+            cat existing.err >&2
+            exit "$existing_status"
+          fi
           docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
           docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .}}' > manifest.json
           node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ms=j.manifest?.manifests??j.manifests??[];const ps=ms.filter(x=>x.platform?.os!=="unknown").map(x=>`${x.platform.os}/${x.platform.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`image platforms: ${ps}`)'
