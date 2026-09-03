@@ -47,6 +47,8 @@ jobs:
               - '.github/workflows/docker-rebuild.yml'
               - '.github/workflows/docker-commit-verification.yml'
               - 'scripts/validate-commit-image-workflow.mjs'
+              - 'scripts/validate-ref-image-workflow.mjs'
+              - '.github/workflows/docker-build-ref.yml'
               - '.github/workflows/ci.yml'
               - 'scripts/validate-docker-context.mjs'
               - 'scripts/validate-prerelease-contract.mjs'
@@ -145,6 +147,7 @@ jobs:
           pnpm test:release-boundary -- --require-rendered
           pnpm test:npm-release-workflow
           pnpm test:ghcr-release
+          pnpm test:ref-image-workflow
           pnpm test:root-cli-image
 
       - name: Lint availability

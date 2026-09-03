@@ -17,6 +17,8 @@ on:
       - 'scripts/test-release-inputs.mjs'
       - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
+      - '.github/workflows/docker-build-ref.yml'
+      - 'scripts/validate-ref-image-workflow.mjs'
   push:
     branches: [main]
     paths:
@@ -31,6 +33,8 @@ on:
       - 'scripts/test-release-inputs.mjs'
       - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
+      - '.github/workflows/docker-build-ref.yml'
+      - 'scripts/validate-ref-image-workflow.mjs'
 
 permissions:
   contents: read

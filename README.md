@@ -187,11 +187,11 @@ both `linux/amd64` and `linux/arm64`, then publishes an immutable GHCR tag
 using the resolved production seven-character commit ID:
 
 ```text
-ghcr.io/kyan-du/agent-wechat:<resolved-sha7>
+ghcr.io/kyan-du/agent-wechat:ref-<resolved-sha7>
 ```
 
-The tag is the exact first seven characters of the resolved commit ID. The
-workflow summary prints the exact `docker pull`, digest-pinned pull, and
+The tag is `ref-` followed by the exact first seven characters of the resolved
+commit ID. The workflow summary prints the exact `docker pull`, digest-pinned pull, and
 `docker run` commands. The commit tag binds the image to the resolved commit.
 This is a disposable
 validation artifact, not a semver release; it never moves `latest`, `next`, or

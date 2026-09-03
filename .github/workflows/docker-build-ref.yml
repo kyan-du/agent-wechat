@@ -50,8 +50,8 @@ jobs:
           sha="$(git rev-parse HEAD)"
           test "${#sha}" -eq 40
           test "$sha" = "$(git rev-parse HEAD^{commit})"
-          tag="${sha:0:7}"
-          test "$tag" = "$(git rev-parse --short=7 HEAD)"
+          tag="ref-${sha:0:7}"
+          test "$tag" = "ref-$(git rev-parse HEAD | cut -c1-7)"
           printf 'sha=%s\ntag=%s\n' "$sha" "$tag" >> "$GITHUB_OUTPUT"
           {
             echo "Requested ref: \`$REQUESTED_REF\`"
