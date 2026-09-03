@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::create_context;
 use crate::db::get_db;
-use crate::execution::run_execution_loop;
+use crate::execution::{run_execution_loop, run_execution_loop_with_timeout};
 use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan, COMPOSER_UNAVAILABLE};
 use crate::sessions::manager::current_session;
@@ -280,25 +280,10 @@ pub async fn open_chat(
     let cancel = CancellationToken::new();
     let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
 
-    let execution = run_execution_loop(&plan, &params, &mut context, noop_emit, cancel.clone());
     let (result, plan_state) = if let Some(timeout_ms) = execution_timeout_ms {
-        tokio::pin!(execution);
-        let timeout = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms.min(60_000)));
-        tokio::pin!(timeout);
-        tokio::select! {
-            value = &mut execution => value,
-            _ = &mut timeout => {
-                cancel.cancel();
-                let _ = (&mut execution).await;
-                return Json(serde_json::json!({
-                    "ok": false,
-                    "errorCode": "IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT",
-                    "error": "Chat open timed out"
-                }));
-            }
-        }
+        run_execution_loop_with_timeout(&plan, &params, &mut context, noop_emit, cancel, timeout_ms).await
     } else {
-        execution.await
+        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await
     };
 
     if result.success {

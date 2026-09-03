@@ -195,7 +195,9 @@ test("listGroupMembersPage rejects malformed successful payloads", async () => {
 test("openChat forwards AbortSignal so a timed-out GUI request can be cancelled", async () => {
   const original = globalThis.fetch;
   let receivedSignal: AbortSignal | undefined;
-  globalThis.fetch = (async (_input, init) => {
+  let receivedUrl = "";
+  globalThis.fetch = (async (input, init) => {
+    receivedUrl = String(input);
     receivedSignal = init?.signal ?? undefined;
     return await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
@@ -204,8 +206,9 @@ test("openChat forwards AbortSignal so a timed-out GUI request can be cancelled"
   try {
     const client = new WeChatClient({ baseUrl: "http://agent-wechat.local" });
     const controller = new AbortController();
-    const pending = client.openChat("wxid_slow", true, controller.signal);
+    const pending = client.openChat("wxid_slow", true, controller.signal, 400);
     await Promise.resolve();
+    assert.match(receivedUrl, /\/api\/chats\/wxid_slow\/open\?clearUnreads=true&executionTimeoutMs=400/);
     controller.abort();
     await assert.rejects(pending, /aborted|AbortError|fetch failed/i);
     assert.equal(receivedSignal, controller.signal);
