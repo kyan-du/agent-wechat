@@ -178,6 +178,30 @@ pnpm build:image:arm64       # Build Docker image (Apple Silicon)
 pnpm build:image:amd64       # Build Docker image (Intel)
 ```
 
+### Build a pullable image from any branch before merging
+
+GitHub Actions provides a manual **Build Docker Image from Ref** workflow. In
+Actions, choose `Build Docker Image from Ref`, enter a branch, tag, or full
+commit SHA, and optionally provide a short lowercase label. The workflow builds
+both `linux/amd64` and `linux/arm64`, then publishes an immutable GHCR tag of
+this form:
+
+```text
+ghcr.io/kyan-du/agent-wechat:manual-<label>-<resolved-sha12>
+```
+
+If no label is supplied, the tag is `manual-<resolved-sha12>`. The workflow
+summary prints the exact `docker pull`, digest-pinned pull, and `docker run`
+commands. The SHA suffix binds the image to the resolved commit and prevents a
+human label from silently retargeting an older image. This is a disposable
+validation artifact, not a semver release; it never moves `latest`, `next`, or
+release tags.
+
+For a pull request, use the PR head branch or full head SHA as `ref`, then use
+the digest-pinned command from the run summary for local verification. The
+workflow requires `packages: write`; the first publication may also require
+making the GHCR package visible to the intended pull client.
+
 ## Runtime constraints (experimental)
 
 These are experimental fingerprint and pacing changes. They are not a guarantee the account stays unrestricted. Do not trial them on a primary account.
