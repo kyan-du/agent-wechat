@@ -73,6 +73,16 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
   let workflow;
   try { workflow = parseYaml(text); } catch (error) { fail(`${name}: invalid workflow YAML: ${error.message}`); }
   const trigger = workflow.on ?? workflow.true ?? {};
+  const refImageWorkflow = name === "docker-build-ref.yml" &&
+    Object.keys(trigger).length === 1 &&
+    Object.keys(trigger)[0] === "workflow_dispatch" &&
+    workflow.permissions?.contents === "read" &&
+    workflow.permissions?.packages === "write" &&
+    /tag=\"ref-\$\{sha:0:7\}\"/.test(text) &&
+    /ref-\$\{sha:0:7\}/.test(text) &&
+    !/:latest\b|:next\b|manual-|:v?\$\{?VERSION|:v?<version>/i.test(text);
+  const approvedRefImage = refImageWorkflow && name === "docker-build-ref.yml";
+  if (name === "docker-build-ref.yml" && !approvedRefImage) fail("docker-build-ref.yml: ref image workflow authorization drift");
   for (const [event, config] of Object.entries(trigger)) {
     if (event === "push" && config && typeof config === "object" && ("tags" in config || "tags-ignore" in config)) forbidden.push(`${name}: tag trigger`);
   }
@@ -84,7 +94,7 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       const stableGhcrRelease = name === "npm-release.yml" &&
         ["job publish-ghcr", "job publish-ghcr-manifest"].includes(where) &&
         job?.needs !== undefined;
-      const approvedWrite = (["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && where === "workflow" && scope === "packages")
+      const approvedWrite = ((["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) || approvedRefImage) && where === "workflow" && scope === "packages")
         || (name === "deploy-docs.yml" && where === "workflow" && scope === "id-token")
         || inertBlueprint
         || (stableGhcrRelease && scope === "packages");
@@ -100,9 +110,9 @@ for (const name of readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(fil
       const stableGhcrJob = name === "npm-release.yml" &&
         ["publish-ghcr", "publish-ghcr-manifest"].includes(jobName) &&
         job?.needs !== undefined;
-      if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: registry login action`);
+      if (/docker\/login-action/i.test(uses) && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !approvedRefImage && !stableGhcrJob) forbidden.push(`${name}: registry login action`);
       if (/softprops\/action-gh-release|actions\/create-release/i.test(uses)) forbidden.push(`${name}: GitHub Release action`);
-      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !stableGhcrJob) forbidden.push(`${name}: image push action`);
+      if (/docker\/build-push-action/i.test(uses) && step?.with?.push === true && !["ghcr-prerelease.yml", "docker-commit-verification.yml"].includes(name) && !approvedRefImage && !stableGhcrJob) forbidden.push(`${name}: image push action`);
       const commands = [
         [/\b(?:npm|pnpm)\s+publish\b/i, "npm publish"],
         [/\bchangeset\s+publish\b/i, "changeset publish"],

@@ -52,6 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: node scripts/validate-release-boundary.mjs
+      - run: node scripts/validate-ref-image-workflow.mjs
       - run: node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs
 
   build:

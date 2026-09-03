@@ -9,10 +9,11 @@ const workflow = parse(text);
 const trigger = workflow.on ?? workflow.true;
 
 assert.equal(workflow.name, "Build Docker Image from Ref");
-assert.ok(trigger.workflow_dispatch, "workflow_dispatch is required");
+assert.deepEqual(Object.keys(trigger), ["workflow_dispatch"]);
 assert.deepEqual(Object.keys(trigger.workflow_dispatch.inputs), ["ref"]);
 assert.equal(workflow.permissions.contents, "read");
 assert.equal(workflow.permissions.packages, "write");
+assert.equal(workflow.concurrency["cancel-in-progress"], false);
 assert.deepEqual(Object.keys(workflow.jobs), ["authorize", "build", "publish"]);
 assert.match(text, /tag="ref-\$\{sha:0:7\}"/);
 assert.match(text, /git rev-parse HEAD \| cut -c1-7/);

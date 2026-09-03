@@ -1,7 +1,7 @@
 name: Build Docker Image from Ref
 
 # Build a pullable, non-release image from any branch, tag, or commit.
-# This workflow intentionally uses the resolved production seven-character
+# This workflow intentionally uses an isolated ref- plus seven-character
 # commit tag and never moves
 # latest, next, semver, or post-merge commit-verification tags.
 on:
