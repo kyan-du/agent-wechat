@@ -1,0 +1,177 @@
+name: Build Docker Image from Ref
+
+# Build a pullable, non-release image from any branch, tag, or commit.
+# This workflow intentionally uses an isolated ref- plus seven-character
+# commit tag and never moves
+# latest, next, semver, or post-merge commit-verification tags.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or full commit SHA to build
+        required: true
+        type: string
+        default: main
+
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-build-ref-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/kyan-du/agent-wechat
+
+jobs:
+  authorize:
+    name: Resolve requested ref
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.identity.outputs.sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: identity
+        name: Bind build to exact commit
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+
+        run: |
+          set -euo pipefail
+          test -n "$REQUESTED_REF"
+          sha="$(git rev-parse HEAD)"
+          test "${#sha}" -eq 40
+          test "$sha" = "$(git rev-parse HEAD^{commit})"
+          tag="ref-${sha:0:7}"
+          test "$tag" = "ref-$(git rev-parse HEAD | cut -c1-7)"
+          printf 'sha=%s\ntag=%s\n' "$sha" "$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "Requested ref: \`$REQUESTED_REF\`"
+            echo "Resolved commit: \`$sha\`"
+            echo "Image tag: \`${IMAGE}:$tag\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build ${{ matrix.platform }} digest
+    needs: authorize
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify exact checkout
+        env:
+          EXPECTED_SHA: ${{ needs.authorize.outputs.sha }}
+        run: test "$EXPECTED_SHA" = "$(git rev-parse HEAD)"
+      - name: Prepare Docker context
+        run: |
+          set -euo pipefail
+          rm -rf docker/agent-server-rust
+          mkdir -p docker/agent-server-rust
+          cp packages/agent-server-rust/Cargo.toml docker/agent-server-rust/
+          [ -f packages/agent-server-rust/Cargo.lock ] && cp packages/agent-server-rust/Cargo.lock docker/agent-server-rust/
+          cp -r packages/agent-server-rust/src packages/agent-server-rust/migrations docker/agent-server-rust/
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - id: build
+        name: Push architecture image by digest
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: docker
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=build-ref-${{ matrix.arch }}
+          cache-to: type=gha,scope=build-ref-${{ matrix.arch }},mode=max
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          test "${digest#sha256:}" != "$digest"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ref-digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish and verify ref image manifest
+    needs: [authorize, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ref-digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+      - name: Create immutable tag and verify platforms
+        env:
+          TAG: ${{ needs.authorize.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find /tmp/digests -type f | sort)
+          test "${#files[@]}" -eq 2
+          refs=()
+          for file in "${files[@]}"; do refs+=("$IMAGE@sha256:$(basename "$file")"); done
+
+          # Seven-character prefixes can theoretically collide. Never retarget
+          # an existing tag: accept only an exact manifest replay.
+          existing_status=0
+          docker buildx imagetools inspect "$IMAGE:$TAG" --raw > existing.json 2>existing.err || existing_status=$?
+          if [ "$existing_status" -eq 0 ]; then
+            EXPECTED_DIGESTS="$(printf '%s\n' "${files[@]}" | xargs -n1 basename | sort | paste -sd, -)" \
+              node -e 'const fs=require("fs");const expected=new Set(process.env.EXPECTED_DIGESTS.split(",").map(x=>`sha256:${x}`));const j=JSON.parse(fs.readFileSync("existing.json"));const ms=j.manifests??j.manifest?.manifests??[];const actual=new Set(ms.filter(x=>x.platform?.os!=="unknown"&&x.digest).map(x=>x.digest));if(actual.size!==2||actual.size!==expected.size||[...actual].some(x=>!expected.has(x)))throw Error(`existing tag $IMAGE:$TAG is bound to a different manifest`);console.log(`image tag already matches exact manifest: $IMAGE:$TAG`)'
+            exit 0
+          fi
+          if ! grep -Eqi 'manifest unknown|no such manifest|not found' existing.err; then
+            cat existing.err >&2
+            exit "$existing_status"
+          fi
+          docker buildx imagetools create --tag "$IMAGE:$TAG" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .}}' > manifest.json
+          node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync("manifest.json"));const ms=j.manifest?.manifests??j.manifests??[];const ps=ms.filter(x=>x.platform?.os!=="unknown").map(x=>`${x.platform.os}/${x.platform.architecture}`).sort();if(JSON.stringify(ps)!==JSON.stringify(["linux/amd64","linux/arm64"]))throw Error(`image platforms: ${ps}`)'
+          digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}')"
+          {
+            echo "## Pullable image"
+            echo
+            echo '```sh'
+            echo "docker pull $IMAGE:$TAG"
+            echo "docker pull $IMAGE@${digest}"
+            echo "docker run --rm $IMAGE@${digest}"
+            echo '```'
+            echo
+            echo "Manifest digest: \`$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Published $IMAGE:$TAG ($digest)"
