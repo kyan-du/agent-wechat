@@ -132,12 +132,16 @@ where
     };
 
     let execution_start = std::time::Instant::now();
+    let execution_deadline = timeout_ms.map(|limit| execution_start + std::time::Duration::from_millis(limit));
+    let unknown_state_timeout_ms = timeout_ms.unwrap_or(UNKNOWN_STATE_TIMEOUT_MS).min(UNKNOWN_STATE_TIMEOUT_MS);
     let mut unknown_state_since: Option<std::time::Instant> = None;
     let mut unknown_state_last_diagnostic: Option<std::time::Instant> = None;
 
     for step in 0..MAX_STEPS {
         // Check execution timeout
-        if execution_start.elapsed().as_millis() as u64 > timeout_ms.unwrap_or(EXECUTION_TIMEOUT_MS) {
+        if execution_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            || execution_start.elapsed().as_millis() as u64 > timeout_ms.unwrap_or(EXECUTION_TIMEOUT_MS)
+        {
             return (ExecutionResult {
                 success: false,
                 error: Some(format!(
@@ -179,7 +183,7 @@ where
                 unknown_state_last_diagnostic = None;
             }
             let elapsed = unknown_state_since.unwrap().elapsed();
-            if elapsed.as_millis() as u64 > UNKNOWN_STATE_TIMEOUT_MS {
+            if elapsed.as_millis() as u64 > unknown_state_timeout_ms {
                 tracing::error!(
                     "[exec] Unknown state timeout after {}s diagnostics={}",
                     elapsed.as_secs(),
@@ -208,7 +212,17 @@ where
             } else {
                 tracing::warn!("[exec] Unknown state ({}s), waiting...", elapsed.as_secs());
             }
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            let sleep_ms = execution_deadline
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as u64)
+                .unwrap_or(1000)
+                .min(1000);
+            if sleep_ms == 0 {
+                return (ExecutionResult {
+                    success: false,
+                    error: Some("Execution timeout during unknown UI state".to_string()),
+                }, plan_state);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
             continue;
         }
 
