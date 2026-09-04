@@ -236,6 +236,14 @@ BUILD_PROFILES = {
             "7146d19c2fcbfac10f6ed2aa2a4034f4"
         ),
     },
+    # WeChat Linux v4.1.1.8 aarch64 (BuildID: 9a3558be...)
+    # NOTE: a new WeChat BuildID must update BOTH this file and chat-select.py.
+    "9a3558be": {
+        "image_xor_mask": bytes.fromhex(
+            "dc2daafed0a06aabc7f27227236b04ab"
+            "90960760d4ca64182802d4137ac52e3e"
+        ),
+    },
 }
 
 
@@ -261,16 +269,55 @@ def get_build_id(pid):
 
 
 def get_build_profile(pid):
-    """Detect the WeChat build and return its memory layout constants."""
+    """Detect the WeChat build and return its memory layout constants.
+
+    Returns None when the running build is unknown. We deliberately do NOT fall
+    back to another build's mask: a wrong mask cannot recover the image key and
+    only produces confusing garbage, so image key extraction must fail loudly
+    and point at the missing profile instead.
+    """
     build_id = get_build_id(pid)
-    if build_id:
-        prefix = build_id[:8]
-        if prefix in BUILD_PROFILES:
-            print(f"Build: {build_id[:16]}... ({prefix})")
-            return BUILD_PROFILES[prefix]
-        print(f"WARNING: Unknown BuildID {build_id}. Image key extraction may fail.")
-    # Fall back to first profile (aarch64)
-    return next(iter(BUILD_PROFILES.values()))
+    if not build_id:
+        print("WARNING: could not read WeChat BuildID; cannot select image mask.")
+        return None
+    prefix = build_id[:8]
+    if prefix in BUILD_PROFILES:
+        print(f"Build: {build_id[:16]}... ({prefix})")
+        return BUILD_PROFILES[prefix]
+    known = ", ".join(sorted(BUILD_PROFILES))
+    print(f"WARNING: unknown WeChat BuildID {build_id} (prefix {prefix}).")
+    print(f"         No image_xor_mask for this build. Known builds: {known}.")
+    print("         Add a BUILD_PROFILES entry (see chat-select.py too).")
+    return None
+
+
+def scan_buffer_for_image_key(data, mask):
+    """Find the obfuscated image key inside a single memory buffer.
+
+    The key is stored as 32 bytes that, XORed with the per-build mask, decode to
+    a 32-char ASCII hex string: deobf[i] = data[off+i] ^ mask[i]. Returns the
+    decoded hex string, or None if no candidate is present in this buffer.
+    """
+    import re
+    hex_bytes = list(range(0x30, 0x3a)) + list(range(0x61, 0x67))
+    valid_at = [set(h ^ mask[i] for h in hex_bytes) for i in range(32)]
+
+    # Build a cheap regex prefilter on the first 4 obfuscated bytes.
+    def _byte_class(valid_set):
+        return b"[" + b"".join(re.escape(bytes([b])) for b in sorted(valid_set)) + b"]"
+    rx = re.compile(b"".join(_byte_class(valid_at[i]) for i in range(4)))
+
+    for m in rx.finditer(data):
+        i = m.start()
+        if i + 32 > len(data):
+            break
+        raw = data[i:i + 32]
+        if all(raw[j] in valid_at[j] for j in range(4, 32)):
+            deobf = bytes(raw[j] ^ mask[j] for j in range(32))
+            decoded = deobf.decode("ascii")
+            if len(set(decoded)) >= 8:
+                return decoded
+    return None
 
 
 def extract_image_aes_key(pid, profile):
@@ -278,15 +325,7 @@ def extract_image_aes_key(pid, profile):
 
     Returns: 32-char hex string
     """
-    import re
     mask = profile["image_xor_mask"]
-    hex_bytes = list(range(0x30, 0x3a)) + list(range(0x61, 0x67))
-    valid_at = [set(h ^ mask[i] for h in hex_bytes) for i in range(32)]
-
-    # Build regex for fast filtering
-    def _byte_class(valid_set):
-        return b"[" + b"".join(re.escape(bytes([b])) for b in sorted(valid_set)) + b"]"
-    rx = re.compile(b"".join(_byte_class(valid_at[i]) for i in range(4)))
 
     regions = []
     with open(f"/proc/{pid}/maps") as f:
@@ -308,16 +347,9 @@ def extract_image_aes_key(pid, profile):
                 data = mem.read(size)
             except (OSError, OverflowError):
                 continue
-            for m in rx.finditer(data):
-                i = m.start()
-                if i + 32 > len(data):
-                    break
-                raw = data[i:i + 32]
-                if all(raw[j] in valid_at[j] for j in range(4, 32)):
-                    deobf = bytes(raw[j] ^ mask[j] for j in range(32))
-                    decoded = deobf.decode("ascii")
-                    if len(set(decoded)) >= 8:
-                        return decoded
+            decoded = scan_buffer_for_image_key(data, mask)
+            if decoded is not None:
+                return decoded
 
     raise RuntimeError("Could not find image key. "
                        "Make sure WeChat has sent/received at least one image.")
@@ -328,6 +360,10 @@ def extract_image_keys(pid, profile):
 
     Returns: dict with "_image_aes".
     """
+    if profile is None:
+        raise RuntimeError(
+            "no image_xor_mask for this WeChat build; add a BUILD_PROFILES entry"
+        )
     print("\nExtracting image access keys...")
     aes_key_hex = extract_image_aes_key(pid, profile)
     print(f"  Image key: {aes_key_hex[:8]}...")
