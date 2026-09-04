@@ -25,6 +25,8 @@ import select
 
 # ── Per-build constants ──────────────────────────────────────────────────────
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
+# NOTE: every new WeChat BuildID must be added to BOTH this file's BUILD_PROFILES
+# (session offsets) AND extract-keys.py's BUILD_PROFILES (image_xor_mask).
 
 BUILD_PROFILES = {
     # WeChat Linux v4.1.0.16 aarch64 (BuildID: 5233a112...)
