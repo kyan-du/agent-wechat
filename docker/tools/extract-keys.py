@@ -320,6 +320,18 @@ def scan_buffer_for_image_key(data, mask):
     return None
 
 
+# Cap a single /proc/<pid>/mem read; large rw regions (e.g. the main heap
+# arena) are scanned in consecutive chunks instead of being skipped.
+_MEM_READ_CHUNK = 100 * 1024 * 1024
+
+
+def _iter_mem_chunks(start, end, chunk_size=_MEM_READ_CHUNK):
+    pos = start
+    while pos < end:
+        yield pos, min(pos + chunk_size, end)
+        pos += chunk_size
+
+
 def extract_image_aes_key(pid, profile):
     """Extract the image access key from the running process.
 
@@ -339,17 +351,15 @@ def extract_image_aes_key(pid, profile):
 
     with open(f"/proc/{pid}/mem", "rb") as mem:
         for start, end in regions:
-            size = end - start
-            if size > 100 * 1024 * 1024:
-                continue
-            try:
-                mem.seek(start)
-                data = mem.read(size)
-            except (OSError, OverflowError):
-                continue
-            decoded = scan_buffer_for_image_key(data, mask)
-            if decoded is not None:
-                return decoded
+            for chunk_start, chunk_end in _iter_mem_chunks(start, end):
+                try:
+                    mem.seek(chunk_start)
+                    data = mem.read(chunk_end - chunk_start)
+                except (OSError, OverflowError):
+                    continue
+                decoded = scan_buffer_for_image_key(data, mask)
+                if decoded is not None:
+                    return decoded
 
     raise RuntimeError("Could not find image key. "
                        "Make sure WeChat has sent/received at least one image.")

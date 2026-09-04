@@ -55,6 +55,16 @@ class GetBuildProfileTest(unittest.TestCase):
 
 
 class ScanBufferTest(unittest.TestCase):
+    def test_v4118_committed_mask_roundtrip(self):
+        # Uses the committed 9a3558be mask with a synthetic hex key only.
+        # Proves scan_buffer_for_image_key agrees with the checked-in constant;
+        # live PID memory + .dat decrypt still required to validate the constant.
+        mask = extract_keys.BUILD_PROFILES["9a3558be"]["image_xor_mask"]
+        key = _ascii_key(seed=9)
+        obf = bytes(ord(key[i]) ^ mask[i] for i in range(32))
+        buffer = b"\x00" * 64 + obf + b"\xff" * 64
+        self.assertEqual(extract_keys.scan_buffer_for_image_key(buffer, mask), key)
+
     def test_roundtrip_recovers_key(self):
         # Synthetic mask/key only. Real account keys are never committed; the
         # mask is a build constant and lives in BUILD_PROFILES.
@@ -83,6 +93,14 @@ class ExtractImageKeysGuardTest(unittest.TestCase):
     def test_none_profile_raises(self):
         with self.assertRaises(RuntimeError):
             extract_keys.extract_image_keys(pid=1234, profile=None)
+
+
+class MemChunkTest(unittest.TestCase):
+    def test_iter_mem_chunks_splits_large_region(self):
+        chunk = extract_keys._MEM_READ_CHUNK
+        start, end = 0, chunk + chunk // 2
+        chunks = list(extract_keys._iter_mem_chunks(start, end))
+        self.assertEqual(chunks, [(0, chunk), (chunk, end)])
 
 
 if __name__ == "__main__":
