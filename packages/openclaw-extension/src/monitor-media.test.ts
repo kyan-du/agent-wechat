@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pollMedia } from "./inbound-media-poll.ts";
+import {
+  IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
+  createImageMaterializationTrigger,
+  imageMaterializationTriggerForMessage,
+  pollMedia,
+} from "./inbound-media-poll.ts";
 import fs from "node:fs";
 import path from "node:path";
 
 test("inbound downloaded media populates singular and plural runtime fields", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "monitor.ts"), "utf8");
+  assert.match(source, /imageMaterializationTriggerForMessage\(\{[\s\S]*skipOpen,/);
+  assert.match(source, /prepareMessage\([\s\S]*skipOpen\)/);
   assert.match(source, /MediaPath:\s*mediaPath/);
   assert.match(source, /MediaUrl:\s*mediaPath/);
   assert.match(source, /MediaType:\s*mediaMime/);
@@ -93,6 +100,119 @@ test("media polling returns the last transient diagnostic after bounded exhausti
   const result = await pollMedia(client as never, "room@chatroom", 99, undefined, 2, 0);
   assert.equal(calls, 2);
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
+});
+
+test("media polling triggers materialization once before bounded retries", async () => {
+  let calls = 0;
+  let opens = 0;
+  const client = { getMedia: async () => {
+    calls += 1;
+    return calls < 3
+      ? { type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" }
+      : { type: "image", data: "/9j/AA==", format: "jpeg", filename: "late.jpg" };
+  } };
+  const trigger = createImageMaterializationTrigger({
+    openChat: async (chatId, clearUnreads) => {
+      assert.equal(chatId, "wxid_direct");
+      assert.equal(clearUnreads, true);
+      opens += 1;
+    },
+  }, "wxid_direct");
+  const result = await pollMedia(client as never, "wxid_direct", 101, undefined, 3, 0, trigger);
+  assert.equal(calls, 3);
+  assert.equal(opens, 1);
+  assert.equal(result?.data, "/9j/AA==");
+});
+
+test("catch-up skipOpen still runs one-shot image materialization openChat", async () => {
+  let opens = 0;
+  const trigger = imageMaterializationTriggerForMessage({
+    client: {
+      openChat: async (chatId, clearUnreads) => {
+        assert.equal(chatId, "vangie");
+        assert.equal(clearUnreads, true);
+        opens += 1;
+      },
+    },
+    chatId: "vangie",
+    messageType: 3,
+    skipOpen: true,
+  });
+  assert.ok(trigger);
+  assert.equal(
+    imageMaterializationTriggerForMessage({
+      client: { openChat: async () => { throw new Error("type 49 must not openChat"); } },
+      chatId: "vangie",
+      messageType: 49,
+      skipOpen: true,
+    }),
+    undefined,
+  );
+  const media = {
+    getMedia: async () => ({ type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" }),
+  };
+  const result = await pollMedia(media as never, "vangie", 26, undefined, 6, 0, trigger);
+  assert.equal(opens, 1);
+  assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
+});
+
+test("slow openChat does not consume the short media poll window", async () => {
+  let opens = 0;
+  let getMediaCalls = 0;
+  const startedAt = Date.now();
+  let aborted = false;
+  const trigger = createImageMaterializationTrigger({
+    openChat: (chatId, clearUnreads, signal) => {
+      assert.equal(chatId, "vangie");
+      assert.equal(clearUnreads, true);
+      assert.ok(signal instanceof AbortSignal);
+      signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+      opens += 1;
+      return new Promise(() => {});
+    },
+  }, "vangie", { timeoutMs: 20 });
+  const result = await pollMedia({
+    getMedia: async () => {
+      getMediaCalls += 1;
+      return { type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" };
+    },
+  } as never, "vangie", 26, undefined, 2, 0, trigger);
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(opens, 1);
+  assert.equal(getMediaCalls, 2);
+  assert.equal(aborted, true, "timed-out openChat must receive cancellation");
+  assert.ok(elapsedMs < 1000, `pollMedia stalled on openChat for ${elapsedMs}ms`);
+  assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
+});
+
+test("openChat UNKNOWN_UI_STATE_TIMEOUT still finishes pollMedia in the short window", async () => {
+  let opens = 0;
+  let getMediaCalls = 0;
+  const startedAt = Date.now();
+  const trigger = createImageMaterializationTrigger({
+    openChat: async () => {
+      opens += 1;
+      throw Object.assign(new Error("UNKNOWN_UI_STATE_TIMEOUT"), { code: "UNKNOWN_UI_STATE_TIMEOUT" });
+    },
+  }, "vangie");
+  const result = await pollMedia({
+    getMedia: async () => {
+      getMediaCalls += 1;
+      return { type: "image", format: "jpeg", filename: "late.jpg", errorCode: "IMAGE_RESOURCE_UNAVAILABLE" };
+    },
+  } as never, "vangie", 26, undefined, 2, 0, trigger);
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(opens, 1);
+  assert.equal(getMediaCalls, 2);
+  assert.ok(elapsedMs < 1000, `pollMedia stalled after openChat throw for ${elapsedMs}ms`);
+  assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
+});
+
+test("default image openChat timeout stays shorter than the media poll window", () => {
+  assert.ok(
+    IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS < 6 * 500,
+    "openChat timeout must not expand the claimed ~3s media window",
+  );
 });
 
 test("media polling stops immediately for permanent image key and decryption failures", async () => {

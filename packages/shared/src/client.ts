@@ -134,11 +134,12 @@ export class WeChatClient {
     return res.json() as Promise<T>;
   }
 
-  private async post<T>(path: string, body?: unknown): Promise<T> {
+  private async post<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       method: "POST",
       headers: this.headers,
       body: body != null ? JSON.stringify(body) : undefined,
+      signal,
     });
     if (!res.ok) await throwHttpError(res);
     return res.json() as Promise<T>;
@@ -202,9 +203,13 @@ export class WeChatClient {
   async openChat(
     chatId: string,
     clearUnreads?: boolean,
+    signal?: AbortSignal,
+    executionTimeoutMs?: number,
   ): Promise<OpenChatResult> {
     return this.post(
-      `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads })}`,
+      `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads, executionTimeoutMs })}`,
+      undefined,
+      signal,
     );
   }
 

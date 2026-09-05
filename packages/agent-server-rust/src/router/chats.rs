@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::create_context;
 use crate::db::get_db;
-use crate::execution::run_execution_loop;
+use crate::execution::{run_execution_loop, run_execution_loop_with_timeout};
 use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan, COMPOSER_UNAVAILABLE};
 use crate::sessions::manager::current_session;
@@ -133,6 +133,8 @@ pub async fn find_chats(Query(params): Query<FindParams>) -> Json<Vec<Chat>> {
 pub struct OpenChatParams {
     #[serde(default, rename = "clearUnreads")]
     clear_unreads: bool,
+    #[serde(default, rename = "executionTimeoutMs")]
+    execution_timeout_ms: Option<u64>,
 }
 
 fn chat_open_execution_error_code(error: Option<&str>) -> &'static str {
@@ -270,6 +272,7 @@ pub async fn open_chat(
     };
 
     let plan = ChatOpenPlan;
+    let execution_timeout_ms = params.execution_timeout_ms;
     let params = ChatOpenParams {
         chat_id,
         clear_unreads,
@@ -277,8 +280,11 @@ pub async fn open_chat(
     let cancel = CancellationToken::new();
     let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
 
-    let (result, plan_state) =
-        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await;
+    let (result, plan_state) = if let Some(timeout_ms) = execution_timeout_ms {
+        run_execution_loop_with_timeout(&plan, &params, &mut context, noop_emit, cancel, timeout_ms).await
+    } else {
+        run_execution_loop(&plan, &params, &mut context, noop_emit, cancel).await
+    };
 
     if result.success {
         if let Some(open_result) = plan_state.result {
