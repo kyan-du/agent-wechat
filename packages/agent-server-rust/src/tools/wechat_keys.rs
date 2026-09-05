@@ -145,34 +145,50 @@ pub fn verify_key(db_path: &str, hex_key: &str) -> bool {
     .is_ok()
 }
 
+const REQUIRED_EXACT_DBS: &[&str] = &[
+    "session.db",
+    "contact.db",
+    "emoticon.db",
+    "head_image.db",
+    "hardlink.db",
+];
+const REQUIRED_SHARD_PREFIXES: &[&str] = &["message_", "media_"];
+
 /// Check if credential setup is needed.
 ///
 /// 1. Check that all required DB keys exist in stored_keys
 /// 2. Scan disk for additional required DBs (message_N, media_N) without keys
 /// 3. Spot-check one key for validity
+/// 4. Re-extract when stored DB keys exist but `_image_aes` is missing
 pub fn needs_key_extraction(
     conn: &Connection,
     session_id: &str,
     account_dir: &str,
 ) -> bool {
     let stored_keys = get_stored_keys(conn, session_id, account_dir);
+    let existing_dbs = list_account_dbs(account_dir);
+    tracing::debug!(
+        "[wechat-keys] Disk scan: {} files for account {}",
+        existing_dbs.len(),
+        account_dir
+    );
+    needs_key_extraction_for(&stored_keys, &existing_dbs, |check_db, check_key| {
+        verify_key(&get_db_path(account_dir, check_db), check_key)
+    })
+}
 
+fn needs_key_extraction_for(
+    stored_keys: &HashMap<String, String>,
+    existing_dbs: &[String],
+    verify: impl Fn(&str, &str) -> bool,
+) -> bool {
     if stored_keys.is_empty() {
         tracing::info!("[wechat-keys] No stored keys, extraction needed");
         return true;
     }
 
-    let required_exact: &[&str] = &[
-        "session.db",
-        "contact.db",
-        "emoticon.db",
-        "head_image.db",
-        "hardlink.db",
-    ];
-    let required_prefixes: &[&str] = &["message_", "media_"];
-
     // Check required exact keys are present (regardless of disk scan)
-    let missing_required: Vec<&str> = required_exact
+    let missing_required: Vec<&str> = REQUIRED_EXACT_DBS
         .iter()
         .filter(|name| !stored_keys.contains_key(**name))
         .copied()
@@ -187,17 +203,10 @@ pub fn needs_key_extraction(
     }
 
     // Scan disk for sharded DBs (message_N.db, media_N.db) missing keys
-    let existing_dbs = list_account_dbs(account_dir);
-    tracing::debug!(
-        "[wechat-keys] Disk scan: {} files for account {}",
-        existing_dbs.len(),
-        account_dir
-    );
-
     let missing_on_disk: Vec<_> = existing_dbs
         .iter()
         .filter(|name| {
-            required_prefixes.iter().any(|p| name.starts_with(p))
+            REQUIRED_SHARD_PREFIXES.iter().any(|p| name.starts_with(p))
                 && !stored_keys.contains_key(name.as_str())
         })
         .collect();
@@ -213,17 +222,22 @@ pub fn needs_key_extraction(
     // Spot-check one key
     let check_db = "session.db";
     if let Some(check_key) = stored_keys.get(check_db) {
-        let check_path = get_db_path(account_dir, check_db);
-        if !verify_key(&check_path, check_key) {
+        if !verify(check_db, check_key) {
             tracing::info!("[wechat-keys] Spot-check failed for {check_db}, re-extraction needed");
             return true;
         }
     }
 
+    if !stored_keys.contains_key("_image_aes") {
+        tracing::info!(
+            "[wechat-keys] Stored DB keys present but _image_aes missing, re-extraction needed"
+        );
+        return true;
+    }
+
     let db_key_count = stored_keys.keys().filter(|k| !k.starts_with('_')).count();
     tracing::info!(
-        "[wechat-keys] {db_key_count} DB keys stored, spot-check passed, image_aes={}",
-        stored_keys.contains_key("_image_aes")
+        "[wechat-keys] {db_key_count} DB keys stored, spot-check passed, image_aes=true"
     );
     false
 }
@@ -240,4 +254,56 @@ pub fn get_image_keys(
         .get("_image_xor")
         .and_then(|h| u8::from_str_radix(h, 16).ok());
     Some((aes_hex.clone(), xor_byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn required_db_keys() -> HashMap<String, String> {
+        let mut keys = HashMap::new();
+        for name in REQUIRED_EXACT_DBS {
+            keys.insert((*name).to_string(), "00".to_string());
+        }
+        keys
+    }
+
+    #[test]
+    fn needs_extraction_when_db_keys_exist_without_image_aes() {
+        let stored = required_db_keys();
+        assert!(needs_key_extraction_for(&stored, &[], |_, _| true));
+    }
+
+    #[test]
+    fn skips_extraction_when_image_aes_and_required_keys_pass_spot_check() {
+        let mut stored = required_db_keys();
+        stored.insert("_image_aes".to_string(), "00".to_string());
+        assert!(!needs_key_extraction_for(&stored, &[], |_, _| true));
+    }
+
+    #[test]
+    fn store_keys_persists_underscore_image_aes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE wechat_keys (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                account_dir TEXT NOT NULL,
+                db_name TEXT NOT NULL,
+                hex_key TEXT NOT NULL,
+                verified_at TEXT,
+                UNIQUE(session_id, account_dir, db_name)
+            );",
+        )
+        .unwrap();
+
+        let mut keys = HashMap::new();
+        keys.insert("session.db".to_string(), "00".to_string());
+        keys.insert("_image_aes".to_string(), "aa".to_string());
+        store_keys(&conn, "sess", "acct", &keys);
+
+        let stored = get_stored_keys(&conn, "sess", "acct");
+        assert_eq!(stored.get("_image_aes").map(String::as_str), Some("aa"));
+        assert_eq!(stored.get("session.db").map(String::as_str), Some("00"));
+    }
 }
