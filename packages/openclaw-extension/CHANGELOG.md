@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 0.14.1
+
+### Patch Changes
+
+- Trigger inbound Weixin image download/reopen so type=3 images can materialize, with a short openChat timeout so poll stays bounded (#117).
+
+- [#121](https://github.com/kyan-du/agent-wechat/pull/121) [`22f35f5`](https://github.com/kyan-du/agent-wechat/commit/22f35f5ab6aa41e593e09469e9644ccf27b3fc38) Thanks [@kyan-du](https://github.com/kyan-du)! - Keep newsapp feed delivery, skip other WeChat system chats in the unread monitor, and back off when unreadCount is set but listMessages returns nothing so empty fetches cannot spin the poll loop.
+
 ## 0.14.0
 
 ### Minor Changes
