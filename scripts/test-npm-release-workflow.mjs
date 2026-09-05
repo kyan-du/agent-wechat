@@ -30,4 +30,24 @@ assert.doesNotMatch(workflowText, /:latest\b/);
 assert.doesNotMatch(workflowText, /:next\b/);
 assert.match(workflowText, /test \"\$GITHUB_SHA\" = \"\$\(git rev-parse origin\/main\)\"/);
 
+const yamlEscapedDigitClass = /\[1-9\]\\\\d\*/;
+assert.doesNotMatch(
+  workflowText,
+  yamlEscapedDigitClass,
+  "workflow must not contain YAML-escaped \\\\d regex that rejects 0.14.1",
+);
+
+const confirm = ghcr.steps.find((step) => step.name === "Confirm exact release commit and version");
+assert.ok(confirm, "GHCR confirm step exists");
+assert.doesNotMatch(confirm.run, /node -e /);
+assert.match(
+  confirm.run,
+  /node scripts\/check-npm-production-release\.mjs \"\$VERSION\"/,
+  "GHCR confirm step must run the real production version check",
+);
+assert.match(confirm.run, /test \"\$GITHUB_SHA\" = \"\$\(git rev-parse origin\/main\)\"/);
+
+const yamlEscapedSemver = /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/;
+assert.equal(yamlEscapedSemver.test("0.14.1"), false, "the old YAML-escaped regex rejects 0.14.1");
+
 console.log("npm release contract covers native runners, one approval gate, and immutable stable GHCR tags.");

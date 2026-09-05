@@ -8,10 +8,18 @@ import { join } from "node:path";
 
 import {
   classifyNpmFailure,
+  exactStableVersionPattern,
   publicPackages,
   retryTransient,
   verifyTarballIntegrity,
 } from "./npm-release-utils.mjs";
+
+test("exactStableVersionPattern accepts 0.14.1 and rejects YAML-escaped digit class", () => {
+  assert.equal(exactStableVersionPattern.test("0.14.1"), true);
+  assert.equal(exactStableVersionPattern.test("0.14.1-next.1"), false);
+  const yamlEscaped = /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/;
+  assert.equal(yamlEscaped.test("0.14.1"), false);
+});
 
 test("classifies npm propagation and network errors as transient", () => {
   for (const stderr of [
