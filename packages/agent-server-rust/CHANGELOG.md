@@ -1,5 +1,23 @@
 # @agent-wechat/agent-server
 
+## 0.14.1
+
+### Patch Changes
+
+- [#121](https://github.com/kyan-du/agent-wechat/pull/121) [`22f35f5`](https://github.com/kyan-du/agent-wechat/commit/22f35f5ab6aa41e593e09469e9644ccf27b3fc38) Thanks [@kyan-du](https://github.com/kyan-du)! - Logged-in health monitor re-extracts missing `_image_aes` on the Chat/ChatOpen hot path without a full login.
+
+- [#121](https://github.com/kyan-du/agent-wechat/pull/121) [`22f35f5`](https://github.com/kyan-du/agent-wechat/commit/22f35f5ab6aa41e593e09469e9644ccf27b3fc38) Thanks [@kyan-du](https://github.com/kyan-du)! - Re-run WeChat key extraction when stored DB keys exist but `_image_aes` is missing after an image-key upgrade (#119). Login no longer skips extract just because older DB keys are already in the agent DB.
+
+- Trigger inbound Weixin image download/reopen so type=3 images can materialize, with a short openChat timeout so poll stays bounded (#117).
+
+- [#121](https://github.com/kyan-du/agent-wechat/pull/121) [`22f35f5`](https://github.com/kyan-du/agent-wechat/commit/22f35f5ab6aa41e593e09469e9644ccf27b3fc38) Thanks [@kyan-du](https://github.com/kyan-du)! - Disable outbound quiet hours by default (`AGENT_WECHAT_QUIET_START_MIN`/`END_MIN` = 0/0). Operators can still set a window via env, TOML, or `--outbound-quiet-start`/`--outbound-quiet-end`.
+
+- [#120](https://github.com/kyan-du/agent-wechat/pull/120) [`ad49585`](https://github.com/kyan-du/agent-wechat/commit/ad49585cb16d8b80501d1da8622bc6f31b805091) Thanks [@vangie](https://github.com/vangie)! - Add the image_xor_mask for WeChat Linux v4.1.1.8 aarch64 (BuildID 9a3558be) so
+  inbound type=3 images decrypt instead of failing with IMAGE_RESOURCE_UNAVAILABLE
+  (#119). extract-keys.py now fails loudly on an unknown BuildID rather than
+  silently falling back to another build's mask, and a new WeChat BuildID must
+  update BUILD_PROFILES in both chat-select.py and extract-keys.py.
+
 ## 0.14.0
 
 ### Patch Changes
