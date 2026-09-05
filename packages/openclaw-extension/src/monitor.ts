@@ -52,6 +52,12 @@ import {
   newsappFallbackMessage,
   shouldBypassNewsappAuthorization,
 } from "./newsapp.js";
+import {
+  applyEmptyUnreadSkip,
+  isEmptyUnreadBackoffActive,
+  isOfficialAccount,
+  type EmptyUnreadBackoff,
+} from "./monitor-skip.js";
 
 // Message types that may have downloadable media
 const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
@@ -84,11 +90,6 @@ type ProcessedMessage = {
   hasMedia: boolean;
   isMentioned: boolean;
 };
-
-/** Official/service accounts have IDs starting with gh_ */
-function isOfficialAccount(chatId: string): boolean {
-  return chatId.startsWith("gh_");
-}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -127,6 +128,7 @@ export async function startWeChatMonitor(
   const pendingMessageScans = loadPendingResetRetries(account.accountId);
   const inboundLedger = loadInboundEventLedger(account.accountId);
   const mediaPipeline = loadMediaPipeline(account.accountId);
+  const emptyUnreadBackoff: EmptyUnreadBackoff = new Map();
   const cleanupMedia = async () => {
     await mediaPipeline.cleanup({
       olderThanMs: MEDIA_RETENTION_MS,
@@ -266,12 +268,14 @@ export async function startWeChatMonitor(
         }
       }
 
-      // newsapp is a system feed with an unread counter but may expose no message rows.
-      const unreadChats = chats.filter(
-        (c) =>
-          c.unreadCount > 0 &&
-          !isOfficialAccount(c.username ?? c.id),
-      );
+      // Skip gh_/system chats, but keep newsapp (#109). Back off empty unread fetches.
+      const unreadChats = chats.filter((c) => {
+        const chatId = c.username ?? c.id;
+        if (isEmptyUnreadBackoffActive(emptyUnreadBackoff, chatId)) return false;
+        if (c.unreadCount <= 0) return false;
+        if (isNewsappChat(c)) return true;
+        return !isOfficialAccount(chatId);
+      });
       for (const chat of unreadChats) {
         const chatId = chat.username ?? chat.id;
         if (
@@ -291,8 +295,12 @@ export async function startWeChatMonitor(
             `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`,
       );
       for (const chatId of chatsToProcess.keys()) {
-        if (isOfficialAccount(chatId) && chatId !== "newsapp")
+        if (
+          (isOfficialAccount(chatId) && chatId !== "newsapp") ||
+          isEmptyUnreadBackoffActive(emptyUnreadBackoff, chatId)
+        ) {
           chatsToProcess.delete(chatId);
+        }
       }
       if (unreadChats.length > 0) {
         log?.info?.(
@@ -315,6 +323,7 @@ export async function startWeChatMonitor(
             retryState.persist,
             inboundLedger,
             mediaPipeline,
+            emptyUnreadBackoff,
             account,
             cfg,
             log,
@@ -347,7 +356,10 @@ export async function startWeChatMonitor(
       for (const chat of chats) {
         if (abortSignal.aborted) break;
         const chatId = chat.username ?? chat.id;
-        if (isOfficialAccount(chatId)) continue; // skip official accounts
+        if (
+          (isOfficialAccount(chatId) && chatId !== "newsapp") ||
+          isEmptyUnreadBackoffActive(emptyUnreadBackoff, chatId)
+        ) continue;
         const prevSeen = lastSeenId.get(chatId);
         if (prevSeen === undefined) continue; // not tracked yet
         if (unreadChats.some((c) => (c.username ?? c.id) === chatId)) continue; // already processed
@@ -366,6 +378,7 @@ export async function startWeChatMonitor(
           retryState.persist,
           inboundLedger,
           mediaPipeline,
+          emptyUnreadBackoff,
           account,
           cfg,
           log,
@@ -964,6 +977,7 @@ async function processUnreadChat(
   persistRetryState: () => void,
   inboundLedger: InboundEventLedger,
   mediaPipeline: MediaPipeline,
+  emptyUnreadBackoff: EmptyUnreadBackoff,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -1072,7 +1086,22 @@ async function processUnreadChat(
     const fallback = newsappFallbackMessage(chat);
     if (fallback) messages = [fallback];
   }
-  if (messages.length === 0) return "skipped";
+  if (messages.length === 0) {
+    const skip = applyEmptyUnreadSkip(chatId, {
+      unreadCount: chat.unreadCount,
+      firstPoll,
+      prevLastSeen,
+      lastSeenId,
+      backoff: emptyUnreadBackoff,
+    });
+    if (skip) {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] ${chatId}: empty unread fetch, firstPoll=${firstPoll}, unreadCount=${chat.unreadCount}; seedLastSeen=${skip.seededLastSeen}, backoff=${skip.backoffMs}ms`,
+      );
+    }
+    return "skipped";
+  }
+  emptyUnreadBackoff.delete(chatId);
 
   const enrichedBaseline = enrichStartupBaselineFromMessages(startupBaseline, messages);
   if (enrichedBaseline) {
