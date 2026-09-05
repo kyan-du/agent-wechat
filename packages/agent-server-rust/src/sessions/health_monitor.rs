@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::db::get_db;
 use crate::ia::identify_states;
 use crate::ia::actions::close_window;
 use crate::ia::helpers::action_frame;
@@ -9,6 +11,7 @@ use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
 use crate::tools::wechat_db::find_wechat_pid;
+use crate::tools::wechat_keys::{extract_keys_async, needs_key_extraction, store_keys};
 
 /// How often to run the health scan (in seconds).
 const SCAN_INTERVAL_SECS: u64 = 1;
@@ -28,6 +31,165 @@ const BACKOFF_DELAY_SECS: u64 = 30;
 /// LoginAccount. VNC is view-only, so the health monitor clicks Log In.
 const LOGIN_RESUME_COOLDOWN: Duration = Duration::from_secs(8);
 const LOGIN_RESUME_MAX_CLICKS: u32 = 5;
+
+/// Back off failed logged-in key extraction so the 1s health tick cannot re-enter.
+const HOT_PATH_EXTRACT_BACKOFF: Duration = Duration::from_secs(30);
+
+fn is_logged_in_chat_state(state_id: Option<&str>) -> bool {
+    matches!(state_id, Some("chat") | Some("chat_open"))
+}
+
+/// Pure gate for logged-in hot-path key extraction (no WeChat / DB I/O).
+struct HotPathExtractInput<'a> {
+    session_running: bool,
+    has_logged_in_user: bool,
+    has_wechat_pid: bool,
+    state_id: Option<&'a str>,
+    monitoring_paused: bool,
+    in_flight: bool,
+    satisfied: bool,
+    needs_extraction: bool,
+    backoff_until: Option<Instant>,
+    now: Instant,
+}
+
+fn hot_path_ready_to_inspect(input: &HotPathExtractInput<'_>) -> bool {
+    if input.monitoring_paused
+        || !input.session_running
+        || !input.has_logged_in_user
+        || !input.has_wechat_pid
+        || !is_logged_in_chat_state(input.state_id)
+        || input.satisfied
+        || input.in_flight
+    {
+        return false;
+    }
+    match input.backoff_until {
+        Some(until) if input.now < until => false,
+        _ => true,
+    }
+}
+
+fn hot_path_should_extract(input: &HotPathExtractInput<'_>) -> bool {
+    hot_path_ready_to_inspect(input) && input.needs_extraction
+}
+
+#[derive(Default)]
+struct HotPathExtractRuntime {
+    in_flight: AtomicBool,
+    satisfied: AtomicBool,
+    backoff_until: Mutex<Option<Instant>>,
+}
+
+impl HotPathExtractRuntime {
+    fn snapshot_gate(&self) -> (bool, bool, Option<Instant>) {
+        (
+            self.in_flight.load(Ordering::SeqCst),
+            self.satisfied.load(Ordering::SeqCst),
+            self.backoff_until.lock().ok().and_then(|guard| *guard),
+        )
+    }
+
+    fn try_begin(&self) -> bool {
+        self.in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn mark_satisfied(&self) {
+        self.satisfied.store(true, Ordering::SeqCst);
+        self.in_flight.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.backoff_until.lock() {
+            *guard = None;
+        }
+    }
+
+    fn finish_success(&self) {
+        self.mark_satisfied();
+    }
+
+    fn finish_failure(&self, now: Instant) {
+        self.in_flight.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.backoff_until.lock() {
+            *guard = Some(now + HOT_PATH_EXTRACT_BACKOFF);
+        }
+    }
+}
+
+fn maybe_spawn_hot_path_key_extract(
+    session: &crate::ia::types::Session,
+    wechat_pid: i64,
+    state_id: Option<&str>,
+    runtime: &Arc<HotPathExtractRuntime>,
+) {
+    let (in_flight, satisfied, backoff_until) = runtime.snapshot_gate();
+    let inspect = HotPathExtractInput {
+        session_running: session.status == "running",
+        has_logged_in_user: session.logged_in_user.is_some(),
+        has_wechat_pid: true,
+        state_id,
+        monitoring_paused: MONITORING_PAUSED.load(Ordering::Relaxed),
+        in_flight,
+        satisfied,
+        needs_extraction: true,
+        backoff_until,
+        now: Instant::now(),
+    };
+    if !hot_path_ready_to_inspect(&inspect) {
+        return;
+    }
+    let Some(account_dir) = session.logged_in_user.clone() else {
+        return;
+    };
+
+    let needs = {
+        let db = get_db();
+        needs_key_extraction(&db, &session.id, &account_dir)
+    };
+    if !needs {
+        runtime.mark_satisfied();
+        return;
+    }
+    if !runtime.try_begin() {
+        return;
+    }
+
+    tracing::info!(
+        "[wechat-keys] health/hot-path triggering key extraction session={} pid={}",
+        session.id,
+        wechat_pid
+    );
+
+    let session_id = session.id.clone();
+    let runtime = Arc::clone(runtime);
+    tokio::spawn(async move {
+        let keys = extract_keys_async(wechat_pid).await;
+        if keys.is_empty() {
+            tracing::warn!(
+                "[wechat-keys] health/hot-path extraction returned no keys; backing off"
+            );
+            runtime.finish_failure(Instant::now());
+            return;
+        }
+        {
+            let db = get_db();
+            store_keys(&db, &session_id, &account_dir, &keys);
+        }
+        let has_image_aes = keys.contains_key("_image_aes");
+        tracing::info!(
+            "[wechat-keys] health/hot-path stored keys, image key: {}",
+            if has_image_aes { "yes" } else { "no" }
+        );
+        if has_image_aes {
+            runtime.finish_success();
+        } else {
+            tracing::warn!(
+                "[wechat-keys] health/hot-path still missing _image_aes; backing off"
+            );
+            runtime.finish_failure(Instant::now());
+        }
+    });
+}
 
 /// Overlay that must not sit on top of a saved-account Log In click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +372,7 @@ pub fn spawn_health_monitor() {
         let mut waiting_restart_since: Option<Instant> = None;
         let mut login_resume = LoginResumePolicy::default();
         let mut login_resume_exhausted_logged = false;
+        let hot_path_extract = Arc::new(HotPathExtractRuntime::default());
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(SCAN_INTERVAL_SECS)).await;
@@ -336,6 +499,15 @@ pub fn spawn_health_monitor() {
             login_resume.observe(candidate.state_id.as_deref());
             if candidate.state_id.as_deref() != Some("login_account") {
                 login_resume_exhausted_logged = false;
+            }
+
+            if is_logged_in_chat_state(candidate.state_id.as_deref()) {
+                maybe_spawn_hot_path_key_extract(
+                    &session,
+                    wechat_pid,
+                    candidate.state_id.as_deref(),
+                    &hot_path_extract,
+                );
             }
 
             match login_resume.decide(&candidate, Instant::now()) {
@@ -668,5 +840,99 @@ mod tests {
             true,
         );
         assert!(bare.is_bare_login_account());
+    }
+
+    fn hot_path_base(now: Instant) -> HotPathExtractInput<'static> {
+        HotPathExtractInput {
+            session_running: true,
+            has_logged_in_user: true,
+            has_wechat_pid: true,
+            state_id: Some("chat"),
+            monitoring_paused: false,
+            in_flight: false,
+            satisfied: false,
+            needs_extraction: true,
+            backoff_until: None,
+            now,
+        }
+    }
+
+    #[test]
+    fn hot_path_triggers_when_logged_in_chat_needs_image_aes() {
+        let now = Instant::now();
+        assert!(hot_path_should_extract(&hot_path_base(now)));
+        let mut chat_open = hot_path_base(now);
+        chat_open.state_id = Some("chat_open");
+        assert!(hot_path_should_extract(&chat_open));
+    }
+
+    #[test]
+    fn hot_path_skips_when_image_aes_already_present() {
+        let now = Instant::now();
+        let mut input = hot_path_base(now);
+        input.needs_extraction = false;
+        assert!(hot_path_ready_to_inspect(&input));
+        assert!(!hot_path_should_extract(&input));
+        input.satisfied = true;
+        assert!(!hot_path_ready_to_inspect(&input));
+        assert!(!hot_path_should_extract(&input));
+    }
+
+    #[test]
+    fn hot_path_does_not_reenter_while_extraction_in_flight() {
+        let now = Instant::now();
+        let mut input = hot_path_base(now);
+        input.in_flight = true;
+        assert!(!hot_path_ready_to_inspect(&input));
+        assert!(!hot_path_should_extract(&input));
+        let runtime = HotPathExtractRuntime::default();
+        assert!(runtime.try_begin());
+        assert!(!runtime.try_begin());
+        runtime.finish_success();
+        let (in_flight, satisfied, backoff) = runtime.snapshot_gate();
+        assert!(!in_flight);
+        assert!(satisfied);
+        assert!(backoff.is_none());
+        input.in_flight = false;
+        input.satisfied = true;
+        input.needs_extraction = false;
+        assert!(!hot_path_should_extract(&input));
+    }
+
+    #[test]
+    fn hot_path_skips_login_account_and_paused_monitor() {
+        let now = Instant::now();
+        let mut input = hot_path_base(now);
+        input.state_id = Some("login_account");
+        assert!(!hot_path_should_extract(&input));
+        input.state_id = Some("chat");
+        input.monitoring_paused = true;
+        assert!(!hot_path_should_extract(&input));
+        input.monitoring_paused = false;
+        input.session_running = false;
+        assert!(!hot_path_should_extract(&input));
+        input.session_running = true;
+        input.has_logged_in_user = false;
+        assert!(!hot_path_should_extract(&input));
+        input.has_logged_in_user = true;
+        input.has_wechat_pid = false;
+        assert!(!hot_path_should_extract(&input));
+    }
+
+    #[test]
+    fn hot_path_failure_backs_off_instead_of_extracting_every_tick() {
+        let now = Instant::now();
+        let runtime = HotPathExtractRuntime::default();
+        assert!(runtime.try_begin());
+        runtime.finish_failure(now);
+        let (in_flight, satisfied, backoff) = runtime.snapshot_gate();
+        assert!(!in_flight);
+        assert!(!satisfied);
+        assert_eq!(backoff, Some(now + HOT_PATH_EXTRACT_BACKOFF));
+        let mut input = hot_path_base(now);
+        input.backoff_until = backoff;
+        assert!(!hot_path_should_extract(&input));
+        input.now = now + HOT_PATH_EXTRACT_BACKOFF;
+        assert!(hot_path_should_extract(&input));
     }
 }
