@@ -50,8 +50,8 @@ const DEFAULT_RETRY_AFTER_SECONDS: u64 = 2;
 const DEFAULT_CHAT_COOLDOWN_MS: u64 = 3_000;
 const DEFAULT_HOURLY_BUDGET: u32 = 40;
 const DEFAULT_DAILY_BUDGET: u32 = 200;
-const DEFAULT_QUIET_START_MIN: u32 = 30;
-const DEFAULT_QUIET_END_MIN: u32 = 7 * 60 + 30;
+const DEFAULT_QUIET_START_MIN: u32 = 0;
+const DEFAULT_QUIET_END_MIN: u32 = 0;
 const DEFAULT_IDEMPOTENCY_MAX_ROWS: usize = 10_000;
 pub const IDEMPOTENCY_KEY_MAX_BYTES: usize = 128;
 const DEFAULT_LONG_TAIL_CHANCE_PERCENT: u32 = 8;
@@ -4094,8 +4094,30 @@ mod tests {
     }
 
     #[test]
+    fn quiet_hours_default_is_disabled() {
+        assert_eq!(DEFAULT_QUIET_START_MIN, 0);
+        assert_eq!(DEFAULT_QUIET_END_MIN, 0);
+        assert!(!in_quiet_hours(
+            0,
+            DEFAULT_QUIET_START_MIN,
+            DEFAULT_QUIET_END_MIN
+        ));
+        assert!(!in_quiet_hours(
+            30,
+            DEFAULT_QUIET_START_MIN,
+            DEFAULT_QUIET_END_MIN
+        ));
+        assert!(!in_quiet_hours(
+            449,
+            DEFAULT_QUIET_START_MIN,
+            DEFAULT_QUIET_END_MIN
+        ));
+    }
+
+    #[test]
     fn quiet_hours_and_budgets_are_deterministic() {
         let mut config = OutboundConfig::from_env();
+        // Explicit 00:30–07:30 override; defaults are 0/0 (disabled).
         config.quiet_start_min = 30;
         config.quiet_end_min = 450;
         config.hourly_budget = 2;
@@ -5011,6 +5033,7 @@ mod p0c_tests {
     #[test]
     fn quiet_hours_and_budgets_are_deterministic() {
         let mut config = OutboundConfig::from_env();
+        // Explicit 00:30–07:30 override; defaults are 0/0 (disabled).
         config.quiet_start_min = 30;
         config.quiet_end_min = 450;
         config.hourly_budget = 2;
