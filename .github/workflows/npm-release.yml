@@ -155,7 +155,10 @@ jobs:
             existing="$existing_ref"
           fi
           if [ -n "$existing" ]; then
-            test "$existing" = "$GITHUB_SHA"
+            if [ "$existing" != "$GITHUB_SHA" ]; then
+              tagged_version=$(git show "$existing:packages/cli/package.json" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
+              test "$tagged_version" = "$VERSION"
+            fi
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --jq .ref
           fi

@@ -47,6 +47,32 @@ assert.match(
 );
 assert.match(confirm.run, /test \"\$GITHUB_SHA\" = \"\$\(git rev-parse origin\/main\)\"/);
 
+const createTag = jobs.publish.steps.find((step) => step.name === "Create exact tag and GitHub Release");
+assert.ok(createTag, "publish job creates the exact tag and GitHub Release");
+assert.doesNotMatch(
+  createTag.run,
+  /if \[ -n "\$existing" \]; then\s+test "\$existing" = "\$GITHUB_SHA"/,
+  "existing vX.Y.Z tag must not fail just because its SHA is not current main",
+);
+assert.match(
+  createTag.run,
+  /if \[ "\$existing" != "\$GITHUB_SHA" \]; then/,
+  "same-version older tags are allowed when SHA differs from current main",
+);
+assert.match(
+  createTag.run,
+  /git show "\$existing:packages\/cli\/package\.json"/,
+  "republish must keep an existing same-version tag and check its package.json version",
+);
+assert.match(createTag.run, /test "\$tagged_version" = "\$VERSION"/);
+assert.doesNotMatch(createTag.run, /git tag -f /);
+assert.doesNotMatch(createTag.run, /--force/);
+assert.match(
+  createTag.run,
+  /if gh release view "\$tag"[\s\S]*release_tag=\$\(gh release view "\$tag" --json tagName --jq \.tagName\)\s+test "\$release_tag" = "\$tag"/,
+  "existing GitHub Release must only be checked by tagName, not recreated",
+);
+
 const yamlEscapedSemver = /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/;
 assert.equal(yamlEscapedSemver.test("0.14.1"), false, "the old YAML-escaped regex rejects 0.14.1");
 
