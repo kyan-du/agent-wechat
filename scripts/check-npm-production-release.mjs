@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { exactStableVersionPattern } from "./npm-release-utils.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const cliManifest = JSON.parse(readFileSync(join(root, "packages/cli/package.json"), "utf8"));
@@ -14,7 +15,7 @@ const packages = [
   { dir: "packages/wechaty-puppet", name: "@kyan-du/agent-wechat-wechaty-puppet", tarball: `kyan-du-agent-wechat-wechaty-puppet-${version}.tgz` },
 ];
 
-if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version ?? "")) {
+if (!exactStableVersionPattern.test(version ?? "")) {
   throw new Error("version must be an exact stable semver, for example 0.12.0");
 }
 
@@ -28,6 +29,9 @@ for (const item of packages) {
     throw new Error(`${item.name}: publishConfig.access=public and publishConfig.provenance=true are required`);
   }
 }
+
+const cargo = readFileSync(join(root, "packages/agent-server-rust/Cargo.toml"), "utf8").match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+if (cargo !== version) throw new Error(`Cargo version ${cargo} != ${version}`);
 
 if (tarballDir) {
   const files = readdirSync(tarballDir).filter((name) => name.endsWith(".tgz")).sort();
