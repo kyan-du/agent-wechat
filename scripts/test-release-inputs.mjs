@@ -44,6 +44,7 @@ const mutations=[
  d=>replace(d,'docker/Dockerfile','RUN WECHAT_VERSION=4.1.1.8','ARG WECHAT_AMD64_URL\nRUN WECHAT_VERSION=4.1.1.8'),
  d=>replace(d,'docker/Dockerfile','RUN WECHAT_VERSION=4.1.1.8','RUN WECHAT_VERSION=4.1.1.9'),
  d=>replace(d,'docker/Dockerfile','WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f','WECHAT_ARM64_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+ d=>replace(d,'docker/release-inputs.json','https://web.archive.org/web/20260818044438id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb','https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb'),
  d=>replace(d,'docker/Dockerfile','RUN useradd -m -s /bin/bash wechat','RUN cp /tmp/evil /usr/local/bin/sqlcipher && echo cp sqlcipher /usr/local/bin/sqlcipher\nRUN useradd -m -s /bin/bash wechat'),
  d=>replace(d,'docker/release-inputs.json','\"providedFiles\": [','\"providedFiles\": [\n        \"/tmp/unapproved\",'),
  d=>replace(d,'docker/release-inputs.json','\"pkg-config\": \"1.8.1-1\"','\"pkg-config\": \"1.8.1-1\", \"curl\": \"any\"'),
