@@ -18,6 +18,14 @@ assert.equal(ghcr.environment, undefined, "GHCR build must not add another envir
 assert.equal(manifest.environment, undefined, "GHCR manifest must not add another environment approval");
 assert.equal(ghcr.permissions.packages, "write");
 assert.equal(manifest.permissions.packages, "write");
+assert.ok(ghcr["timeout-minutes"] >= 90, "stable GHCR job must wait at least 90 minutes for cold snapshot apt");
+assert.equal(ghcr.strategy["fail-fast"], false, "one arch timeout must not cancel the other");
+const cacheFrom = ghcr.steps.find((step) => step.id === "build")?.with?.["cache-from"] ?? "";
+assert.match(String(cacheFrom), /scope=stable-release-\$\{\{ matrix\.arch \}\}/);
+assert.match(String(cacheFrom), /scope=build-ref-\$\{\{ matrix\.arch \}\}/);
+assert.match(String(cacheFrom), /scope=commit-verification-\$\{\{ matrix\.arch \}\}/);
+assert.match(String(cacheFrom), /type=registry,ref=ghcr\.io\/kyan-du\/agent-wechat:ref-dd72ae9/);
+assert.match(workflowText, /scope=build-ref-/);
 assert.deepEqual(ghcr.strategy.matrix.include, [
   { runner: "ubuntu-latest", arch: "amd64", platform: "linux/amd64" },
   { runner: "ubuntu-24.04-arm", arch: "arm64", platform: "linux/arm64" },

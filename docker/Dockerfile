@@ -53,8 +53,8 @@ RUN UBUNTU_SNAPSHOT=20260801T000000Z \
 # ============================================
 # System packages
 # ============================================
-RUN apt-get update \
-    && apt-get install -y \
+RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y \
     # Display
     xvfb fluxbox x11vnc \
     # Input automation
@@ -150,7 +150,7 @@ RUN WECHAT_VERSION=4.1.1.8 \
     && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat \
     && test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION" \
     && test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH" \
-    && (dpkg -i /tmp/wechat.deb || (apt-get update && apt-get install -y -f)) \
+    && (dpkg -i /tmp/wechat.deb || (apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -f)) \
     && rm -rf /var/lib/apt/lists/* /tmp/wechat.deb
 
 RUN useradd -m -s /bin/bash wechat
@@ -172,7 +172,7 @@ COPY --from=builder /output/agent-server /opt/agent-server/agent-server
 # ============================================
 ARG BUILD_MODE=release
 RUN if [ "$BUILD_MODE" = "debug" ]; then \
-      apt-get update && apt-get install -y gdbserver && rm -rf /var/lib/apt/lists/*; \
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y gdbserver && rm -rf /var/lib/apt/lists/*; \
     fi
 
 # ============================================

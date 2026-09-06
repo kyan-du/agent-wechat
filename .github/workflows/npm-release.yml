@@ -173,12 +173,12 @@ jobs:
     name: Publish stable GHCR image
     needs: publish
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
@@ -229,7 +229,11 @@ jobs:
             VERSION=${{ inputs.version }}
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=stable-release-${{ matrix.arch }}
+          cache-from: |
+            type=gha,scope=stable-release-${{ matrix.arch }}
+            type=gha,scope=build-ref-${{ matrix.arch }}
+            type=gha,scope=commit-verification-${{ matrix.arch }}
+            type=registry,ref=ghcr.io/kyan-du/agent-wechat:ref-dd72ae9
           cache-to: type=gha,scope=stable-release-${{ matrix.arch }},mode=max
       - name: Export digest
         run: |

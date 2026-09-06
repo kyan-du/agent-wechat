@@ -11,6 +11,7 @@ const replace=(d,path,from,to)=>{const p=join(d,path),s=readFileSync(p,'utf8');a
 const mutations=[
  d=>replace(d,'docker/Dockerfile','FROM rust:1.93-bookworm@sha256:','FROM rust:1.93-bookworm # sha256:'),
  d=>replace(d,'docker/Dockerfile','RUN command -v pkg-config','RUN apt-get update && apt-get install -y pkg-config && command -v pkg-config'),
+ d=>replace(d,'docker/Dockerfile','-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update','update'),
  d=>replace(d,'docker/Dockerfile','COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt','RUN echo pinned-ca-copy'),
  d=>replace(d,'docker/Dockerfile','jammy-security main restricted universe multiverse','jammy-security main restricted universe multiverse\\ndeb http://archive.ubuntu.com/ubuntu jammy main'),
  d=>replace(d,'docker/Dockerfile','RUN pip3 install --require-hashes','RUN pip3 install arbitrary-extra && pip3 install --require-hashes'),
