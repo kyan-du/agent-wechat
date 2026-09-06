@@ -8,15 +8,23 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 OUT="$ROOT_DIR/docker/wechat.deb"
 
 case "$(uname -m)" in
-  x86_64)        ARCH_SUFFIX="x86_64"; EXPECTED_SHA256="c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b"; EXPECTED_ARCH="amd64" ;;
-  aarch64|arm64) ARCH_SUFFIX="arm64"; EXPECTED_SHA256="c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f"; EXPECTED_ARCH="arm64" ;;
+  x86_64)
+    ARCH_SUFFIX="x86_64"
+    EXPECTED_SHA256="c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b"
+    EXPECTED_ARCH="amd64"
+    URL="https://web.archive.org/web/20260818044438id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb"
+    ;;
+  aarch64|arm64)
+    ARCH_SUFFIX="arm64"
+    EXPECTED_SHA256="c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f"
+    EXPECTED_ARCH="arm64"
+    URL="https://web.archive.org/web/20260818044442id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb"
+    ;;
   *)
     echo "Unknown architecture: $(uname -m)" >&2
     exit 1
     ;;
 esac
-
-URL="https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${ARCH_SUFFIX}.deb"
 
 verify_payload() {
   echo "$EXPECTED_SHA256  $1" | shasum -a 256 --check

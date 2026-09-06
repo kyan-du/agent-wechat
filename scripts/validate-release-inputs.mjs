@@ -31,17 +31,17 @@ assert.deepEqual(instructions,instructionAllowlist.instructions,'effective Docke
 // This policy is deliberately independent of the mutable allowlist. Any instruction
 // that can fetch or install content must remain one of these reviewed semantics.
 const approvedSensitiveInstructionHashes=new Set([
-  'ba45fa654185163d06d04e7f70994f03728b5f34ffb0cc04be9719f5927c5919', // runtime packages
+  'c800a90a1de2560793aa2730949337f9391435273fc686c5fb6c8fc60bffe3bb', // runtime packages
   '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
   '29745539dec974d85e96332400d4d9911ef953f356213ea8150ea6b5b72a29bc', // noVNC
   '9b8d3cee08d655c745e64a8669864c81ba19db346c0d22821c2f5a1901282c02', // SQLCipher
-  '658e94a35843ff39076e03d30baa995cfce7ba3e3add7657b8a57f6429d9e3d6', // WeChat
-  '5d9641c7a8ed47f58706396e3b1f4202cd45a6ac7e5c2339ca014bc6b87e760d', // debug-only gdbserver
+  'a756d19876ff5a30c7f8ae42e037fa77b8c43a2fbccd1b950c1a1a34a854ecd2', // WeChat
+  '5a9255760fcbb53017961e56d2e5da80582bee575930f90407bddae7436dd21f', // debug-only gdbserver
 ]);
 const digest=x=>createHash('sha256').update(x).digest('hex');
 for(const instruction of instructions){
   assert.ok(!/^ADD\s+https?:\/\//i.test(instruction),'remote ADD is forbidden');
-  if(/^RUN\s/.test(instruction)&&/\b(?:curl|wget)\b|\bapt(?:-get)?\s+(?:update|install)\b|\bpip3?\s+install\b/.test(instruction))assert.ok(approvedSensitiveInstructionHashes.has(digest(instruction)),'unreviewed network or package-install instruction is forbidden');
+  if(/^RUN\s/.test(instruction)&&/\b(?:curl|wget)\b|\bapt(?:-get)?(?:\s+-o\s+\S+)*\s+(?:update|install)\b|\bpip3?\s+install\b/.test(instruction))assert.ok(approvedSensitiveInstructionHashes.has(digest(instruction)),'unreviewed network or package-install instruction is forbidden');
 }
 const sqlcipherIndex=instructions.findIndex(x=>x.startsWith('RUN SQLCIPHER_VERSION='));
 for(const instruction of instructions.slice(sqlcipherIndex+1))assert.doesNotMatch(instruction,/^(?:ADD|COPY)\b.*(?:sqlcipher|\/opt\/novnc|wechat\.deb)/i,'verified artifact may not be overwritten by a later ADD/COPY');
@@ -81,12 +81,24 @@ exact('RUN pip3 install --require-hashes --only-binary=:all: --find-links=/opt/r
 for(const block of lock.split(/\n(?=[a-zA-Z0-9])/)){if(!block.trim()||block.trimStart().startsWith('#'))continue;assert.match(block,/^[a-zA-Z0-9_.-]+==[^\s;\\]+/);assert.match(block,/--hash=sha256:[a-f0-9]{64}/);}
 assert.ok(lock.includes(`frida-tools==14.10.4 \\\n    --hash=sha256:${local.sha256}`));
 const runs=instructions.filter(x=>x.startsWith('RUN '));
-assert.equal(runs.filter(x=>/\bapt-get\s+(update|install)\b/.test(x)).length,3,'only approved runtime apt RUNs are allowed');
+assert.equal(runs.filter(x=>/\bapt-get(?:\s+-o\s+\S+)*\s+(?:update|install)\b/.test(x)).length,3,'only approved runtime apt RUNs are allowed');
+for(const instruction of runs.filter(x=>/\bapt-get(?:\s+-o\s+\S+)*\s+(?:update|install)\b/.test(x))){
+  assert.doesNotMatch(instruction,/\bapt-get\s+(?:update|install)\b/,'apt-get update/install must pass Acquire retries and timeouts');
+  assert.match(instruction,/apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 (?:update|install)/,'apt-get must retry snapshot downloads with bounded timeouts');
+}
 assert.equal(runs.filter(x=>/\bpip3?\s+install\b/.test(x)).length,1,'only locked pip install is allowed');
 for(const forbidden of ['archive.ubuntu.com','security.ubuntu.com','deb.debian.org'])assert.ok(!instructions.some(x=>x.includes(forbidden)),`mutable repository forbidden: ${forbidden}`);
 for(const name of ['novnc','sqlcipher']){const s=manifest.sources[name],key=name.toUpperCase();assert.equal(s.url,`https://github.com/${name==='novnc'?'novnc/noVNC':'sqlcipher/sqlcipher'}/archive/refs/tags/v${s.version}.tar.gz`,`${name} version must bind its URL`);const run=one(`RUN ${key}_VERSION=`,`${name} source installation`);assert.ok(run.startsWith(`RUN ${key}_VERSION=${s.version} && ${key}_URL=${s.url} && ${key}_SHA256=${s.sha256} && `),`${name}: immutable source constants must exactly match manifest`);assert.ok(run.includes(`curl --fail --location --retry 3`)&&run.includes(`"$${key}_URL"`));assert.ok(run.includes(`echo "$${key}_SHA256 `)&&run.includes('| sha256sum --check --strict &&'),`${name} verification must gate extraction`);}
-const w=manifest.sources.wechat;assert.match(w.version,/^\d+\.\d+\.\d+\.\d+$/);const wrun=one('RUN WECHAT_VERSION=','WeChat source installation');
-for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageArchitecture,a);assert.equal(v.url,`https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_${a==='amd64'?'x86_64':'arm64'}.deb`);assert.ok(wrun.includes(`WECHAT_${a.toUpperCase()}_URL=${v.url} && WECHAT_${a.toUpperCase()}_SHA256=${v.sha256} && `),`${a}: immutable WeChat constants must exactly match manifest`);assert.ok(wrun.includes(`${a}) WECHAT_URL=`));}
+const w=manifest.sources.wechat;assert.equal(w.version,'4.1.1.8');const wrun=one('RUN WECHAT_VERSION=','WeChat source installation');
+const wechatUrls={amd64:'https://web.archive.org/web/20260818044438id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb',arm64:'https://web.archive.org/web/20260818044442id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb'};
+const wechatPins={amd64:'c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b',arm64:'c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f'};
+const liveWeChatDeb=/^https:\/\/dldir1v6\.qq\.com\/weixin\/Universal\/Linux\/WeChatLinux_(?:x86_64|arm64)\.deb$/;
+for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageArchitecture,a);assert.equal(v.url,wechatUrls[a]);assert.equal(v.sha256,wechatPins[a]);assert.match(v.url,/web\.archive\.org\/web\/20260818/);assert.ok(v.url.includes('id_'));assert.ok(!liveWeChatDeb.test(v.url),`${a}: live Tencent CDN must not be the build URL`);assert.ok(wrun.includes(`WECHAT_${a.toUpperCase()}_URL=${v.url} && WECHAT_${a.toUpperCase()}_SHA256=${v.sha256} && `),`${a}: immutable WeChat constants must exactly match manifest`);assert.ok(wrun.includes(`${a}) WECHAT_URL=`));}
+assert.doesNotMatch(wrun,/(?:WECHAT_(?:AMD64|ARM64)_URL|WECHAT_URL)=https:\/\/dldir1v6\.qq\.com\/weixin\/Universal\/Linux\/WeChatLinux_/);
+const downloadWeChat=read('scripts/download-wechat.sh');
+assert.ok(downloadWeChat.includes(wechatUrls.amd64)&&downloadWeChat.includes(wechatUrls.arm64));
+assert.ok(downloadWeChat.includes(wechatPins.amd64)&&downloadWeChat.includes(wechatPins.arm64));
+assert.doesNotMatch(downloadWeChat,/^URL="https:\/\/dldir1v6\.qq\.com\/weixin\/Universal\/Linux\/WeChatLinux_/m);
 assert.ok(wrun.startsWith(`RUN WECHAT_VERSION=${w.version} && `),'immutable WeChat version must exactly match manifest');
 for(const check of ['echo "$WECHAT_SHA256 /tmp/wechat.deb" | sha256sum --check --strict && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat','test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION"','test "$(dpkg-deb -f /tmp/wechat.deb Architecture)" = "$DEB_ARCH"'])assert.ok(wrun.includes(check),`WeChat semantic check missing: ${check}`);
 for(const p of ['docker/release-inputs.json','docker/release-instruction-allowlist.json','docker/release-materials/requirements.lock','docker/release-materials/frida_tools-14.10.4-py3-none-any.whl','scripts/validate-release-inputs.mjs','scripts/test-release-inputs.mjs','scripts/download-wechat.sh'])assert.ok(workflow.includes(`- '${p}'`),`workflow path missing: ${p}`);
