@@ -2,9 +2,10 @@ import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
-type ImageMaterializationClient = {
+type MediaMaterializationClient = {
   openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
 };
+type ImageMaterializationClient = MediaMaterializationClient;
 
 
 // These errors mean WeChat has not finished materializing the local media yet.
@@ -24,25 +25,31 @@ export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 500;
 // Overlay openChat can stall ~60s on UNKNOWN_UI_STATE_TIMEOUT. Bound the trigger
 // so the short media poll window still returns even if UI never settles.
 export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
+export const FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
 
-export type ImageMaterializationTriggerOptions = {
+export type MediaMaterializationTriggerOptions = {
   log?: { info?: (...args: any[]) => void };
   timeoutMs?: number;
-  // Catch-up processUnreadChat(..., skipOpen=true) must still reopen for type=3.
-  // This flag is accepted so callers can pass skipOpen without gating the trigger.
+  // Catch-up processUnreadChat(..., skipOpen=true) must still reopen for type=3
+  // and type=49 file attachments. Callers can pass skipOpen without gating the trigger.
   skipOpen?: boolean;
 };
+export type ImageMaterializationTriggerOptions = MediaMaterializationTriggerOptions;
 
-export function createImageMaterializationTrigger(
-  client: ImageMaterializationClient,
+function shouldTriggerMediaMaterialization(result: MediaResult): boolean {
+  return result.type === "image" || result.type === "file" || result.type === "pending";
+}
+
+export function createMediaMaterializationTrigger(
+  client: MediaMaterializationClient,
   chatId: string,
-  options?: ImageMaterializationTriggerOptions,
+  options?: MediaMaterializationTriggerOptions,
 ): MediaRetryTrigger {
   const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
   return async (result, attempt) => {
-    if (result.type === "file") return;
+    if (!shouldTriggerMediaMaterialization(result)) return;
     options?.log?.info?.(
-      `[wechat:media] triggering chat reopen for image attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
+      `[wechat:media] triggering chat reopen for ${result.type} attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
     );
     const controller = new AbortController();
     const opened = Promise.resolve(client.openChat(chatId, true, controller.signal, timeoutMs));
@@ -56,6 +63,33 @@ export function createImageMaterializationTrigger(
   };
 }
 
+export function createImageMaterializationTrigger(
+  client: ImageMaterializationClient,
+  chatId: string,
+  options?: ImageMaterializationTriggerOptions,
+): MediaRetryTrigger {
+  return createMediaMaterializationTrigger(client, chatId, options);
+}
+
+export function mediaMaterializationTriggerForMessage(opts: {
+  client: MediaMaterializationClient;
+  chatId: string;
+  messageType: number;
+  log?: { info?: (...args: any[]) => void };
+  timeoutMs?: number;
+  skipOpen?: boolean;
+}): MediaRetryTrigger | undefined {
+  const baseType = opts.messageType & 0x7fffffff;
+  // type=3 images; type=49 appmsg files (server returns type=file for subtype 6).
+  // Non-file type=49 still calls getMedia, which returns unsupported and never fires this trigger.
+  if (baseType !== 3 && baseType !== 49) return undefined;
+  return createMediaMaterializationTrigger(opts.client, opts.chatId, {
+    log: opts.log,
+    timeoutMs: opts.timeoutMs,
+    skipOpen: opts.skipOpen,
+  });
+}
+
 export function imageMaterializationTriggerForMessage(opts: {
   client: ImageMaterializationClient;
   chatId: string;
@@ -64,13 +98,7 @@ export function imageMaterializationTriggerForMessage(opts: {
   timeoutMs?: number;
   skipOpen?: boolean;
 }): MediaRetryTrigger | undefined {
-  const baseType = opts.messageType & 0x7fffffff;
-  if (baseType !== 3) return undefined;
-  return createImageMaterializationTrigger(opts.client, opts.chatId, {
-    log: opts.log,
-    timeoutMs: opts.timeoutMs,
-    skipOpen: opts.skipOpen,
-  });
+  return mediaMaterializationTriggerForMessage(opts);
 }
 
 function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
