@@ -10,6 +10,7 @@ import type {
   LoginResult,
   LoginSubscriptionEvent,
   OpenChatResult,
+  DownloadFileResult,
   SendParams,
 } from "./types/index.js";
 
@@ -208,6 +209,19 @@ export class WeChatClient {
   ): Promise<OpenChatResult> {
     return this.post(
       `/api/chats/${encodeURIComponent(chatId)}/open${qs({ clearUnreads, executionTimeoutMs })}`,
+      undefined,
+      signal,
+    );
+  }
+
+  async downloadFile(
+    chatId: string,
+    filename?: string,
+    signal?: AbortSignal,
+    executionTimeoutMs?: number,
+  ): Promise<DownloadFileResult> {
+    return this.post(
+      `/api/chats/${encodeURIComponent(chatId)}/download-file${qs({ filename, executionTimeoutMs })}`,
       undefined,
       signal,
     );

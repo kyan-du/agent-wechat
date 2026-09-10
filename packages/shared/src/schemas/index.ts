@@ -124,6 +124,16 @@ export const openChatResultSchema = z.object({
   error: z.string().optional(),
 });
 
+export const downloadFileParamsSchema = z.object({
+  chatId: z.string().min(1),
+  filename: z.string().min(1).optional(),
+  executionTimeoutMs: z.number().int().positive().optional(),
+});
+
+export const downloadFileResultSchema = openChatResultSchema.extend({
+  clicked: z.boolean().optional(),
+});
+
 // ============================================
 // MESSAGES
 // ============================================
@@ -276,6 +286,8 @@ export type FindChatParams = z.infer<typeof findChatParamsSchema>;
 export type GetChatParams = z.infer<typeof getChatParamsSchema>;
 export type OpenChatParams = z.infer<typeof openChatParamsSchema>;
 export type OpenChatResult = z.infer<typeof openChatResultSchema>;
+export type DownloadFileParams = z.infer<typeof downloadFileParamsSchema>;
+export type DownloadFileResult = z.infer<typeof downloadFileResultSchema>;
 export type Message = z.infer<typeof messageSchema>;
 export type ListMessagesParams = z.infer<typeof listMessagesParamsSchema>;
 export type SendParams = z.infer<typeof sendParamsSchema>;

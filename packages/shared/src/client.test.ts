@@ -217,6 +217,33 @@ test("openChat forwards AbortSignal so a timed-out GUI request can be cancelled"
   }
 });
 
+test("downloadFile posts filename without aborting the GUI click by default", async () => {
+  const original = globalThis.fetch;
+  let receivedUrl = "";
+  let receivedSignal: AbortSignal | undefined;
+  globalThis.fetch = (async (input, init) => {
+    receivedUrl = String(input);
+    receivedSignal = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ ok: true, clicked: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    const client = new WeChatClient({ baseUrl: "http://agent-wechat.local" });
+    const result = await client.downloadFile("34438530917@chatroom", "南风少年研学团0814.pdf", undefined, 8000);
+    assert.match(
+      receivedUrl,
+      /\/api\/chats\/34438530917%40chatroom\/download-file\?filename=.*executionTimeoutMs=8000/,
+    );
+    assert.equal(receivedSignal, undefined);
+    assert.equal(result.ok, true);
+    assert.equal(result.clicked, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("sendMessage exposes IDEMPOTENCY_CAPACITY on 429", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = (async () =>

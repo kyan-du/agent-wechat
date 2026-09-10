@@ -4,6 +4,7 @@ type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaRes
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
 type MediaMaterializationClient = {
   openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
+  downloadFile?(chatId: string, filename?: string, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
 };
 type ImageMaterializationClient = MediaMaterializationClient;
 
@@ -25,7 +26,10 @@ export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 500;
 // Overlay openChat can stall ~60s on UNKNOWN_UI_STATE_TIMEOUT. Bound the trigger
 // so the short media poll window still returns even if UI never settles.
 export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
+// File bubble click is a GUI plan (open chat + click). Do not abort it from the
+// plugin poll window; fire-and-forget and keep polling getMedia.
 export const FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
+export const FILE_MATERIALIZATION_CLICK_TIMEOUT_MS = 8_000;
 
 export type MediaMaterializationTriggerOptions = {
   log?: { info?: (...args: any[]) => void };
@@ -40,6 +44,56 @@ function shouldTriggerMediaMaterialization(result: MediaResult): boolean {
   return result.type === "image" || result.type === "file" || result.type === "pending";
 }
 
+function isFileMaterialization(result: MediaResult): boolean {
+  return result.type === "file"
+    || result.errorCode === "FILE_NOT_DOWNLOADED"
+    || result.errorCode === "FILE_NOT_STABLE";
+}
+
+async function triggerImageOpenChat(
+  client: MediaMaterializationClient,
+  chatId: string,
+  timeoutMs: number,
+  result: MediaResult,
+  attempt: number,
+  options?: MediaMaterializationTriggerOptions,
+): Promise<void> {
+  options?.log?.info?.(
+    `[wechat:media] triggering chat reopen for ${result.type} attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
+  );
+  const controller = new AbortController();
+  const opened = Promise.resolve(client.openChat(chatId, true, controller.signal, timeoutMs));
+  // Prevent a later overlay timeout from becoming an unhandled rejection after we move on.
+  void opened.catch(() => undefined);
+  try {
+    await raceWithTimeout(opened, timeoutMs);
+  } finally {
+    controller.abort();
+  }
+}
+
+function triggerFileBubbleClick(
+  client: MediaMaterializationClient,
+  chatId: string,
+  result: MediaResult,
+  attempt: number,
+  options?: MediaMaterializationTriggerOptions,
+): void {
+  const filename = result.filename?.trim() || undefined;
+  const timeoutMs = options?.timeoutMs ?? FILE_MATERIALIZATION_CLICK_TIMEOUT_MS;
+  options?.log?.info?.(
+    `[wechat:media] triggering file bubble click attempt=${attempt} filename=${filename ?? ""} skipOpen=${options?.skipOpen === true}`,
+  );
+  if (!client.downloadFile) {
+    throw Object.assign(new Error("FILE_DOWNLOAD_TRIGGER_UNAVAILABLE"), {
+      code: "FILE_DOWNLOAD_TRIGGER_UNAVAILABLE",
+    });
+  }
+  // Do not abort: HTTP abort must not cancel the overlay click. Poll getMedia instead.
+  const clicked = Promise.resolve(client.downloadFile(chatId, filename, undefined, timeoutMs));
+  void clicked.catch(() => undefined);
+}
+
 export function createMediaMaterializationTrigger(
   client: MediaMaterializationClient,
   chatId: string,
@@ -48,18 +102,11 @@ export function createMediaMaterializationTrigger(
   const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
   return async (result, attempt) => {
     if (!shouldTriggerMediaMaterialization(result)) return;
-    options?.log?.info?.(
-      `[wechat:media] triggering chat reopen for ${result.type} attempt=${attempt} skipOpen=${options?.skipOpen === true}`,
-    );
-    const controller = new AbortController();
-    const opened = Promise.resolve(client.openChat(chatId, true, controller.signal, timeoutMs));
-    // Prevent a later overlay timeout from becoming an unhandled rejection after we move on.
-    void opened.catch(() => undefined);
-    try {
-      await raceWithTimeout(opened, timeoutMs);
-    } finally {
-      controller.abort();
+    if (isFileMaterialization(result)) {
+      triggerFileBubbleClick(client, chatId, result, attempt, options);
+      return;
     }
+    await triggerImageOpenChat(client, chatId, timeoutMs, result, attempt, options);
   };
 }
 
@@ -68,7 +115,15 @@ export function createImageMaterializationTrigger(
   chatId: string,
   options?: ImageMaterializationTriggerOptions,
 ): MediaRetryTrigger {
-  return createMediaMaterializationTrigger(client, chatId, options);
+  const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
+  return async (result, attempt) => {
+    if (!shouldTriggerMediaMaterialization(result)) return;
+    if (isFileMaterialization(result)) {
+      triggerFileBubbleClick(client, chatId, result, attempt, options);
+      return;
+    }
+    await triggerImageOpenChat(client, chatId, timeoutMs, result, attempt, options);
+  };
 }
 
 export function mediaMaterializationTriggerForMessage(opts: {

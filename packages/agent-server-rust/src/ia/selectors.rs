@@ -8,6 +8,65 @@ pub fn is_send_button_name(name: &str) -> bool {
     matches!(normalized.as_str(), "Send" | "Send(S)" | "发送" | "发送(S)")
 }
 
+/// Linux WeChat file bubbles in an open chat look like:
+/// `File\n南风少年研学团0814.pdf\n331.5K\n微信电脑版`
+/// The Messages list-item spans the whole transcript column; Chat list rows such as
+/// `File Transfer [Photo]` must not match.
+pub const INBOUND_FILE_BUBBLE_SELECTOR: &str =
+    r#"list[name="Messages"] > list-item[name=/^(File|文件)./s]"#;
+
+pub fn inbound_file_bubble_filename(name: &str) -> Option<&str> {
+    let mut lines = name.split('\n');
+    let first = lines.next()?.trim();
+    if first != "File" && first != "文件" {
+        return None;
+    }
+    let filename = lines.next()?.trim();
+    if filename.is_empty() {
+        None
+    } else {
+        Some(filename)
+    }
+}
+
+pub fn is_inbound_file_bubble_name(name: &str) -> bool {
+    inbound_file_bubble_filename(name).is_some()
+}
+
+/// File bubbles that uniquely match `filename` (when given) in the open Messages list.
+pub fn inbound_file_bubbles<'a>(root: &'a A11yNode, filename: Option<&str>) -> Vec<&'a A11yNode> {
+    query_selector_all(root, INBOUND_FILE_BUBBLE_SELECTOR)
+        .into_iter()
+        .filter(|node| is_inbound_file_bubble_name(&node.name))
+        .filter(
+            |node| match filename.map(str::trim).filter(|value| !value.is_empty()) {
+                Some(wanted) => inbound_file_bubble_filename(&node.name) == Some(wanted),
+                None => true,
+            },
+        )
+        .collect()
+}
+
+pub fn unique_inbound_file_bubble<'a>(
+    root: &'a A11yNode,
+    filename: Option<&str>,
+) -> Result<&'a A11yNode, FileBubbleSelectError> {
+    let matches = inbound_file_bubbles(root, filename);
+    match matches.len() {
+        0 => Err(FileBubbleSelectError::NotFound),
+        1 => Ok(matches[0]),
+        _ => Err(FileBubbleSelectError::Ambiguous {
+            count: matches.len(),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBubbleSelectError {
+    NotFound,
+    Ambiguous { count: usize },
+}
+
 // ============================================
 // Ancestor Traversal
 // ============================================
@@ -177,8 +236,12 @@ fn parse_node(token: &str) -> SelectorNode {
         let value = if let Some(regex_body) = cap.get(6) {
             let flags = cap.get(7).map(|m| m.as_str()).unwrap_or("");
             let mut prefix = String::new();
-            if flags.contains('i') { prefix.push_str("(?i)"); }
-            if flags.contains('s') { prefix.push_str("(?s)"); }
+            if flags.contains('i') {
+                prefix.push_str("(?i)");
+            }
+            if flags.contains('s') {
+                prefix.push_str("(?s)");
+            }
             let pattern = format!("{}{}", prefix, regex_body.as_str());
             AttrValue::Regex(Regex::new(&pattern).unwrap_or_else(|_| Regex::new("$^").unwrap()))
         } else {
@@ -199,7 +262,11 @@ fn parse_node(token: &str) -> SelectorNode {
         index: cap[1].parse().unwrap_or(1),
     });
 
-    SelectorNode { role, attrs, pseudo }
+    SelectorNode {
+        role,
+        attrs,
+        pseudo,
+    }
 }
 
 fn build_ast(tokens: &[String]) -> SelectorAST {
@@ -297,10 +364,7 @@ fn matches_node(node: &A11yNode, target: &SelectorNode, sibling_index: Option<us
 }
 
 /// Find the first descendant matching the target selector node.
-fn walk_tree_match<'a>(
-    node: &'a A11yNode,
-    target: &SelectorNode,
-) -> Option<&'a A11yNode> {
+fn walk_tree_match<'a>(node: &'a A11yNode, target: &SelectorNode) -> Option<&'a A11yNode> {
     if matches_node(node, target, None) {
         return Some(node);
     }
@@ -319,10 +383,7 @@ fn walk_tree_match<'a>(
 }
 
 /// Find the first direct child matching the target selector node.
-fn walk_children_match<'a>(
-    node: &'a A11yNode,
-    target: &SelectorNode,
-) -> Option<&'a A11yNode> {
+fn walk_children_match<'a>(node: &'a A11yNode, target: &SelectorNode) -> Option<&'a A11yNode> {
     if let Some(children) = &node.children {
         for (i, child) in children.iter().enumerate() {
             if matches_node(child, target, Some(i)) {
@@ -465,13 +526,19 @@ mod tests {
     }
 
     fn messages_tree() -> A11yNode {
-        node("desktop-frame", "main", Some(vec![
-            node("list", "Messages", Some(vec![
-                node("list-item", "08:35", None),
-                node("list-item", "Audio2\u{201d}sec\n", None),
-                node("list-item", "Audio2\u{201d}secUnplay\n", None),
-            ])),
-        ]))
+        node(
+            "desktop-frame",
+            "main",
+            Some(vec![node(
+                "list",
+                "Messages",
+                Some(vec![
+                    node("list-item", "08:35", None),
+                    node("list-item", "Audio2\u{201d}sec\n", None),
+                    node("list-item", "Audio2\u{201d}secUnplay\n", None),
+                ]),
+            )]),
+        )
     }
 
     #[test]
@@ -487,9 +554,7 @@ mod tests {
 
     #[test]
     fn test_dot_does_not_match_newline_without_s_flag() {
-        let tree = node("root", "", Some(vec![
-            node("item", "Hello\nWorld", None),
-        ]));
+        let tree = node("root", "", Some(vec![node("item", "Hello\nWorld", None)]));
         // Without s flag, . doesn't match \n
         let results = query_selector_all(&tree, r#"item[name=/Hello.*World/]"#);
         assert_eq!(results.len(), 0);
@@ -501,11 +566,15 @@ mod tests {
     #[test]
     fn test_audio_unplay_with_plain_quote() {
         // Test with ASCII double quote instead of unicode right quote
-        let tree = node("desktop-frame", "main", Some(vec![
-            node("list", "Messages", Some(vec![
-                node("list-item", "Audio2\"secUnplay\n", None),
-            ])),
-        ]));
+        let tree = node(
+            "desktop-frame",
+            "main",
+            Some(vec![node(
+                "list",
+                "Messages",
+                Some(vec![node("list-item", "Audio2\"secUnplay\n", None)]),
+            )]),
+        );
         let results = query_selector_all(
             &tree,
             r#"list[name="Messages"] > list-item[name=/^Audio.*Unplay/s]"#,
@@ -515,10 +584,14 @@ mod tests {
 
     #[test]
     fn test_regex_case_insensitive_flag() {
-        let tree = node("root", "", Some(vec![
-            node("button", "Submit", None),
-            node("button", "cancel", None),
-        ]));
+        let tree = node(
+            "root",
+            "",
+            Some(vec![
+                node("button", "Submit", None),
+                node("button", "cancel", None),
+            ]),
+        );
         let results = query_selector_all(&tree, r#"button[name=/submit/i]"#);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Submit");
@@ -527,10 +600,7 @@ mod tests {
     #[test]
     fn test_child_combinator_query_selector() {
         let tree = messages_tree();
-        let result = query_selector(
-            &tree,
-            r#"list[name="Messages"] > list-item"#,
-        );
+        let result = query_selector(&tree, r#"list[name="Messages"] > list-item"#);
         assert!(result.is_some(), "should find first list-item child");
         assert_eq!(result.unwrap().name, "08:35");
     }
@@ -538,10 +608,7 @@ mod tests {
     #[test]
     fn test_child_combinator_query_selector_all() {
         let tree = messages_tree();
-        let results = query_selector_all(
-            &tree,
-            r#"list[name="Messages"] > list-item"#,
-        );
+        let results = query_selector_all(&tree, r#"list[name="Messages"] > list-item"#);
         assert_eq!(results.len(), 3, "should find all 3 list-item children");
     }
 
@@ -567,10 +634,96 @@ mod tests {
 
     #[test]
     fn test_regex_combined_flags() {
-        let tree = node("root", "", Some(vec![
-            node("item", "Hello\nWorld", None),
-        ]));
+        let tree = node("root", "", Some(vec![node("item", "Hello\nWorld", None)]));
         let results = query_selector_all(&tree, r#"item[name=/hello.*world/is]"#);
         assert_eq!(results.len(), 1);
+    }
+
+    fn file_chat_tree() -> A11yNode {
+        node(
+            "desktop-frame",
+            "main",
+            Some(vec![
+                node(
+                    "list",
+                    "Chats",
+                    Some(vec![
+                        node("list-item", "File Transfer [Photo]  Friday", None),
+                        node(
+                            "list-item",
+                            "彤彤 [File] 【习题答案】窦归二《赤壁赋》.pdf 08/17",
+                            None,
+                        ),
+                    ]),
+                ),
+                node(
+                    "list",
+                    "Messages",
+                    Some(vec![
+                        node("list-item", "15:20", None),
+                        node(
+                            "list-item",
+                            "File\n南风少年研学团0814.pdf\n331.5K\n微信电脑版",
+                            None,
+                        ),
+                        node(
+                            "list-item",
+                            "万，这份《南风少年研学团0814.pdf》我这边没下到，文件没落到本机。\n",
+                            None,
+                        ),
+                    ]),
+                ),
+            ]),
+        )
+    }
+
+    #[test]
+    fn inbound_file_bubble_is_unique_in_open_chat() {
+        let tree = file_chat_tree();
+        let node = unique_inbound_file_bubble(&tree, Some("南风少年研学团0814.pdf"))
+            .expect("unique file bubble");
+        assert_eq!(
+            inbound_file_bubble_filename(&node.name),
+            Some("南风少年研学团0814.pdf")
+        );
+        assert!(unique_inbound_file_bubble(&tree, None).is_ok());
+        assert!(matches!(
+            unique_inbound_file_bubble(&tree, Some("missing.pdf")),
+            Err(FileBubbleSelectError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn inbound_file_bubble_ignores_sidebar_and_quoted_text() {
+        let tree = file_chat_tree();
+        let matches = inbound_file_bubbles(&tree, None);
+        assert_eq!(matches.len(), 1);
+        assert!(!is_inbound_file_bubble_name(
+            "File Transfer [Photo]  Friday"
+        ));
+        assert!(!is_inbound_file_bubble_name(
+            "万，这份《南风少年研学团0814.pdf》我这边没下到"
+        ));
+    }
+
+    #[test]
+    fn inbound_file_bubble_fails_closed_when_ambiguous() {
+        let tree = node(
+            "desktop-frame",
+            "main",
+            Some(vec![node(
+                "list",
+                "Messages",
+                Some(vec![
+                    node("list-item", "File\na.pdf\n1K\n微信电脑版", None),
+                    node("list-item", "File\nb.pdf\n2K\n微信电脑版", None),
+                ]),
+            )]),
+        );
+        assert!(matches!(
+            unique_inbound_file_bubble(&tree, None),
+            Err(FileBubbleSelectError::Ambiguous { count: 2 })
+        ));
+        assert!(unique_inbound_file_bubble(&tree, Some("a.pdf")).is_ok());
     }
 }
