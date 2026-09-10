@@ -44,7 +44,7 @@ import {
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
-import { imageMaterializationTriggerForMessage, pollMedia } from "./inbound-media-poll.js";
+import { mediaMaterializationTriggerForMessage, pollMedia } from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 import {
@@ -492,7 +492,7 @@ async function prepareMessage(
         log,
         undefined,
         undefined,
-        imageMaterializationTriggerForMessage({
+        mediaMaterializationTriggerForMessage({
           client,
           chatId,
           messageType: baseType,

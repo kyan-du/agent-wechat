@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
   IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
   createImageMaterializationTrigger,
+  createMediaMaterializationTrigger,
   imageMaterializationTriggerForMessage,
+  mediaMaterializationTriggerForMessage,
   pollMedia,
 } from "./inbound-media-poll.ts";
 import fs from "node:fs";
@@ -11,7 +14,7 @@ import path from "node:path";
 
 test("inbound downloaded media populates singular and plural runtime fields", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "monitor.ts"), "utf8");
-  assert.match(source, /imageMaterializationTriggerForMessage\(\{[\s\S]*skipOpen,/);
+  assert.match(source, /mediaMaterializationTriggerForMessage\(\{[\s\S]*skipOpen,/);
   assert.match(source, /prepareMessage\([\s\S]*skipOpen\)/);
   assert.match(source, /MediaPath:\s*mediaPath/);
   assert.match(source, /MediaUrl:\s*mediaPath/);
@@ -141,9 +144,9 @@ test("catch-up skipOpen still runs one-shot image materialization openChat", asy
   assert.ok(trigger);
   assert.equal(
     imageMaterializationTriggerForMessage({
-      client: { openChat: async () => { throw new Error("type 49 must not openChat"); } },
+      client: { openChat: async () => { throw new Error("voice must not openChat"); } },
       chatId: "vangie",
-      messageType: 49,
+      messageType: 34,
       skipOpen: true,
     }),
     undefined,
@@ -154,6 +157,99 @@ test("catch-up skipOpen still runs one-shot image materialization openChat", asy
   const result = await pollMedia(media as never, "vangie", 26, undefined, 6, 0, trigger);
   assert.equal(opens, 1);
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
+});
+
+test("media polling triggers openChat once for group FILE_NOT_DOWNLOADED", async () => {
+  let calls = 0;
+  let opens = 0;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: {
+      openChat: async (chatId, clearUnreads) => {
+        assert.equal(chatId, "34438530917@chatroom");
+        assert.equal(clearUnreads, true);
+        opens += 1;
+      },
+    },
+    chatId: "34438530917@chatroom",
+    messageType: 49,
+    skipOpen: true,
+  });
+  assert.ok(trigger);
+  const result = await pollMedia({
+    getMedia: async () => {
+      calls += 1;
+      return calls < 3
+        ? { type: "file", format: "docx", filename: "小队参观路线.docx", errorCode: "FILE_NOT_DOWNLOADED" }
+        : { type: "file", data: "UEsDBA==", format: "docx", filename: "小队参观路线.docx" };
+    },
+  } as never, "34438530917@chatroom", 88, undefined, 3, 0, trigger);
+  assert.equal(calls, 3);
+  assert.equal(opens, 1);
+  assert.equal(result?.type, "file");
+  assert.equal(result?.data, "UEsDBA==");
+});
+
+test("FILE_NOT_STABLE still uses the bounded file materialization trigger", async () => {
+  let opens = 0;
+  const trigger = createMediaMaterializationTrigger({
+    openChat: async () => { opens += 1; },
+  }, "wxid_direct");
+  const result = await pollMedia({
+    getMedia: async () => ({ type: "file", format: "pdf", filename: "report.pdf", errorCode: "FILE_NOT_STABLE" }),
+  } as never, "wxid_direct", 9, undefined, 2, 0, trigger);
+  assert.equal(opens, 1);
+  assert.equal(result?.errorCode, "FILE_NOT_STABLE");
+});
+
+test("non-file type=49 does not fire openChat because getMedia is unsupported", async () => {
+  let opens = 0;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: {
+      openChat: async () => { opens += 1; },
+    },
+    chatId: "wxid_direct",
+    messageType: 49,
+  });
+  assert.ok(trigger);
+  const result = await pollMedia({
+    getMedia: async () => ({ type: "unsupported", format: "", filename: "" }),
+  } as never, "wxid_direct", 10, undefined, 3, 0, trigger);
+  assert.equal(opens, 0);
+  assert.equal(result?.type, "unsupported");
+});
+
+test("slow openChat for missing group files does not consume the short media poll window", async () => {
+  let opens = 0;
+  let getMediaCalls = 0;
+  const startedAt = Date.now();
+  let aborted = false;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: {
+      openChat: (chatId, clearUnreads, signal) => {
+        assert.equal(chatId, "34438530917@chatroom");
+        assert.equal(clearUnreads, true);
+        assert.ok(signal instanceof AbortSignal);
+        signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+        opens += 1;
+        return new Promise(() => {});
+      },
+    },
+    chatId: "34438530917@chatroom",
+    messageType: 49,
+    timeoutMs: 20,
+  });
+  const result = await pollMedia({
+    getMedia: async () => {
+      getMediaCalls += 1;
+      return { type: "file", format: "docx", filename: "route.docx", errorCode: "FILE_NOT_DOWNLOADED" };
+    },
+  } as never, "34438530917@chatroom", 88, undefined, 2, 0, trigger);
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(opens, 1);
+  assert.equal(getMediaCalls, 2);
+  assert.equal(aborted, true, "timed-out file openChat must receive cancellation");
+  assert.ok(elapsedMs < 1000, `pollMedia stalled on file openChat for ${elapsedMs}ms`);
+  assert.equal(result?.errorCode, "FILE_NOT_DOWNLOADED");
 });
 
 test("slow openChat does not consume the short media poll window", async () => {
@@ -213,6 +309,7 @@ test("default image openChat timeout stays shorter than the media poll window", 
     IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS < 6 * 500,
     "openChat timeout must not expand the claimed ~3s media window",
   );
+  assert.equal(FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS, IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS);
 });
 
 test("media polling stops immediately for permanent image key and decryption failures", async () => {
