@@ -52,6 +52,8 @@ export {
   getChatParamsSchema,
   openChatParamsSchema,
   openChatResultSchema,
+  downloadFileParamsSchema,
+  downloadFileResultSchema,
   // Message schemas
   messageSchema,
   listMessagesParamsSchema,

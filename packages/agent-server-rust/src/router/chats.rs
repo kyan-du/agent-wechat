@@ -12,6 +12,7 @@ use crate::db::get_db;
 use crate::execution::{run_execution_loop, run_execution_loop_with_timeout};
 use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan, COMPOSER_UNAVAILABLE};
+use crate::plans::download_file::{DownloadFileParams, DownloadFilePlan, FILE_BUBBLE_AMBIGUOUS, FILE_BUBBLE_NOT_FOUND};
 use crate::sessions::manager::current_session;
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
@@ -322,6 +323,103 @@ pub async fn open_chat(
     }
 }
 
+#[derive(Deserialize)]
+pub struct DownloadFileQuery {
+    filename: Option<String>,
+    #[serde(default, rename = "executionTimeoutMs")]
+    execution_timeout_ms: Option<u64>,
+}
+
+fn download_file_error_code(plan_error: Option<&str>, execution_error: Option<&str>) -> &'static str {
+    match plan_error {
+        Some(FILE_BUBBLE_NOT_FOUND) => FILE_BUBBLE_NOT_FOUND,
+        Some(FILE_BUBBLE_AMBIGUOUS) => FILE_BUBBLE_AMBIGUOUS,
+        _ => chat_open_execution_error_code(execution_error),
+    }
+}
+
+/// Open the chat and click a uniquely identified inbound file bubble so Weixin
+/// writes `msg/file/YYYY-MM/<filename>`. Does not click when the a11y tree is ambiguous.
+pub async fn download_file(
+    Path(chat_id): Path<String>,
+    Query(params): Query<DownloadFileQuery>,
+) -> Json<serde_json::Value> {
+    let session = match current_session() {
+        Some(s) => s,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "errorCode": "SESSION_NOT_FOUND",
+                "error": "No session available"
+            }))
+        }
+    };
+
+    if session.logged_in_user.is_none() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "errorCode": "NOT_LOGGED_IN",
+            "error": "NOT_LOGGED_IN"
+        }))
+    }
+
+    if chat_id.starts_with("gh_") {
+        return Json(serde_json::json!({
+            "ok": false,
+            "errorCode": "OFFICIAL_ACCOUNT_UNSUPPORTED",
+            "error": "Opening official accounts is not supported"
+        }))
+    }
+
+    let mut context = {
+        let db = get_db();
+        create_context(session, &db)
+    };
+
+    let plan = DownloadFilePlan;
+    let execution_timeout_ms = params.execution_timeout_ms.or(Some(8_000));
+    let params = DownloadFileParams {
+        chat_id,
+        filename: params.filename,
+    };
+    let cancel = CancellationToken::new();
+    let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
+
+    let (result, plan_state) = run_execution_loop_with_timeout(
+        &plan,
+        &params,
+        &mut context,
+        noop_emit,
+        cancel,
+        execution_timeout_ms.unwrap_or(8_000),
+    )
+    .await;
+
+    if result.success && plan_state.clicked {
+        let mut body = serde_json::json!({ "ok": true, "clicked": true });
+        if let Some(open_result) = plan_state.result {
+            if let Ok(value) = serde_json::to_value(open_result) {
+                if let Some(object) = body.as_object_mut() {
+                    if let Some(open_object) = value.as_object() {
+                        for (key, val) in open_object {
+                            object.entry(key.clone()).or_insert(val.clone());
+                        }
+                    }
+                }
+            }
+        }
+        return Json(body);
+    }
+
+    let error_code = download_file_error_code(plan_state.diagnostic_error, result.error.as_deref());
+    Json(serde_json::json!({
+        "ok": false,
+        "clicked": plan_state.clicked,
+        "errorCode": error_code,
+        "error": result.error.unwrap_or_else(|| error_code.to_string()),
+    }))
+}
+
 #[cfg(test)]
 mod open_chat_tests {
     use super::*;
@@ -362,6 +460,22 @@ mod open_chat_tests {
         assert_eq!(
             mark_read_error_code(Some("UNRELATED_PLAN_ERROR")),
             "MARK_READ_UNVERIFIED"
+        );
+    }
+
+    #[test]
+    fn download_file_maps_bubble_diagnostics() {
+        assert_eq!(
+            download_file_error_code(Some(FILE_BUBBLE_NOT_FOUND), Some("No action selected")),
+            FILE_BUBBLE_NOT_FOUND
+        );
+        assert_eq!(
+            download_file_error_code(Some(FILE_BUBBLE_AMBIGUOUS), None),
+            FILE_BUBBLE_AMBIGUOUS
+        );
+        assert_eq!(
+            download_file_error_code(None, Some("Execution timeout after 8s")),
+            "EXECUTION_TIMEOUT"
         );
     }
 }

@@ -1,5 +1,6 @@
 pub mod auth_status;
 pub mod chat_open;
+pub mod download_file;
 pub mod login;
 pub mod logout;
 pub mod send_message;

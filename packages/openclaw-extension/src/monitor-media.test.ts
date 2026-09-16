@@ -159,15 +159,17 @@ test("catch-up skipOpen still runs one-shot image materialization openChat", asy
   assert.equal(result?.errorCode, "IMAGE_RESOURCE_UNAVAILABLE");
 });
 
-test("media polling triggers openChat once for group FILE_NOT_DOWNLOADED", async () => {
+test("media polling triggers downloadFile once for group FILE_NOT_DOWNLOADED", async () => {
   let calls = 0;
   let opens = 0;
+  let downloads = 0;
   const trigger = mediaMaterializationTriggerForMessage({
     client: {
-      openChat: async (chatId, clearUnreads) => {
+      openChat: async () => { opens += 1; },
+      downloadFile: async (chatId, filename) => {
         assert.equal(chatId, "34438530917@chatroom");
-        assert.equal(clearUnreads, true);
-        opens += 1;
+        assert.equal(filename, "小队参观路线.docx");
+        downloads += 1;
       },
     },
     chatId: "34438530917@chatroom",
@@ -184,20 +186,27 @@ test("media polling triggers openChat once for group FILE_NOT_DOWNLOADED", async
     },
   } as never, "34438530917@chatroom", 88, undefined, 3, 0, trigger);
   assert.equal(calls, 3);
-  assert.equal(opens, 1);
+  assert.equal(opens, 0);
+  assert.equal(downloads, 1);
   assert.equal(result?.type, "file");
   assert.equal(result?.data, "UEsDBA==");
 });
 
-test("FILE_NOT_STABLE still uses the bounded file materialization trigger", async () => {
+test("FILE_NOT_STABLE still uses the bounded file bubble click trigger", async () => {
   let opens = 0;
+  let downloads = 0;
   const trigger = createMediaMaterializationTrigger({
     openChat: async () => { opens += 1; },
+    downloadFile: async (_chatId, filename) => {
+      assert.equal(filename, "report.pdf");
+      downloads += 1;
+    },
   }, "wxid_direct");
   const result = await pollMedia({
     getMedia: async () => ({ type: "file", format: "pdf", filename: "report.pdf", errorCode: "FILE_NOT_STABLE" }),
   } as never, "wxid_direct", 9, undefined, 2, 0, trigger);
-  assert.equal(opens, 1);
+  assert.equal(opens, 0);
+  assert.equal(downloads, 1);
   assert.equal(result?.errorCode, "FILE_NOT_STABLE");
 });
 
@@ -218,19 +227,19 @@ test("non-file type=49 does not fire openChat because getMedia is unsupported", 
   assert.equal(result?.type, "unsupported");
 });
 
-test("slow openChat for missing group files does not consume the short media poll window", async () => {
+test("slow file bubble click does not consume the short media poll window or abort the GUI plan", async () => {
   let opens = 0;
+  let downloads = 0;
   let getMediaCalls = 0;
   const startedAt = Date.now();
-  let aborted = false;
   const trigger = mediaMaterializationTriggerForMessage({
     client: {
-      openChat: (chatId, clearUnreads, signal) => {
+      openChat: async () => { opens += 1; },
+      downloadFile: (chatId, filename, signal) => {
         assert.equal(chatId, "34438530917@chatroom");
-        assert.equal(clearUnreads, true);
-        assert.ok(signal instanceof AbortSignal);
-        signal.addEventListener("abort", () => { aborted = true; }, { once: true });
-        opens += 1;
+        assert.equal(filename, "route.docx");
+        assert.equal(signal, undefined);
+        downloads += 1;
         return new Promise(() => {});
       },
     },
@@ -245,10 +254,10 @@ test("slow openChat for missing group files does not consume the short media pol
     },
   } as never, "34438530917@chatroom", 88, undefined, 2, 0, trigger);
   const elapsedMs = Date.now() - startedAt;
-  assert.equal(opens, 1);
+  assert.equal(opens, 0);
+  assert.equal(downloads, 1);
   assert.equal(getMediaCalls, 2);
-  assert.equal(aborted, true, "timed-out file openChat must receive cancellation");
-  assert.ok(elapsedMs < 1000, `pollMedia stalled on file openChat for ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 1000, `pollMedia stalled on file bubble click for ${elapsedMs}ms`);
   assert.equal(result?.errorCode, "FILE_NOT_DOWNLOADED");
 });
 

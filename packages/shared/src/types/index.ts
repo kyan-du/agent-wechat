@@ -70,6 +70,22 @@ export interface OpenChatParams {
   chatId: string;
 }
 
+export interface DownloadFileParams {
+  chatId: string;
+  filename?: string;
+  executionTimeoutMs?: number;
+}
+
+export interface DownloadFileResult {
+  ok: boolean;
+  clicked?: boolean;
+  username?: string;
+  skipped?: boolean;
+  verified?: boolean;
+  errorCode?: string;
+  error?: string;
+}
+
 // ============================================
 // MESSAGES (params only — Message type is generated)
 // ============================================
