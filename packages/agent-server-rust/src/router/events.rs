@@ -140,24 +140,27 @@ mod tests {
 
     #[test]
     fn history_is_bounded_and_since_is_exclusive() {
-        for index in 0..(EVENT_HISTORY_LIMIT + 3) { publish_event("test.event", serde_json::json!({ "index": index })).unwrap(); }
-        let recent = hub().recent(Some(0), EVENT_HISTORY_LIMIT + 10);
+        let hub = EventHub::new();
+        for index in 0..(EVENT_HISTORY_LIMIT + 3) { hub.publish("test.event", serde_json::json!({ "index": index })).unwrap(); }
+        let recent = hub.recent(Some(0), EVENT_HISTORY_LIMIT + 10);
         assert_eq!(recent.len(), EVENT_HISTORY_LIMIT);
         assert!(recent.windows(2).all(|window| window[0].event_id > window[1].event_id));
         let newest = recent.first().unwrap().event_id;
-        assert!(hub().recent(Some(newest), EVENT_HISTORY_LIMIT).is_empty());
+        assert!(hub.recent(Some(newest), EVENT_HISTORY_LIMIT).is_empty());
     }
 
     #[test]
     fn hostile_payloads_are_rejected_before_history_or_broadcast() {
-        assert_eq!(hub().publish("bad type", serde_json::json!({})).unwrap_err(), "INVALID_EVENT_TYPE");
-        assert_eq!(hub().publish("too.deep", serde_json::json!([[[[[[[[[0]]]]]]]]])).unwrap_err(), "EVENT_PAYLOAD_TOO_DEEP");
-        assert_eq!(hub().publish("too.large", serde_json::json!({ "body": "x".repeat(EVENT_PAYLOAD_MAX_BYTES) })).unwrap_err(), "EVENT_PAYLOAD_TOO_LARGE");
+        let hub = EventHub::new();
+        assert_eq!(hub.publish("bad type", serde_json::json!({})).unwrap_err(), "INVALID_EVENT_TYPE");
+        assert_eq!(hub.publish("too.deep", serde_json::json!([[[[[[[[[0]]]]]]]]])).unwrap_err(), "EVENT_PAYLOAD_TOO_DEEP");
+        assert_eq!(hub.publish("too.large", serde_json::json!({ "body": "x".repeat(EVENT_PAYLOAD_MAX_BYTES) })).unwrap_err(), "EVENT_PAYLOAD_TOO_LARGE");
     }
 
     #[test]
     fn published_event_has_stable_schema() {
-        let event = publish_event("test.schema", serde_json::json!({ "safe": true })).unwrap();
+        let hub = EventHub::new();
+        let event = hub.publish("test.schema", serde_json::json!({ "safe": true })).unwrap();
         assert_eq!(event.schema_version, 1);
         assert_eq!(event.event_type, "test.schema");
         assert_eq!(event.data["safe"], true);
