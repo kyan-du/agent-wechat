@@ -1,5 +1,13 @@
 # @agent-wechat/wechat
 
+## 0.14.2
+
+### Patch Changes
+
+- [#127](https://github.com/kyan-du/agent-wechat/pull/127) [`9ddcff7`](https://github.com/kyan-du/agent-wechat/commit/9ddcff7a8ce2b5df81281a953d45cb972b211d4e) Thanks [@kyan-du](https://github.com/kyan-du)! - Trigger a bounded chat reopen for inbound WeChat file attachments (type=49 / `FILE_NOT_DOWNLOADED`) so group Word/PDF can materialize the same way type=3 images already do.
+
+- [#129](https://github.com/kyan-du/agent-wechat/pull/129) [`1b71680`](https://github.com/kyan-du/agent-wechat/commit/1b7168015bc2ecf6729d7094d79fee38e6530c21) Thanks [@kyan-du](https://github.com/kyan-du)! - Click a uniquely identified inbound file bubble in the Linux WeChat GUI so group Word/PDF materialize under `msg/file/`. Plugin fire-and-forget `downloadFile` no longer aborts the overlay click from the short media poll window.
+
 ## 0.14.1
 
 ### Patch Changes
