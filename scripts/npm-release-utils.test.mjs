@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +10,9 @@ import {
   classifyNpmFailure,
   exactStableVersionPattern,
   publicPackages,
+  publicRegistryRetry,
   retryTransient,
+  stripPublishCredentials,
   verifyTarballIntegrity,
 } from "./npm-release-utils.mjs";
 
@@ -91,6 +93,55 @@ test("retryTransient fails immediately on non-transient errors", async () => {
     /non-transient npm error E401/,
   );
   assert.equal(attempts, 1);
+});
+
+test("public registry view budget waits more than five minutes for E404 propagation", () => {
+  assert.equal(publicRegistryRetry.attempts, 12);
+  assert.equal(publicRegistryRetry.initialDelayMs, 5_000);
+  assert.equal(publicRegistryRetry.maxDelayMs, 60_000);
+  let waitMs = 0;
+  for (let attempt = 1; attempt < publicRegistryRetry.attempts; attempt += 1) {
+    waitMs += Math.min(publicRegistryRetry.maxDelayMs, publicRegistryRetry.initialDelayMs * 2 ** (attempt - 1));
+  }
+  assert.ok(waitMs >= 5 * 60_000, `expected >= 5 minutes, got ${waitMs}ms`);
+});
+
+test("retryTransient still treats E404 as transient across the longer public-registry window", async () => {
+  const seen = [];
+  const result = await retryTransient(
+    "npm view @kyan-du/agent-wechat-cli@0.14.2",
+    (attempt) => {
+      seen.push(attempt);
+      return attempt < publicRegistryRetry.attempts
+        ? { ok: false, stderr: "npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/@kyan-du%2fagent-wechat-cli - Not found" }
+        : { ok: true, stdout: "{\"ok\":true}" };
+    },
+    { attempts: publicRegistryRetry.attempts, initialDelayMs: 1, maxDelayMs: 1 },
+  );
+  assert.equal(seen.length, publicRegistryRetry.attempts);
+  assert.deepEqual(seen, Array.from({ length: publicRegistryRetry.attempts }, (_, index) => index + 1));
+  assert.equal(result.ok, true);
+});
+
+test("stripPublishCredentials drops setup-node publish auth before public view", () => {
+  const env = {
+    NODE_AUTH_TOKEN: "secret",
+    NPM_CONFIG_USERCONFIG: "/tmp/npmrc",
+    PATH: "/usr/bin",
+  };
+  stripPublishCredentials(env);
+  assert.equal(Object.hasOwn(env, "NODE_AUTH_TOKEN"), false);
+  assert.equal(Object.hasOwn(env, "NPM_CONFIG_USERCONFIG"), false);
+  assert.equal(env.PATH, "/usr/bin");
+});
+
+test("public verify script strips publish credentials before view and install", () => {
+  const source = readFileSync(new URL("./verify-published-npm-release.mjs", import.meta.url), "utf8");
+  const stripAt = source.indexOf("stripPublishCredentials();");
+  const viewAt = source.indexOf("viewPackage(");
+  const installAt = source.indexOf("cleanInstallPublished(");
+  assert.ok(stripAt >= 0, "verify script must call stripPublishCredentials()");
+  assert.ok(stripAt < viewAt && stripAt < installAt, "credentials must be stripped before view/install");
 });
 
 test("local candidate tarball integrity must match registry metadata before skipping publish", () => {

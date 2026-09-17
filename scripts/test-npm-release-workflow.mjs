@@ -84,4 +84,22 @@ assert.match(
 const yamlEscapedSemver = /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/;
 assert.equal(yamlEscapedSemver.test("0.14.1"), false, "the old YAML-escaped regex rejects 0.14.1");
 
+const publishExisting = jobs.publish.steps.find((step) => step.name === "Publish or verify existing public npm packages");
+assert.ok(publishExisting, "publish-existing-safe step exists");
+assert.match(publishExisting.run, /node scripts\/npm-release-utils\.mjs publish-existing-safe/);
+assert.doesNotMatch(
+  publishExisting.run,
+  /env -u NODE_AUTH_TOKEN/,
+  "publish step must keep trusted publishing / NODE_AUTH_TOKEN",
+);
+
+const verifyPublic = jobs.publish.steps.find((step) => step.name === "Verify public registry versions and clean install");
+assert.ok(verifyPublic, "public registry verify step exists");
+assert.match(
+  verifyPublic.run,
+  /env -u NODE_AUTH_TOKEN -u NPM_CONFIG_USERCONFIG node scripts\/verify-published-npm-release\.mjs/,
+  "public verify must drop setup-node publish credentials before npm view/install",
+);
+assert.equal(verifyPublic.env, undefined, "public verify must not re-inject NODE_AUTH_TOKEN via step env");
+
 console.log("npm release contract covers native runners, one approval gate, and immutable stable GHCR tags.");

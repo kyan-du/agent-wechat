@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-import { cleanInstallPublished, exactStableVersionPattern, publicPackages, viewPackage } from "./npm-release-utils.mjs";
+import { cleanInstallPublished, exactStableVersionPattern, publicPackages, stripPublishCredentials, viewPackage } from "./npm-release-utils.mjs";
 
 const version = process.argv[2];
 if (!exactStableVersionPattern.test(version ?? "")) {
   throw new Error("usage: verify-published-npm-release.mjs <exact stable version>");
 }
+
+stripPublishCredentials();
 
 for (const item of publicPackages) {
   const metadata = await viewPackage(item.name, version);

@@ -14,6 +14,12 @@ export const publicPackages = [
 
 export const exactStableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
+export const publicRegistryRetry = {
+  attempts: 12,
+  initialDelayMs: 5_000,
+  maxDelayMs: 60_000,
+};
+
 const transientCodes = new Set([
   "E404",
   "E500",
@@ -64,10 +70,16 @@ export function classifyNpmFailure(result) {
   return { code, transient, alreadyExists, text: text.trim() };
 }
 
+export function stripPublishCredentials(env = process.env) {
+  delete env.NODE_AUTH_TOKEN;
+  delete env.NPM_CONFIG_USERCONFIG;
+  return env;
+}
+
 export async function retryTransient(description, operation, options = {}) {
-  const attempts = options.attempts ?? 7;
-  const initialDelayMs = options.initialDelayMs ?? 3_000;
-  const maxDelayMs = options.maxDelayMs ?? 30_000;
+  const attempts = options.attempts ?? publicRegistryRetry.attempts;
+  const initialDelayMs = options.initialDelayMs ?? publicRegistryRetry.initialDelayMs;
+  const maxDelayMs = options.maxDelayMs ?? publicRegistryRetry.maxDelayMs;
   let lastResult;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {

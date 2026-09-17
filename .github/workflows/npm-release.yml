@@ -141,7 +141,7 @@ jobs:
         run: node scripts/npm-release-utils.mjs publish-existing-safe "${{ inputs.version }}" .release-pack
 
       - name: Verify public registry versions and clean install
-        run: node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"
+        run: env -u NODE_AUTH_TOKEN -u NPM_CONFIG_USERCONFIG node scripts/verify-published-npm-release.mjs "${{ inputs.version }}"
 
       - name: Create exact tag and GitHub Release
         env:
