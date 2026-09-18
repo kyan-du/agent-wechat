@@ -214,6 +214,7 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         context.state.main_window.is_logged_in,
         context.state.popup.is_some(),
         composer_ready,
+        &context.state.main_window.view,
     );
 
     tracing::info!(
@@ -230,20 +231,35 @@ pub async fn auth_status() -> Json<serde_json::Value> {
         "readiness": {
             "status": readiness,
             "composerReady": composer_ready,
-            "errorCode": if readiness == "composer_unavailable" { Some("COMPOSER_UNAVAILABLE") } else { None },
+            "errorCode": auth_readiness_error_code(readiness),
         },
     }))
 }
 
-fn classify_auth_readiness(is_logged_in: bool, popup_present: bool, composer_ready: bool) -> &'static str {
+fn classify_auth_readiness(
+    is_logged_in: bool,
+    popup_present: bool,
+    composer_ready: bool,
+    view: &MainWindowView,
+) -> &'static str {
     if !is_logged_in {
         "not_logged_in"
     } else if popup_present {
         "popup_blocked"
     } else if composer_ready {
         "ready"
+    } else if matches!(view, MainWindowView::Chat) {
+        // Logged-in chat list with no selected conversation / no main composer.
+        "chat_idle"
     } else {
         "composer_unavailable"
+    }
+}
+
+fn auth_readiness_error_code(readiness: &str) -> Option<&'static str> {
+    match readiness {
+        "composer_unavailable" => Some("COMPOSER_UNAVAILABLE"),
+        _ => None,
     }
 }
 
@@ -647,9 +663,46 @@ mod tests {
 
     #[test]
     fn auth_readiness_prefers_popup_blocked_over_composer_unavailable() {
-        assert_eq!(classify_auth_readiness(true, true, false), "popup_blocked");
-        assert_eq!(classify_auth_readiness(true, false, false), "composer_unavailable");
-        assert_eq!(classify_auth_readiness(true, false, true), "ready");
-        assert_eq!(classify_auth_readiness(false, true, true), "not_logged_in");
+        assert_eq!(
+            classify_auth_readiness(true, true, false, &MainWindowView::ChatOpen),
+            "popup_blocked"
+        );
+        assert_eq!(
+            classify_auth_readiness(true, false, false, &MainWindowView::ChatOpen),
+            "composer_unavailable"
+        );
+        assert_eq!(
+            classify_auth_readiness(true, false, true, &MainWindowView::ChatOpen),
+            "ready"
+        );
+        assert_eq!(
+            classify_auth_readiness(false, true, true, &MainWindowView::Chat),
+            "not_logged_in"
+        );
+    }
+
+    #[test]
+    fn auth_readiness_reports_idle_chat_list_without_composer_error() {
+        assert_eq!(
+            classify_auth_readiness(true, false, false, &MainWindowView::Chat),
+            "chat_idle"
+        );
+        assert_eq!(auth_readiness_error_code("chat_idle"), None);
+        assert_eq!(
+            auth_readiness_error_code("composer_unavailable"),
+            Some("COMPOSER_UNAVAILABLE")
+        );
+    }
+
+    #[test]
+    fn auth_readiness_keeps_composer_unavailable_for_open_chat_without_composer() {
+        assert_eq!(
+            classify_auth_readiness(true, false, false, &MainWindowView::ChatOpen),
+            "composer_unavailable"
+        );
+        assert_eq!(
+            classify_auth_readiness(true, false, true, &MainWindowView::Chat),
+            "ready"
+        );
     }
 }
