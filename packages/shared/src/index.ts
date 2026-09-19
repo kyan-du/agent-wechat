@@ -55,6 +55,8 @@ export {
   openChatResultSchema,
   downloadFileParamsSchema,
   downloadFileResultSchema,
+  materializeChatHistoryParamsSchema,
+  materializeChatHistoryResultSchema,
   // Message schemas
   messageSchema,
   listMessagesParamsSchema,

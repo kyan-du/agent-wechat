@@ -80,6 +80,11 @@ type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>
 type MediaMaterializationClient = {
   openChat(chatId: string, clearUnreads?: boolean, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
   downloadFile?(chatId: string, filename?: string, signal?: AbortSignal, executionTimeoutMs?: number): Promise<unknown>;
+  materializeChatHistory?(
+    chatId: string,
+    options?: { title?: string; localId?: number; executionTimeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<unknown>;
 };
 type ImageMaterializationClient = MediaMaterializationClient;
 
@@ -93,6 +98,7 @@ const RETRYABLE_MEDIA_ERRORS = new Set([
   "FILE_NOT_STABLE",
   "VOICE_NOT_DOWNLOADED",
   "IMAGE_NOT_STABLE",
+  "CHAT_HISTORY_NOT_MATERIALIZED",
 ]);
 
 // Keep a missing local image from serially blocking the rest of an inbound batch.
@@ -105,6 +111,8 @@ export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
 // plugin poll window; fire-and-forget and keep polling getMedia.
 export const FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
 export const FILE_MATERIALIZATION_CLICK_TIMEOUT_MS = 8_000;
+// Chat-history card open needs scroll + double-click; keep fire-and-forget.
+export const CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS = 12_000;
 
 export type MediaMaterializationTriggerOptions = {
   log?: { info?: (...args: any[]) => void };
@@ -169,6 +177,69 @@ function triggerFileBubbleClick(
   void clicked.catch(() => undefined);
 }
 
+function shouldTriggerChatHistoryMaterialization(result: MediaResult): boolean {
+  if (result.errorCode === "CHAT_HISTORY_NOT_MATERIALIZED") return true;
+  if (result.type === "pending" && result.errorCode === "IMAGE_RESOURCE_UNAVAILABLE") return true;
+  // Empty nested shell that is somehow still pending.
+  if (result.type === "pending" && !(result.items?.some((item) => item?.data))) return true;
+  return false;
+}
+
+function triggerChatHistoryMaterialize(
+  client: MediaMaterializationClient,
+  chatId: string,
+  result: MediaResult,
+  attempt: number,
+  options?: MediaMaterializationTriggerOptions & { title?: string; localId?: number },
+): void {
+  const timeoutMs = options?.timeoutMs ?? CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS;
+  options?.log?.info?.(
+    `[wechat:media] triggering chat-history materialize attempt=${attempt} title=${options?.title ?? ""} localId=${options?.localId ?? ""} skipOpen=${options?.skipOpen === true}`,
+  );
+  if (!client.materializeChatHistory) {
+    throw Object.assign(new Error("CHAT_HISTORY_MATERIALIZE_TRIGGER_UNAVAILABLE"), {
+      code: "CHAT_HISTORY_MATERIALIZE_TRIGGER_UNAVAILABLE",
+    });
+  }
+  // Do not abort: HTTP abort must not cancel the overlay plan. Poll getMedia instead.
+  const clicked = Promise.resolve(
+    client.materializeChatHistory(
+      chatId,
+      {
+        title: options?.title,
+        localId: options?.localId,
+        executionTimeoutMs: timeoutMs,
+      },
+      undefined,
+    ),
+  );
+  void clicked.catch(() => undefined);
+}
+
+export function createChatHistoryMaterializationTrigger(
+  client: MediaMaterializationClient,
+  chatId: string,
+  options?: MediaMaterializationTriggerOptions & { title?: string; localId?: number },
+): MediaRetryTrigger {
+  return async (result, attempt) => {
+    if (!shouldTriggerChatHistoryMaterialization(result)) return;
+    triggerChatHistoryMaterialize(client, chatId, result, attempt, options);
+  };
+}
+
+export function chatHistoryTitleFromMessage(msg: {
+  content?: string;
+  forwarded?: { title?: string } | null;
+}): string | undefined {
+  const fromForwarded = msg.forwarded?.title?.trim();
+  if (fromForwarded) return fromForwarded;
+  const content = msg.content ?? "";
+  const en = content.match(/^\[Chat History\]\s*([^\n]+)/);
+  if (en?.[1]?.trim()) return en[1].trim();
+  const zh = content.match(/^\[聊天记录\]\s*([^\n]+)/);
+  return zh?.[1]?.trim() || undefined;
+}
+
 export function createMediaMaterializationTrigger(
   client: MediaMaterializationClient,
   chatId: string,
@@ -208,10 +279,21 @@ export function mediaMaterializationTriggerForMessage(opts: {
   log?: { info?: (...args: any[]) => void };
   timeoutMs?: number;
   skipOpen?: boolean;
+  /** When set, use the chat-history card materialize plan instead of downloadFile/openChat. */
+  chatHistory?: boolean | { title?: string; localId?: number };
 }): MediaRetryTrigger | undefined {
   const baseType = opts.messageType & 0x7fffffff;
+  if (opts.chatHistory) {
+    const extra = typeof opts.chatHistory === "object" ? opts.chatHistory : {};
+    return createChatHistoryMaterializationTrigger(opts.client, opts.chatId, {
+      log: opts.log,
+      timeoutMs: opts.timeoutMs ?? CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS,
+      skipOpen: opts.skipOpen,
+      title: extra.title,
+      localId: extra.localId,
+    });
+  }
   // type=3 images; type=49 appmsg files (server returns type=file for subtype 6).
-  // Chat history still polls getMedia for nested items, but never materializes via overlay.
   if (baseType !== 3 && baseType !== 49) return undefined;
   return createMediaMaterializationTrigger(opts.client, opts.chatId, {
     log: opts.log,

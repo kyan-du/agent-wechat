@@ -61,6 +61,7 @@ pub fn build_router() -> Router {
         .route("/api/chats/find", get(chats::find_chats))
         .route("/api/chats/{id}/open", post(chats::open_chat))
         .route("/api/chats/{id}/download-file", post(chats::download_file))
+        .route("/api/chats/{id}/materialize-chat-history", post(chats::materialize_chat_history))
         .route("/api/chats/{id}/mark-read", post(chats::mark_read))
         .route(
             "/api/groups/{id}/members",

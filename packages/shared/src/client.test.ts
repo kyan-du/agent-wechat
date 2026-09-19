@@ -217,6 +217,37 @@ test("openChat forwards AbortSignal so a timed-out GUI request can be cancelled"
   }
 });
 
+test("materializeChatHistory posts title/localId without aborting the GUI plan by default", async () => {
+  const original = globalThis.fetch;
+  let receivedUrl = "";
+  let receivedSignal: AbortSignal | undefined;
+  globalThis.fetch = (async (input, init) => {
+    receivedUrl = String(input);
+    receivedSignal = init?.signal ?? undefined;
+    return new Response(JSON.stringify({ ok: true, clicked: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    const client = new WeChatClient({ baseUrl: "http://agent-wechat.local" });
+    const result = await client.materializeChatHistory(
+      "vangie",
+      { title: "姐姐狐的聊天记录", localId: 70, executionTimeoutMs: 12000 },
+      undefined,
+    );
+    assert.match(
+      receivedUrl,
+      /\/api\/chats\/vangie\/materialize-chat-history\?.*title=.*localId=70.*executionTimeoutMs=12000/,
+    );
+    assert.equal(receivedSignal, undefined);
+    assert.equal(result.ok, true);
+    assert.equal(result.clicked, true);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("downloadFile posts filename without aborting the GUI click by default", async () => {
   const original = globalThis.fetch;
   let receivedUrl = "";

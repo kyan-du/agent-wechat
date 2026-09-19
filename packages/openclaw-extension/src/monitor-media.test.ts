@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
   IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
+  CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS,
+  createChatHistoryMaterializationTrigger,
   createImageMaterializationTrigger,
   createMediaMaterializationTrigger,
   imageMaterializationTriggerForMessage,
@@ -19,6 +21,7 @@ import path from "node:path";
 test("inbound downloaded media populates singular and plural runtime fields", () => {
   const source = fs.readFileSync(path.join(import.meta.dirname, "monitor.ts"), "utf8");
   assert.match(source, /mediaMaterializationTriggerForMessage\(\{[\s\S]*skipOpen,/);
+  assert.match(source, /mediaMaterializationTriggerForMessage\(\{[\s\S]*chatHistory:/);
   assert.match(source, /prepareMessage\([\s\S]*skipOpen\)/);
   assert.match(source, /MediaPath:\s*mediaPath/);
   assert.match(source, /MediaUrl:\s*mediaPath/);
@@ -324,11 +327,71 @@ test("FILE_NOT_STABLE still uses the bounded file bubble click trigger", async (
   assert.equal(result?.errorCode, "FILE_NOT_STABLE");
 });
 
-test("non-file type=49 does not fire openChat because getMedia is unsupported", async () => {
+test("chat history empty/pending triggers materializeChatHistory once", async () => {
   let opens = 0;
+  let materializes = 0;
   const trigger = mediaMaterializationTriggerForMessage({
     client: {
       openChat: async () => { opens += 1; },
+      materializeChatHistory: async (chatId, options, signal) => {
+        assert.equal(chatId, "vangie");
+        assert.equal(options?.title, "姐姐狐的聊天记录");
+        assert.equal(options?.localId, 70);
+        assert.equal(signal, undefined);
+        materializes += 1;
+      },
+    },
+    chatId: "vangie",
+    messageType: 49,
+    chatHistory: { title: "姐姐狐的聊天记录", localId: 70 },
+  });
+  assert.ok(trigger);
+  let calls = 0;
+  const result = await pollMedia({
+    getMedia: async () => {
+      calls += 1;
+      return calls < 3
+        ? { type: "pending", format: "jpeg", filename: "chat_history_70.jpg", errorCode: "CHAT_HISTORY_NOT_MATERIALIZED" }
+        : {
+            type: "unsupported",
+            format: "",
+            filename: "",
+            items: [{ type: "image", data: "abc", format: "jpeg", filename: "chat_history_70_0.jpg" }],
+          };
+    },
+  } as never, "vangie", 70, undefined, 3, 0, trigger);
+  assert.equal(opens, 0);
+  assert.equal(materializes, 1);
+  assert.equal(calls, 3);
+  assert.equal(nestedChatHistoryMedia(result).length, 1);
+});
+
+test("chat history with nested data does not need materialize trigger", async () => {
+  let materializes = 0;
+  const trigger = createChatHistoryMaterializationTrigger({
+    openChat: async () => {},
+    materializeChatHistory: async () => { materializes += 1; },
+  }, "vangie", { title: "姐姐狐的聊天记录", localId: 70 });
+  const result = await pollMedia({
+    getMedia: async () => ({
+      type: "unsupported",
+      format: "",
+      filename: "",
+      items: [{ type: "image", data: "abc", format: "jpeg", filename: "n0.jpg" }],
+    }),
+  } as never, "vangie", 70, undefined, 3, 0, trigger);
+  // unsupported with nested data returns immediately without calling trigger
+  assert.equal(materializes, 0);
+  assert.equal(nestedChatHistoryMedia(result).length, 1);
+});
+
+test("non-file type=49 (non chat-history) does not fire openChat because getMedia is unsupported", async () => {
+  let opens = 0;
+  let materializes = 0;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: {
+      openChat: async () => { opens += 1; },
+      materializeChatHistory: async () => { materializes += 1; },
     },
     chatId: "wxid_direct",
     messageType: 49,
@@ -338,7 +401,13 @@ test("non-file type=49 does not fire openChat because getMedia is unsupported", 
     getMedia: async () => ({ type: "unsupported", format: "", filename: "" }),
   } as never, "wxid_direct", 10, undefined, 3, 0, trigger);
   assert.equal(opens, 0);
+  assert.equal(materializes, 0);
   assert.equal(result?.type, "unsupported");
+});
+
+test("chat history materialize timeout stays fire-and-forget friendly", () => {
+  assert.ok(CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS >= 8_000);
+  assert.ok(CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS <= 15_000);
 });
 
 test("slow file bubble click does not consume the short media poll window or abort the GUI plan", async () => {

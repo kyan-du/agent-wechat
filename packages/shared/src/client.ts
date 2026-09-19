@@ -11,6 +11,7 @@ import type {
   LoginSubscriptionEvent,
   OpenChatResult,
   DownloadFileResult,
+  MaterializeChatHistoryResult,
   SendParams,
 } from "./types/index.js";
 
@@ -252,6 +253,19 @@ export class WeChatClient {
   ): Promise<DownloadFileResult> {
     return this.post(
       `/api/chats/${encodeURIComponent(chatId)}/download-file${qs({ filename, executionTimeoutMs })}`,
+      undefined,
+      signal,
+    );
+  }
+
+  async materializeChatHistory(
+    chatId: string,
+    options?: { title?: string; localId?: number; executionTimeoutMs?: number },
+    signal?: AbortSignal,
+  ): Promise<MaterializeChatHistoryResult> {
+    const { title, localId, executionTimeoutMs } = options ?? {};
+    return this.post(
+      `/api/chats/${encodeURIComponent(chatId)}/materialize-chat-history${qs({ title, localId, executionTimeoutMs })}`,
       undefined,
       signal,
     );
