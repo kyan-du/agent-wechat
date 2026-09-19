@@ -167,6 +167,10 @@ pub fn filter_chats_by_interest(chats: Vec<Chat>, interest_only: bool) -> Vec<Ch
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // INTEREST is process-global; serialize tests that mutate it.
+    static INTEREST_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn chat(id: &str, is_group: bool) -> Chat {
         Chat {
@@ -186,6 +190,7 @@ mod tests {
 
     #[test]
     fn allowlist_keeps_dm_and_drops_openim_outsider() {
+        let _guard = INTEREST_TEST_LOCK.lock().unwrap();
         clear_interest();
         set_interest(MonitorInterest {
             dm_policy: "allowlist".into(),
@@ -207,6 +212,7 @@ mod tests {
 
     #[test]
     fn filter_fail_open_without_interest() {
+        let _guard = INTEREST_TEST_LOCK.lock().unwrap();
         clear_interest();
         let chats = vec![chat("vangie", false), chat("other", false)];
         assert_eq!(filter_chats_by_interest(chats.clone(), true).len(), 2);
