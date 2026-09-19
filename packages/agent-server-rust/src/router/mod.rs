@@ -1,5 +1,6 @@
 pub mod auth;
 mod chats;
+mod interest;
 mod contacts;
 mod debug;
 mod events;
@@ -24,7 +25,7 @@ async fn health() -> Json<serde_json::Value> {
 /// Build the full axum Router.
 pub fn build_router() -> Router {
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::OPTIONS])
         .allow_origin(Any)
         .allow_headers(Any);
 
@@ -50,6 +51,12 @@ pub fn build_router() -> Router {
         .route("/api/status/auth/reset", post(status::reset_auth))
         // Chats
         .route("/api/chats", get(chats::list_chats))
+        .route(
+            "/api/interest",
+            get(interest::get_interest)
+                .put(interest::put_interest)
+                .post(interest::put_interest),
+        )
         .route("/api/chats/{id}", get(chats::get_chat))
         .route("/api/chats/find", get(chats::find_chats))
         .route("/api/chats/{id}/open", post(chats::open_chat))

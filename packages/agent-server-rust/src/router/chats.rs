@@ -24,6 +24,9 @@ pub struct ListParams {
     cursor: Option<String>,
     #[serde(default, rename = "unreadOnly")]
     unread_only: bool,
+    /// When true, drop DMs that fall outside the client-pushed monitor interest.
+    #[serde(default, rename = "interestOnly")]
+    interest_only: bool,
 }
 
 fn default_limit() -> i64 {
@@ -77,6 +80,9 @@ pub async fn list_chats(Query(params): Query<ListParams>) -> Response {
         let sort = chat.sort_timestamp;
         crate::tools::page_cursor::encode("chats", (sort, chat.id.clone())).ok()
     });
+    // Keep next_cursor from the raw page so interest filtering cannot stall pagination
+    // when an entire page is out-of-interest (monitor keeps walking).
+    let chats = crate::interest::filter_chats_by_interest(chats, params.interest_only);
     Json(serde_json::json!({ "schemaVersion": 1, "items": chats, "nextCursor": next_cursor }))
         .into_response()
 }

@@ -11,6 +11,7 @@ export type ChatPageClient = {
     limit?: number,
     cursor?: string,
     unreadOnly?: boolean,
+    interestOnly?: boolean,
   ): Promise<CursorPage<Chat>>;
 };
 
@@ -25,6 +26,8 @@ export type MessagePageClient = {
 export type ChatScanState = {
   cursor?: string;
   initialScanComplete: boolean;
+  /** Ask agent-server to hide DMs outside the synced monitor interest. */
+  interestOnly?: boolean;
 };
 
 export type MonitorChatPage = {
@@ -41,7 +44,7 @@ export async function listInitialMonitorChatSnapshot(
   const chats: Chat[] = [];
   let cursor: string | undefined;
   for (let pages = 0; pages < pageBudget; pages += 1) {
-    const page = await client.listChatsPage(MONITOR_CHAT_PAGE_LIMIT, cursor);
+    const page = await client.listChatsPage(MONITOR_CHAT_PAGE_LIMIT, cursor, undefined, state.interestOnly);
     chats.push(...page.items);
     cursor = page.nextCursor;
     if (!cursor) {
@@ -77,7 +80,7 @@ export async function listNextMonitorChatPage(
   state: ChatScanState,
 ): Promise<MonitorChatPage> {
   const isInitialSnapshot = !state.initialScanComplete;
-  const page = await client.listChatsPage(MONITOR_CHAT_PAGE_LIMIT, state.cursor);
+  const page = await client.listChatsPage(MONITOR_CHAT_PAGE_LIMIT, state.cursor, undefined, state.interestOnly);
   state.cursor = page.nextCursor;
   if (!page.nextCursor) {
     state.initialScanComplete = true;
