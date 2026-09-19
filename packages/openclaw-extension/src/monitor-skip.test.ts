@@ -5,6 +5,7 @@ import test from "node:test";
 import type { Chat } from "@kyan-du/agent-wechat-shared";
 import {
   applyEmptyUnreadSkip,
+  applyStickyUnclearedUnread,
   EMPTY_UNREAD_BACKOFF_MAX_MS,
   EMPTY_UNREAD_BACKOFF_MS,
   isEmptyUnreadBackoffActive,
@@ -102,6 +103,8 @@ test("monitor wires official/system skip and empty unread backoff", () => {
   assert.match(source, /from "\.\/monitor-skip\.js"/);
   assert.match(source, /isNewsappChat\(c\)/);
   assert.match(source, /applyEmptyUnreadSkip\(chatId/);
+  assert.match(source, /applyStickyUnclearedUnread\(chatId/);
+  assert.match(source, /actionableUnread/);
   assert.doesNotMatch(source, /function isOfficialAccount/);
 });
 
@@ -120,6 +123,28 @@ test("empty unread backoff caps at 60s", () => {
       now,
     });
     lastMs = result?.backoffMs ?? 0;
+    now += lastMs;
+  }
+  assert.equal(lastMs, EMPTY_UNREAD_BACKOFF_MAX_MS);
+});
+
+test("applyStickyUnclearedUnread backs off sticky uncleared badges", () => {
+  const backoff = new Map();
+  const first = applyStickyUnclearedUnread("25984984400696834@openim", backoff, 0);
+  assert.equal(first.backoffMs, EMPTY_UNREAD_BACKOFF_MS);
+  assert.equal(isEmptyUnreadBackoffActive(backoff, "25984984400696834@openim", EMPTY_UNREAD_BACKOFF_MS - 1), true);
+  assert.equal(isEmptyUnreadBackoffActive(backoff, "25984984400696834@openim", EMPTY_UNREAD_BACKOFF_MS), false);
+
+  const second = applyStickyUnclearedUnread("25984984400696834@openim", backoff, EMPTY_UNREAD_BACKOFF_MS);
+  assert.equal(second.backoffMs, EMPTY_UNREAD_BACKOFF_MS * 2);
+});
+
+test("sticky uncleared backoff caps at 60s", () => {
+  const backoff = new Map();
+  let now = 0;
+  let lastMs = 0;
+  for (let i = 0; i < 8; i += 1) {
+    lastMs = applyStickyUnclearedUnread("wxid_friend", backoff, now).backoffMs;
     now += lastMs;
   }
   assert.equal(lastMs, EMPTY_UNREAD_BACKOFF_MAX_MS);

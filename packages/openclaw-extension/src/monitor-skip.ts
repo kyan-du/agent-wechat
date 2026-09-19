@@ -80,3 +80,22 @@ export function applyEmptyUnreadSkip(
   opts.backoff.set(chatId, { nextRetryAt: now + backoffMs, retryCount });
   return { seededLastSeen, backoffMs };
 }
+
+/**
+ * Cursor already caught up, but WeChat still reports unreadCount>0 after openChat
+ * (common for @openim / policy-blocked DMs whose badge will not clear). Back off
+ * so the monitor does not openChat-loop every poll tick.
+ */
+export function applyStickyUnclearedUnread(
+  chatId: string,
+  backoff: EmptyUnreadBackoff,
+  now = Date.now(),
+): { backoffMs: number } {
+  const retryCount = (backoff.get(chatId)?.retryCount ?? 0) + 1;
+  const backoffMs = Math.min(
+    EMPTY_UNREAD_BACKOFF_MAX_MS,
+    EMPTY_UNREAD_BACKOFF_MS * 2 ** Math.min(retryCount - 1, 6),
+  );
+  backoff.set(chatId, { nextRetryAt: now + backoffMs, retryCount });
+  return { backoffMs };
+}

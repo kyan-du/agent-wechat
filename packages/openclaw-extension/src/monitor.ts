@@ -61,6 +61,7 @@ import {
 } from "./newsapp.js";
 import {
   applyEmptyUnreadSkip,
+  applyStickyUnclearedUnread,
   isEmptyUnreadBackoffActive,
   isOfficialAccount,
   type EmptyUnreadBackoff,
@@ -308,9 +309,14 @@ export async function startWeChatMonitor(
           chatsToProcess.delete(chatId);
         }
       }
-      if (unreadChats.length > 0) {
+      // newsapp / sticky-uncleared chats can stay unread while chatsToProcess is empty;
+      // avoid per-tick spam that drowns real inbound logs.
+      const actionableUnread = unreadChats.filter((c) =>
+        chatsToProcess.has(c.username ?? c.id),
+      );
+      if (actionableUnread.length > 0) {
         log?.info?.(
-          `[wechat:${account.accountId}] ${unreadChats.length} chat(s) with unreads`,
+          `[wechat:${account.accountId}] ${actionableUnread.length} chat(s) with unreads`,
         );
       }
 
@@ -1243,6 +1249,12 @@ async function processUnreadChat(
     }
     if (chat.unreadCount > 0 && !isNewsappChat(chat)) {
       await openChatIfNeeded();
+      // openChat may report success while the badge stays (notably @openim /
+      // allowlist-blocked DMs). Back off instead of openChat-looping every tick.
+      const sticky = applyStickyUnclearedUnread(chatId, emptyUnreadBackoff);
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] ${chatId}: sticky uncleared unread after catch-up (unreadCount=${chat.unreadCount}); backoff=${sticky.backoffMs}ms`,
+      );
     }
     // Don't update lastSeenId — if session.db reports a newer message
     // (via lastMsgLocalId) that hasn't appeared in message_N.db yet,
@@ -1482,5 +1494,13 @@ async function processUnreadChat(
 
   const maxId = Math.max(...newMessages.map((m) => m.localId));
   advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
+  // Policy-filtered / non-dispatchable windows still leave badges on some chat
+  // types (@openim). Avoid re-opening every subsequent tick.
+  if (chat.unreadCount > 0 && !isNewsappChat(chat) && opened) {
+    const sticky = applyStickyUnclearedUnread(chatId, emptyUnreadBackoff);
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] ${chatId}: sticky uncleared unread after filtered window; backoff=${sticky.backoffMs}ms`,
+    );
+  }
   return "skipped";
 }
