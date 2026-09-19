@@ -6,10 +6,8 @@ import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { OPENCLAW_CHANNEL_ID, resolveWeChatAccount } from "./types.js";
 import {
-  buildMonitorInterest,
-  monitorInterestFingerprint,
+  ensureMonitorInterestSynced,
   shouldListChatsInterestOnly,
-  syncMonitorInterest,
 } from "./monitor-interest.js";
 import { isCatchUpBatch, recoveryCursor, selectCatchUpMessages } from "./catch-up.js";
 import {
@@ -169,7 +167,6 @@ export async function startWeChatMonitor(
   const newsappHandled = new Map<string, string>();
   // Tip-ack denied/sticky unreads so WeChat badges can stay while the poll skips them.
   const stickyUnreadAck: StickyUnreadAck = new Map();
-  let interestFingerprint = "";
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -193,13 +190,15 @@ export async function startWeChatMonitor(
       const cfg = getWeChatRuntime().config.current();
       const liveAccountForInterest =
         resolveWeChatAccount(cfg as Record<string, unknown>, account.accountId) ?? account;
-      const nextInterest = buildMonitorInterest(liveAccountForInterest);
-      const nextInterestFingerprint = monitorInterestFingerprint(nextInterest);
-      if (nextInterestFingerprint !== interestFingerprint) {
-        await syncMonitorInterest(client, liveAccountForInterest, log);
-        interestFingerprint = nextInterestFingerprint;
-      }
-      chatScanState.interestOnly = shouldListChatsInterestOnly(nextInterest);
+      // GET/PUT interest each tick so a restarted agent-server (in-memory wipe) re-syncs.
+      // interestOnly stays false until the server actually holds the allowlist (fail-open).
+      const { interest: nextInterest, synced: interestSynced } = await ensureMonitorInterestSynced(
+        client,
+        liveAccountForInterest,
+        log,
+      );
+      chatScanState.interestOnly =
+        shouldListChatsInterestOnly(nextInterest) && interestSynced;
 
       // ---- Auth polling (every authPollIntervalMs) ----
       const now = Date.now();

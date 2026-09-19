@@ -1,5 +1,5 @@
 import type { MonitorInterest, WeChatClient } from "@kyan-du/agent-wechat-shared";
-import type { ResolvedWeChatAccount } from "./types.ts";
+import type { ResolvedWeChatAccount } from "./types.js";
 
 function normalizeAllowFrom(values: Array<string | number> | null | undefined): string[] {
   const out: string[] = [];
@@ -42,22 +42,42 @@ export function shouldListChatsInterestOnly(interest: MonitorInterest): boolean 
   return interest.dmPolicy === "allowlist" || interest.dmPolicy === "disabled";
 }
 
-export async function syncMonitorInterest(
+export type EnsureMonitorInterestResult = {
+  interest: MonitorInterest;
+  /** Server currently holds this interest (GET match or successful PUT). */
+  synced: boolean;
+};
+
+/**
+ * Keep agent-server's in-memory interest aligned with the live OpenClaw account config.
+ *
+ * - GET every call so a server restart (interest wiped) is detected.
+ * - PUT only when missing or mismatched.
+ * - `synced` is true only when the server holds the desired allowlist; callers must not
+ *   set `interestOnly=true` until then (fail-open keeps denied DMs visible in listChats).
+ */
+export async function ensureMonitorInterestSynced(
   client: WeChatClient,
   account: ResolvedWeChatAccount,
   log?: { info?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void },
-): Promise<{ interest: MonitorInterest; fingerprint: string }> {
+): Promise<EnsureMonitorInterestResult> {
   const interest = buildMonitorInterest(account);
-  const fingerprint = monitorInterestFingerprint(interest);
+  const desiredFp = monitorInterestFingerprint(interest);
   try {
+    const current = await client.getMonitorInterest();
+    const serverInterest = current.interest;
+    if (serverInterest && monitorInterestFingerprint(serverInterest) === desiredFp) {
+      return { interest, synced: true };
+    }
     await client.setMonitorInterest(interest);
     log?.info?.(
       `[wechat:${account.accountId}] Synced monitor interest to agent-server (dmPolicy=${interest.dmPolicy}, dmAllowFrom=${interest.dmAllowFrom.length})`,
     );
+    return { interest, synced: true };
   } catch (err) {
     log?.error?.(
       `[wechat:${account.accountId}] Failed to sync monitor interest: ${err}`,
     );
+    return { interest, synced: false };
   }
-  return { interest, fingerprint };
 }
