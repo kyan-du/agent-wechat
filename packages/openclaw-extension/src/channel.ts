@@ -218,7 +218,7 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       allowFrom: account.allowFrom ?? [],
       allowFromPath: `channels.${OPENCLAW_CHANNEL_ID}.allowFrom`,
       policyPath: `channels.${OPENCLAW_CHANNEL_ID}.dmPolicy`,
-      approveHint: `Add the wxid to channels.${OPENCLAW_CHANNEL_ID}.allowFrom`,
+      approveHint: `Add the wxid or enterprise @openim id to channels.${OPENCLAW_CHANNEL_ID}.allowFrom`,
       normalizeEntry: (raw: string) =>
         raw.replace(/^(agent-wechat|wechat):/i, "").trim(),
     }),

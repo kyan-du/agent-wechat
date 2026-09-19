@@ -5,10 +5,14 @@ import test from "node:test";
 import type { Chat } from "@kyan-du/agent-wechat-shared";
 import {
   applyEmptyUnreadSkip,
+  ackStickyUnclearedUnread,
   EMPTY_UNREAD_BACKOFF_MAX_MS,
   EMPTY_UNREAD_BACKOFF_MS,
   isEmptyUnreadBackoffActive,
   isOfficialAccount,
+  isOpenImChat,
+  isStickyUnclearedAcked,
+  stickyUnreadTip,
 } from "./monitor-skip.ts";
 
 function chat(id: string, unreadCount: number): Chat {
@@ -102,6 +106,10 @@ test("monitor wires official/system skip and empty unread backoff", () => {
   assert.match(source, /from "\.\/monitor-skip\.js"/);
   assert.match(source, /isNewsappChat\(c\)/);
   assert.match(source, /applyEmptyUnreadSkip\(chatId/);
+  assert.match(source, /ackStickyUnclearedUnread\(/);
+  assert.match(source, /anyAllowlistedInbound/);
+  assert.match(source, /badge kept/);
+  assert.match(source, /actionableUnread/);
   assert.doesNotMatch(source, /function isOfficialAccount/);
 });
 
@@ -120,6 +128,41 @@ test("empty unread backoff caps at 60s", () => {
       now,
     });
     lastMs = result?.backoffMs ?? 0;
+    now += lastMs;
+  }
+  assert.equal(lastMs, EMPTY_UNREAD_BACKOFF_MAX_MS);
+});
+
+test("ackStickyUnclearedUnread tip-acks @openim until lastMsgLocalId advances", () => {
+  const backoff = new Map();
+  const acked = new Map();
+  const chat = { id: "25984984400696834@openim", username: "25984984400696834@openim", lastMsgLocalId: 70, unreadCount: 2 };
+  assert.equal(isOpenImChat(chat.id), true);
+  const first = ackStickyUnclearedUnread(chat.id, chat, acked, backoff, 0);
+  assert.equal(first.tip, "70:2");
+  assert.equal(first.backoffMs, EMPTY_UNREAD_BACKOFF_MS);
+  assert.equal(isStickyUnclearedAcked(chat, acked), true);
+  assert.equal(
+    isStickyUnclearedAcked({ ...chat, lastMsgLocalId: 71 }, acked),
+    false,
+    "new tip must reopen processing",
+  );
+  assert.equal(stickyUnreadTip(chat), "70:2");
+});
+
+test("sticky uncleared tip-ack backoff caps at 60s", () => {
+  const backoff = new Map();
+  const acked = new Map();
+  let now = 0;
+  let lastMs = 0;
+  for (let i = 0; i < 8; i += 1) {
+    lastMs = ackStickyUnclearedUnread(
+      "wxid_friend",
+      { lastMsgLocalId: 1, unreadCount: 1 },
+      acked,
+      backoff,
+      now,
+    ).backoffMs;
     now += lastMs;
   }
   assert.equal(lastMs, EMPTY_UNREAD_BACKOFF_MAX_MS);

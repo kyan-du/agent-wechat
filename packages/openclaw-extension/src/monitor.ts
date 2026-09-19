@@ -61,9 +61,13 @@ import {
 } from "./newsapp.js";
 import {
   applyEmptyUnreadSkip,
+  ackStickyUnclearedUnread,
   isEmptyUnreadBackoffActive,
   isOfficialAccount,
+  isOpenImChat,
+  isStickyUnclearedAcked,
   type EmptyUnreadBackoff,
+  type StickyUnreadAck,
 } from "./monitor-skip.js";
 
 // History context markers (match openclaw's built-in markers)
@@ -157,6 +161,8 @@ export async function startWeChatMonitor(
   trimPendingResetRetries(retryState);
   // Sticky system-feed unread counters must not cause a listMessages call every tick.
   const newsappHandled = new Map<string, string>();
+  // Tip-ack denied/sticky unreads so WeChat badges can stay while the poll skips them.
+  const stickyUnreadAck: StickyUnreadAck = new Map();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -278,6 +284,7 @@ export async function startWeChatMonitor(
       const unreadChats = chats.filter((c) => {
         const chatId = c.username ?? c.id;
         if (isEmptyUnreadBackoffActive(emptyUnreadBackoff, chatId)) return false;
+        if (isStickyUnclearedAcked(c, stickyUnreadAck)) return false;
         if (c.unreadCount <= 0) return false;
         if (isNewsappChat(c)) return true;
         return !isOfficialAccount(chatId);
@@ -296,9 +303,12 @@ export async function startWeChatMonitor(
         chats,
         retryState,
         Date.now(),
-        (chat) => !isNewsappChat(chat) ||
-          newsappHandled.get(chat.username ?? chat.id) !==
-            `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`,
+        (chat) => {
+          if (isStickyUnclearedAcked(chat, stickyUnreadAck)) return false;
+          if (!isNewsappChat(chat)) return true;
+          return newsappHandled.get(chat.username ?? chat.id) !==
+            `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`;
+        },
       );
       for (const chatId of chatsToProcess.keys()) {
         if (
@@ -308,9 +318,14 @@ export async function startWeChatMonitor(
           chatsToProcess.delete(chatId);
         }
       }
-      if (unreadChats.length > 0) {
+      // newsapp / sticky-uncleared chats can stay unread while chatsToProcess is empty;
+      // avoid per-tick spam that drowns real inbound logs.
+      const actionableUnread = unreadChats.filter((c) =>
+        chatsToProcess.has(c.username ?? c.id),
+      );
+      if (actionableUnread.length > 0) {
         log?.info?.(
-          `[wechat:${account.accountId}] ${unreadChats.length} chat(s) with unreads`,
+          `[wechat:${account.accountId}] ${actionableUnread.length} chat(s) with unreads`,
         );
       }
 
@@ -330,6 +345,7 @@ export async function startWeChatMonitor(
             inboundLedger,
             mediaPipeline,
             emptyUnreadBackoff,
+            stickyUnreadAck,
             account,
             cfg,
             log,
@@ -385,6 +401,7 @@ export async function startWeChatMonitor(
           inboundLedger,
           mediaPipeline,
           emptyUnreadBackoff,
+          stickyUnreadAck,
           account,
           cfg,
           log,
@@ -1048,6 +1065,7 @@ async function processUnreadChat(
   inboundLedger: InboundEventLedger,
   mediaPipeline: MediaPipeline,
   emptyUnreadBackoff: EmptyUnreadBackoff,
+  stickyUnreadAck: StickyUnreadAck,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -1242,7 +1260,18 @@ async function processUnreadChat(
       );
     }
     if (chat.unreadCount > 0 && !isNewsappChat(chat)) {
-      await openChatIfNeeded();
+      // Leave the WeChat badge alone (esp. allowlist-denied senders). Tip-ack so
+      // agent-server's unread signal — which does not know about allowFrom —
+      // does not make us openChat/mark-read loop every poll tick.
+      const sticky = ackStickyUnclearedUnread(
+        chatId,
+        chat,
+        stickyUnreadAck,
+        emptyUnreadBackoff,
+      );
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] ${chatId}: ignoring sticky unread after catch-up (unreadCount=${chat.unreadCount}, tip=${sticky.tip}, openim=${isOpenImChat(chatId)}); badge kept; backoff=${sticky.backoffMs}ms`,
+      );
     }
     // Don't update lastSeenId — if session.db reports a newer message
     // (via lastMsgLocalId) that hasn't appeared in message_N.db yet,
@@ -1250,9 +1279,17 @@ async function processUnreadChat(
     return "skipped";
   }
 
-  // Open after the durable read-only scan, so clearing unreads cannot erase the
-  // only signal telling us that older unread pages still need to be fetched.
-  if (!isNewsappChat(chat)) await openChatIfNeeded();
+  // Open (and clear unreads) only when at least one inbound row would pass
+  // allowFrom. Denied senders keep their badge; we tip-ack them later instead
+  // of asking WeChat to mark-read a chat OpenClaw will not answer.
+  const anyAllowlistedInbound = newMessages.some((msg) => {
+    if (msg.isSelf) return false;
+    if (shouldBypassNewsappAuthorization(chat)) return true;
+    const isGroup = chatId.includes("@chatroom");
+    const senderId = msg.sender ?? chatId;
+    return resolveWeChatInboundAccessDecision({ isGroup, senderId, policy }).allowed;
+  });
+  if (anyAllowlistedInbound && !isNewsappChat(chat)) await openChatIfNeeded();
 
   const catchUpLimits = {
     maxMessages: liveAccount.catchUpMaxMessages,
@@ -1482,5 +1519,19 @@ async function processUnreadChat(
 
   const maxId = Math.max(...newMessages.map((m) => m.localId));
   advanceLastSeen(newMessages.filter((message) => message.localId <= maxId));
+  // Policy-denied / non-dispatchable window: keep the badge, tip-ack so the
+  // unread poll does not spin. agent-server still reports unreadCount>0 because
+  // it has no allowFrom; that is expected.
+  if (chat.unreadCount > 0 && !isNewsappChat(chat)) {
+    const sticky = ackStickyUnclearedUnread(
+      chatId,
+      chat,
+      stickyUnreadAck,
+      emptyUnreadBackoff,
+    );
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] ${chatId}: ignoring sticky unread after filtered window (tip=${sticky.tip}, openim=${isOpenImChat(chatId)}); badge kept; backoff=${sticky.backoffMs}ms`,
+    );
+  }
   return "skipped";
 }
