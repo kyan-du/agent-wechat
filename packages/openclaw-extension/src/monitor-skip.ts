@@ -83,9 +83,48 @@ export function applyEmptyUnreadSkip(
 
 /**
  * Cursor already caught up, but WeChat still reports unreadCount>0 after openChat
- * (common for @openim / policy-blocked DMs whose badge will not clear). Back off
- * so the monitor does not openChat-loop every poll tick.
+ * (common for @openim enterprise DMs whose badge will not clear via UI).
+ *
+ * Prefer tip-ack over pure time backoff: once we have opened/attempted mark-read
+ * for this conversation tip, treat it as logically read until lastMsgLocalId
+ * advances. Time backoff remains a short guard against same-tick reopen storms.
  */
+export type StickyUnreadAck = Map<string, string>;
+
+export function stickyUnreadTip(chat: {
+  lastMsgLocalId?: number | null;
+  unreadCount?: number | null;
+}): string {
+  return `${chat.lastMsgLocalId ?? ""}:${chat.unreadCount ?? 0}`;
+}
+
+export function isStickyUnclearedAcked(
+  chat: { username?: string; id: string; lastMsgLocalId?: number | null; unreadCount?: number | null },
+  acked: StickyUnreadAck,
+): boolean {
+  const chatId = chat.username ?? chat.id;
+  return acked.get(chatId) === stickyUnreadTip(chat);
+}
+
+export function ackStickyUnclearedUnread(
+  chatId: string,
+  chat: { lastMsgLocalId?: number | null; unreadCount?: number | null },
+  acked: StickyUnreadAck,
+  backoff: EmptyUnreadBackoff,
+  now = Date.now(),
+): { tip: string; backoffMs: number } {
+  const tip = stickyUnreadTip(chat);
+  acked.set(chatId, tip);
+  const retryCount = (backoff.get(chatId)?.retryCount ?? 0) + 1;
+  const backoffMs = Math.min(
+    EMPTY_UNREAD_BACKOFF_MAX_MS,
+    EMPTY_UNREAD_BACKOFF_MS * 2 ** Math.min(retryCount - 1, 6),
+  );
+  backoff.set(chatId, { nextRetryAt: now + backoffMs, retryCount });
+  return { tip, backoffMs };
+}
+
+/** @deprecated Use ackStickyUnclearedUnread — kept name as thin wrapper for call sites. */
 export function applyStickyUnclearedUnread(
   chatId: string,
   backoff: EmptyUnreadBackoff,
@@ -98,4 +137,8 @@ export function applyStickyUnclearedUnread(
   );
   backoff.set(chatId, { nextRetryAt: now + backoffMs, retryCount });
   return { backoffMs };
+}
+
+export function isOpenImChat(chatId: string): boolean {
+  return chatId.includes("@openim");
 }

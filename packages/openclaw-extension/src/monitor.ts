@@ -61,10 +61,13 @@ import {
 } from "./newsapp.js";
 import {
   applyEmptyUnreadSkip,
-  applyStickyUnclearedUnread,
+  ackStickyUnclearedUnread,
   isEmptyUnreadBackoffActive,
   isOfficialAccount,
+  isOpenImChat,
+  isStickyUnclearedAcked,
   type EmptyUnreadBackoff,
+  type StickyUnreadAck,
 } from "./monitor-skip.js";
 
 // History context markers (match openclaw's built-in markers)
@@ -158,6 +161,8 @@ export async function startWeChatMonitor(
   trimPendingResetRetries(retryState);
   // Sticky system-feed unread counters must not cause a listMessages call every tick.
   const newsappHandled = new Map<string, string>();
+  // Enterprise (@openim) badges often refuse to clear; tip-ack treats them as logically read.
+  const stickyUnreadAck: StickyUnreadAck = new Map();
 
   // Buffer non-mentioned group messages for catch-up context
   const groupHistory = new Map<string, ProcessedMessage[]>();
@@ -279,6 +284,7 @@ export async function startWeChatMonitor(
       const unreadChats = chats.filter((c) => {
         const chatId = c.username ?? c.id;
         if (isEmptyUnreadBackoffActive(emptyUnreadBackoff, chatId)) return false;
+        if (isStickyUnclearedAcked(c, stickyUnreadAck)) return false;
         if (c.unreadCount <= 0) return false;
         if (isNewsappChat(c)) return true;
         return !isOfficialAccount(chatId);
@@ -297,9 +303,12 @@ export async function startWeChatMonitor(
         chats,
         retryState,
         Date.now(),
-        (chat) => !isNewsappChat(chat) ||
-          newsappHandled.get(chat.username ?? chat.id) !==
-            `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`,
+        (chat) => {
+          if (isStickyUnclearedAcked(chat, stickyUnreadAck)) return false;
+          if (!isNewsappChat(chat)) return true;
+          return newsappHandled.get(chat.username ?? chat.id) !==
+            `${chat.lastMsgLocalId ?? ""}:${chat.lastMessagePreview?.trim() ?? ""}`;
+        },
       );
       for (const chatId of chatsToProcess.keys()) {
         if (
@@ -336,6 +345,7 @@ export async function startWeChatMonitor(
             inboundLedger,
             mediaPipeline,
             emptyUnreadBackoff,
+            stickyUnreadAck,
             account,
             cfg,
             log,
@@ -391,6 +401,7 @@ export async function startWeChatMonitor(
           inboundLedger,
           mediaPipeline,
           emptyUnreadBackoff,
+          stickyUnreadAck,
           account,
           cfg,
           log,
@@ -1054,6 +1065,7 @@ async function processUnreadChat(
   inboundLedger: InboundEventLedger,
   mediaPipeline: MediaPipeline,
   emptyUnreadBackoff: EmptyUnreadBackoff,
+  stickyUnreadAck: StickyUnreadAck,
   account: ResolvedWeChatAccount,
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
@@ -1249,11 +1261,28 @@ async function processUnreadChat(
     }
     if (chat.unreadCount > 0 && !isNewsappChat(chat)) {
       await openChatIfNeeded();
-      // openChat may report success while the badge stays (notably @openim /
-      // allowlist-blocked DMs). Back off instead of openChat-looping every tick.
-      const sticky = applyStickyUnclearedUnread(chatId, emptyUnreadBackoff);
+      // Prefer explicit mark-read (verifies badge). openChat alone often leaves
+      // @openim enterprise badges stuck even when the UI open succeeds.
+      try {
+        const marked = await client.markChatRead(chatId);
+        if (!marked.ok) {
+          log?.info?.(
+            `[wechat:${liveAccount.accountId}] ${chatId}: markChatRead not cleared after catch-up code=${marked.errorCode ?? "unknown"}`,
+          );
+        }
+      } catch (err) {
+        log?.info?.(
+          `[wechat:${liveAccount.accountId}] ${chatId}: markChatRead failed after catch-up: ${err}`,
+        );
+      }
+      const sticky = ackStickyUnclearedUnread(
+        chatId,
+        chat,
+        stickyUnreadAck,
+        emptyUnreadBackoff,
+      );
       log?.info?.(
-        `[wechat:${liveAccount.accountId}] ${chatId}: sticky uncleared unread after catch-up (unreadCount=${chat.unreadCount}); backoff=${sticky.backoffMs}ms`,
+        `[wechat:${liveAccount.accountId}] ${chatId}: logically read sticky unread after catch-up (unreadCount=${chat.unreadCount}, tip=${sticky.tip}, openim=${isOpenImChat(chatId)}); backoff=${sticky.backoffMs}ms`,
       );
     }
     // Don't update lastSeenId — if session.db reports a newer message
@@ -1497,9 +1526,26 @@ async function processUnreadChat(
   // Policy-filtered / non-dispatchable windows still leave badges on some chat
   // types (@openim). Avoid re-opening every subsequent tick.
   if (chat.unreadCount > 0 && !isNewsappChat(chat) && opened) {
-    const sticky = applyStickyUnclearedUnread(chatId, emptyUnreadBackoff);
+    try {
+      const marked = await client.markChatRead(chatId);
+      if (!marked.ok) {
+        log?.info?.(
+          `[wechat:${liveAccount.accountId}] ${chatId}: markChatRead not cleared after filtered window code=${marked.errorCode ?? "unknown"}`,
+        );
+      }
+    } catch (err) {
+      log?.info?.(
+        `[wechat:${liveAccount.accountId}] ${chatId}: markChatRead failed after filtered window: ${err}`,
+      );
+    }
+    const sticky = ackStickyUnclearedUnread(
+      chatId,
+      chat,
+      stickyUnreadAck,
+      emptyUnreadBackoff,
+    );
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] ${chatId}: sticky uncleared unread after filtered window; backoff=${sticky.backoffMs}ms`,
+      `[wechat:${liveAccount.accountId}] ${chatId}: logically read sticky unread after filtered window (tip=${sticky.tip}, openim=${isOpenImChat(chatId)}); backoff=${sticky.backoffMs}ms`,
     );
   }
   return "skipped";
