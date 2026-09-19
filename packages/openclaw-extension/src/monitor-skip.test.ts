@@ -107,7 +107,8 @@ test("monitor wires official/system skip and empty unread backoff", () => {
   assert.match(source, /isNewsappChat\(c\)/);
   assert.match(source, /applyEmptyUnreadSkip\(chatId/);
   assert.match(source, /ackStickyUnclearedUnread\(/);
-  assert.match(source, /markChatRead\(/);
+  assert.match(source, /anyAllowlistedInbound/);
+  assert.match(source, /badge kept/);
   assert.match(source, /actionableUnread/);
   assert.doesNotMatch(source, /function isOfficialAccount/);
 });
