@@ -1073,6 +1073,273 @@ fn get_file_attachment(
     pending_with("file", ext, filename, "FILE_NOT_DOWNLOADED")
 }
 
+
+fn looks_like_image(data: &[u8]) -> bool {
+    matches!(detect_image_format(data).0, "jpeg" | "png" | "gif" | "webp")
+}
+
+fn nested_cdn_urls(item: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for key in [
+        "cdnbigimgurl",
+        "cdnmidimgurl",
+        "cdnthumburl",
+        "cdnurl",
+        "dataurl",
+    ] {
+        if let Some(url) = extract_xml_tag(item, key).or_else(|| xml_attr(item, key)) {
+            let url = url.replace("&amp;", "&");
+            if url.starts_with("http://") || url.starts_with("https://") {
+                if !urls.iter().any(|existing| existing == &url) {
+                    urls.push(url);
+                }
+            }
+        }
+    }
+    urls
+}
+
+fn nested_item_aeskey(item: &str) -> Option<String> {
+    extract_xml_tag(item, "aeskey")
+        .or_else(|| xml_attr(item, "aeskey"))
+        .or_else(|| extract_xml_tag(item, "cdnthumbaeskey"))
+        .or_else(|| xml_attr(item, "cdnthumbaeskey"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// WeChat CDN host suffixes (label-boundary match only).
+const WECHAT_CDN_HOST_SUFFIXES: &[&str] = &[
+    "qpic.cn",
+    "qlogo.cn",
+    "weixin.qq.com",
+    "wx.qq.com",
+];
+
+fn host_matches_label_suffix(host: &str, suffix: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_end_matches('.').to_ascii_lowercase();
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+fn is_ipv4_literal(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.len() <= 3
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u8>().is_ok()
+    })
+}
+
+fn is_ipv6_literal(host: &str) -> bool {
+    // Bracketed form is stripped by the caller; accept compressed IPv6 heuristically.
+    let h = host.trim();
+    if h.is_empty() || !h.contains(':') {
+        return false;
+    }
+    h.bytes()
+        .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+fn parse_https_authority_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.strip_prefix("https://")?;
+    // Reject other schemes / missing host.
+    if rest.is_empty() {
+        return None;
+    }
+    let authority_end = rest
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        // No userinfo allowed.
+        return None;
+    }
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        let end = inner.find(']')?;
+        inner[..end].to_string()
+    } else {
+        // host or host:port
+        authority.split(':').next()?.to_string()
+    };
+    let host = host.trim().trim_end_matches('.').to_string();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Gate for nested CDN fetches: HTTPS-only, allowlisted WeChat CDN hosts,
+/// label-boundary suffix match, no userinfo, no literal IP hosts.
+fn is_allowed_wechat_cdn_url(url: &str) -> bool {
+    let Some(host) = parse_https_authority_host(url) else {
+        return false;
+    };
+    // Reject literal IPs entirely (loopback / private / link-local / metadata / public).
+    if is_ipv4_literal(&host) || is_ipv6_literal(&host) {
+        return false;
+    }
+    WECHAT_CDN_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host_matches_label_suffix(&host, suffix))
+}
+
+fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
+    // Hard gate before spawning curl — never fetch non-allowlisted URLs.
+    if !is_allowed_wechat_cdn_url(url) {
+        return None;
+    }
+    let output = Command::new("curl")
+        .args([
+            // No -L: do not follow redirects (avoids hopping off the allowlist).
+            "-fsS",
+            "--max-time",
+            "25",
+            "--connect-timeout",
+            "8",
+            "-A",
+            "Mozilla/5.0",
+            url,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    // Cap nested CDN payloads.
+    if output.stdout.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+/// Decrypt WeChat CDN image bytes with the XML `aeskey` when the body is not already an image.
+fn decrypt_cdn_image_bytes(data: &[u8], aeskey: &str) -> Option<Vec<u8>> {
+    if looks_like_image(data) {
+        return Some(data.to_vec());
+    }
+    let key_hex = if aeskey.len() == 32 && aeskey.bytes().all(|b| b.is_ascii_hexdigit()) {
+        aeskey.to_ascii_lowercase()
+    } else if aeskey.len() >= 16 {
+        // Session-style keys: first 16 ASCII bytes, hex-encoded for openssl -K.
+        hex_encode(&aeskey.as_bytes()[..16])
+    } else {
+        return None;
+    };
+    let mut child = Command::new("openssl")
+        .args(["enc", "-d", "-aes-128-ecb", "-K", &key_hex])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    use std::io::Write;
+    child.stdin.take()?.write_all(data).ok()?;
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    if looks_like_image(&output.stdout) {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
+    let md5 = md5.to_ascii_lowercase();
+    for base in &account_base_paths(account_dir) {
+        let attach = Path::new(base).join("msg/attach");
+        if !attach.exists() {
+            continue;
+        }
+        // Shallow walk: attach/<chat>/<yyyy-mm>/Img/<hash>.dat
+        let Ok(chat_dirs) = fs::read_dir(&attach) else {
+            continue;
+        };
+        for chat_entry in chat_dirs.flatten() {
+            let Ok(month_dirs) = fs::read_dir(chat_entry.path()) else {
+                continue;
+            };
+            for month_entry in month_dirs.flatten() {
+                let img_dir = month_entry.path().join("Img");
+                if !img_dir.is_dir() {
+                    continue;
+                }
+                for suffix in ["", "_t"] {
+                    let candidate = img_dir.join(format!("{md5}{suffix}.dat"));
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn media_from_image_bytes(
+    data: Vec<u8>,
+    local_id: i64,
+    index: usize,
+    source: &str,
+) -> Option<MediaResult> {
+    if !looks_like_image(&data) {
+        return None;
+    }
+    let (format, ext) = detect_image_format(&data);
+    Some(MediaResult {
+        media_type: "image".into(),
+        data: Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &data,
+        )),
+        url: None,
+        format: format.into(),
+        filename: format!("chat_history_{local_id}_{index}.{ext}"),
+        source: Some(source.into()),
+        error_code: None,
+        items: Vec::new(),
+    })
+}
+
+fn download_nested_cdn_image(item: &str, local_id: i64, index: usize) -> Option<MediaResult> {
+    let aeskey = nested_item_aeskey(item);
+    for url in nested_cdn_urls(item) {
+        let Some(raw) = http_get_bytes(&url) else {
+            continue;
+        };
+        let decoded = if let Some(key) = aeskey.as_deref() {
+            decrypt_cdn_image_bytes(&raw, key).or_else(|| {
+                if looks_like_image(&raw) {
+                    Some(raw)
+                } else {
+                    None
+                }
+            })
+        } else if looks_like_image(&raw) {
+            Some(raw)
+        } else {
+            None
+        };
+        if let Some(data) = decoded {
+            tracing::info!(
+                "[media:nested-cdn] downloaded nested image index={} bytes={}",
+                index,
+                data.len()
+            );
+            return media_from_image_bytes(data, local_id, index, "cdn");
+        }
+    }
+    None
+}
+
 fn get_nested_image(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1081,22 +1348,38 @@ fn get_nested_image(
     index: usize,
     image_keys: Option<&ImageKeys>,
 ) -> Option<MediaResult> {
-    let md5 = nested_image_md5(item)?;
-    let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
-    let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)?;
-    let image_keys = image_keys?;
-    let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
-    if result.data.is_none() {
-        return None;
+    let md5 = nested_image_md5(item);
+
+    // 1) Local .dat via hardlink / filename match + session image keys.
+    if let (Some(md5), Some(image_keys)) = (md5.as_ref(), image_keys) {
+        let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
+        let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
+            .or_else(|| find_dat_via_md5_filename(account_dir, md5));
+        if let Some(dat_path) = dat_path {
+            let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+            if result.data.is_some() {
+                let ext = Path::new(&result.filename)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("jpg")
+                    .to_string();
+                result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+                result.source = Some("local-dat".into());
+                if let Some(media) = media_with_data(result) {
+                    return Some(media);
+                }
+            }
+        }
     }
-    let ext = Path::new(&result.filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("jpg")
-        .to_string();
-    result.filename = format!("chat_history_{local_id}_{index}.{ext}");
-    media_with_data(result)
+
+    // 2) CDN fallback: download mid/big/thumb URL; decrypt with dataitem aeskey when needed.
+    if let Some(media) = download_nested_cdn_image(item, local_id, index) {
+        return Some(media);
+    }
+
+    None
 }
+
 
 fn get_nested_file(
     account_dir: &str,
@@ -1447,6 +1730,83 @@ mod tests {
             1700000000
         );
     }
+
+
+    #[test]
+    fn nested_cdn_urls_prefer_big_then_mid_then_thumb() {
+        let item = concat!(
+            r#"<dataitem datatype="2">"#,
+            r#"<cdnthumburl>https://example.test/thumb</cdnthumburl>"#,
+            r#"<cdnmidimgurl>https://example.test/mid</cdnmidimgurl>"#,
+            r#"<cdnbigimgurl>https://example.test/big</cdnbigimgurl>"#,
+            r#"<aeskey>0123456789abcdef0123456789abcdef</aeskey>"#,
+            r#"</dataitem>"#,
+        );
+        assert_eq!(
+            nested_cdn_urls(item),
+            vec![
+                "https://example.test/big".to_string(),
+                "https://example.test/mid".to_string(),
+                "https://example.test/thumb".to_string(),
+            ]
+        );
+        assert_eq!(
+            nested_item_aeskey(item).as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn decrypt_cdn_image_bytes_passes_through_plain_jpeg() {
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let out = decrypt_cdn_image_bytes(&jpeg, "0123456789abcdef0123456789abcdef").unwrap();
+        assert_eq!(out, jpeg);
+    }
+
+    #[test]
+    fn media_from_image_bytes_rejects_non_image() {
+        assert!(media_from_image_bytes(vec![0, 1, 2, 3], 1, 0, "cdn").is_none());
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let media = media_from_image_bytes(jpeg, 9, 2, "cdn").unwrap();
+        assert_eq!(media.media_type, "image");
+        assert_eq!(media.source.as_deref(), Some("cdn"));
+        assert_eq!(media.filename, "chat_history_9_2.jpg");
+        assert!(media.data.is_some());
+    }
+
+
+    #[test]
+    fn wechat_cdn_url_allowlist_https_and_label_boundary() {
+        assert!(is_allowed_wechat_cdn_url("https://wx.qpic.cn/path"));
+        assert!(is_allowed_wechat_cdn_url("https://mmbiz.qpic.cn/mmbiz_png/x/0"));
+        assert!(is_allowed_wechat_cdn_url(
+            "https://szminorshort.weixin.qq.com/download"
+        ));
+        assert!(is_allowed_wechat_cdn_url("https://short.wx.qq.com/cdn"));
+        // Reject http, evil hosts, boundary bypass, loopback/metadata.
+        assert!(!is_allowed_wechat_cdn_url("http://wx.qpic.cn/path"));
+        assert!(!is_allowed_wechat_cdn_url("https://evil.test/"));
+        assert!(!is_allowed_wechat_cdn_url("https://evilqpic.cn/"));
+        assert!(!is_allowed_wechat_cdn_url("https://not-qpic.cn.evil.test/"));
+        assert!(!is_allowed_wechat_cdn_url("http://127.0.0.1/"));
+        assert!(!is_allowed_wechat_cdn_url("http://169.254.169.254/"));
+        assert!(!is_allowed_wechat_cdn_url("https://127.0.0.1/"));
+        assert!(!is_allowed_wechat_cdn_url("https://169.254.169.254/latest/meta"));
+        assert!(!is_allowed_wechat_cdn_url("https://[::1]/"));
+        assert!(!is_allowed_wechat_cdn_url("https://user@wx.qpic.cn/path"));
+    }
+
+    #[test]
+    fn http_get_bytes_returns_none_for_disallowed_urls_without_network() {
+        // Gate returns before Command::new("curl"), so these need no network/mock.
+        assert!(http_get_bytes("http://127.0.0.1/").is_none());
+        assert!(http_get_bytes("http://169.254.169.254/").is_none());
+        assert!(http_get_bytes("https://evil.test/").is_none());
+        assert!(http_get_bytes("https://evilqpic.cn/").is_none());
+        assert!(http_get_bytes("http://wx.qpic.cn/path").is_none());
+    }
+
+
 
     #[test]
     fn generic_unsupported_media_still_sets_error_code() {
