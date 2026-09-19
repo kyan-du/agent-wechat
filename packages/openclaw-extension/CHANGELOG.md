@@ -1,5 +1,7 @@
 # @agent-wechat/wechat
 
+## 0.14.3
+
 ## 0.14.2
 
 ### Patch Changes
