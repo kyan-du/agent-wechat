@@ -76,6 +76,36 @@ fn xml_unescape(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+/// Unwrap a recorditem payload that is entirely wrapped in one CDATA section.
+/// Inner CDATA (for example inside `<datadesc>`) is left for tag extractors.
+fn unwrap_cdata_payload(value: &str) -> &str {
+    let trimmed = value.trim();
+    if let Some(rest) = trimmed.strip_prefix("<![CDATA[") {
+        if let Some(inner) = rest.strip_suffix("]]>") {
+            return inner;
+        }
+    }
+    trimmed
+}
+
+fn recorditem_inner<'a>(xml: &'a str, start: usize, end: usize) -> Option<&'a str> {
+    let open_end = xml.get(start..end)?.find('>')? + start + 1;
+    let close = "</recorditem>";
+    if end < close.len() {
+        return None;
+    }
+    let inner_end = end - close.len();
+    if open_end > inner_end {
+        return None;
+    }
+    Some(&xml[open_end..inner_end])
+}
+
+fn decode_recorditem_inner(xml: &str, start: usize, end: usize) -> Option<String> {
+    let inner = recorditem_inner(xml, start, end)?;
+    Some(xml_unescape(unwrap_cdata_payload(inner)))
+}
+
 #[derive(Clone, Copy)]
 enum ForwardTag {
     Open { self_closing: bool },
@@ -329,15 +359,16 @@ fn parse_forward_nodes(
             extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
         let nested = item.find("<recorditem").and_then(|nested_start| {
             let nested_end = find_named_element_end(item, nested_start, "recorditem")?;
-            Some(xml_unescape(
-                &item[nested_start + "<recorditem>".len()..nested_end - "</recorditem>".len()],
-            ))
+            decode_recorditem_inner(item, nested_start, nested_end)
         });
         let (children, child_truncated) = nested
             .map(|nested| parse_forward_nodes(&nested, depth + 1, budget))
             .unwrap_or_default();
-        let message_type =
-            extract_xml_tag(item, "type").and_then(|value| value.parse::<i32>().ok());
+        let message_type = extract_xml_tag(item, "type")
+            .and_then(|value| value.parse::<i32>().ok())
+            .or_else(|| {
+                extract_xml_attr(item, "datatype").and_then(|value| value.parse::<i32>().ok())
+            });
         let node = ForwardedMessageNode {
             sender: extract_xml_tag(item, "sourcename")
                 .or_else(|| extract_xml_tag(item, "displayname")),
@@ -372,13 +403,15 @@ pub(crate) fn collect_forward_dataitems(content: &str) -> Vec<String> {
     let Some(record_end) = find_named_element_end(content, record_start, "recorditem") else {
         return Vec::new();
     };
-    let record = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
+    let Some(record) = decode_recorditem_inner(content, record_start, record_end) else {
+        return Vec::new();
+    };
     if record.len() > FORWARD_MAX_XML_BYTES {
         return Vec::new();
     }
     let mut budget = FORWARD_MAX_NODES;
     let mut items = Vec::new();
-    collect_dataitem_xml(&xml_unescape(record), 0, &mut budget, &mut items);
+    collect_dataitem_xml(&record, 0, &mut budget, &mut items);
     items
 }
 
@@ -411,10 +444,9 @@ fn collect_dataitem_xml(xml: &str, depth: usize, budget: &mut usize, out: &mut V
         *budget = budget.saturating_sub(1);
         if let Some(nested_start) = item.find("<recorditem") {
             if let Some(nested_end) = find_named_element_end(item, nested_start, "recorditem") {
-                let nested = xml_unescape(
-                    &item[nested_start + "<recorditem>".len()..nested_end - "</recorditem>".len()],
-                );
-                collect_dataitem_xml(&nested, depth + 1, budget, out);
+                if let Some(nested) = decode_recorditem_inner(item, nested_start, nested_end) {
+                    collect_dataitem_xml(&nested, depth + 1, budget, out);
+                }
             }
         }
         cursor = end;
@@ -428,7 +460,7 @@ fn parse_forwarded_tree(content: &str) -> Option<ForwardedMessageTree> {
     }
     let record_start = content.find("<recorditem")?;
     let record_end = find_named_element_end(content, record_start, "recorditem")?;
-    let record = &content[record_start + "<recorditem>".len()..record_end - "</recorditem>".len()];
+    let record = decode_recorditem_inner(content, record_start, record_end)?;
     if record.len() > FORWARD_MAX_XML_BYTES {
         return Some(ForwardedMessageTree {
             schema_version: 1,
@@ -438,7 +470,7 @@ fn parse_forwarded_tree(content: &str) -> Option<ForwardedMessageTree> {
         });
     }
     let mut budget = FORWARD_MAX_NODES;
-    let (nodes, truncated) = parse_forward_nodes(&xml_unescape(&record), 0, &mut budget);
+    let (nodes, truncated) = parse_forward_nodes(&record, 0, &mut budget);
     Some(ForwardedMessageTree {
         schema_version: 1,
         title: extract_xml_tag(content, "title"),
@@ -485,9 +517,11 @@ fn clean_content(content: &str, local_type: i64) -> String {
                         if let Some(record_end) =
                             find_named_element_end(content, record_start, "recorditem")
                         {
-                            let record_raw = &content[record_start + "<recorditem>".len()
-                                ..record_end - "</recorditem>".len()];
-                            let record = xml_unescape(record_raw);
+                            let Some(record) =
+                                decode_recorditem_inner(content, record_start, record_end)
+                            else {
+                                return title;
+                            };
                             // Extract each <dataitem> block
                             let mut search_from = 0usize;
                             while search_from < record.len() {
@@ -1024,6 +1058,50 @@ mod merged_forward_tests {
         let tree = parse_forwarded_tree(&xml).expect("tree");
         assert!(tree.truncated);
         assert_eq!(tree.nodes.len(), FORWARD_MAX_NODES);
+    }
+
+    #[test]
+    fn cdata_wrapped_recorditem_parses_image_only_items() {
+        let xml = concat!(
+            r#"<msg><appmsg><title>Shared history</title><type>19</type><recorditem><![CDATA["#,
+            r#"<recordinfo>"#,
+            r#"<dataitem datatype="2" dataid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">"#,
+            r#"<sourcename>Alice</sourcename>"#,
+            r#"<fullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</fullmd5>"#,
+            r#"<cdnthumburl>https://example.test/thumb-a</cdnthumburl>"#,
+            r#"</dataitem>"#,
+            r#"<dataitem datatype="2" dataid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">"#,
+            r#"<sourcename>Bob</sourcename>"#,
+            r#"<fullmd5>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</fullmd5>"#,
+            r#"<cdnthumburl>https://example.test/thumb-b</cdnthumburl>"#,
+            r#"</dataitem>"#,
+            r#"<dataitem datatype="2" dataid="cccccccccccccccccccccccccccccccc">"#,
+            r#"<sourcename>Carol</sourcename>"#,
+            r#"<fullmd5>cccccccccccccccccccccccccccccccc</fullmd5>"#,
+            r#"<cdnthumburl>https://example.test/thumb-c</cdnthumburl>"#,
+            r#"</dataitem>"#,
+            r#"</recordinfo>"#,
+            r#"]]></recorditem></appmsg></msg>"#,
+        );
+        assert_eq!(
+            clean_content(xml, 49),
+            "[Chat History] Shared history\nAlice: [media]\nBob: [media]\nCarol: [media]"
+        );
+        let tree = parse_forwarded_tree(xml).expect("tree");
+        assert_eq!(tree.title.as_deref(), Some("Shared history"));
+        assert!(!tree.truncated);
+        assert_eq!(tree.nodes.len(), 3);
+        assert_eq!(tree.nodes[0].sender.as_deref(), Some("Alice"));
+        assert_eq!(tree.nodes[0].message_type, Some(2));
+        assert_eq!(tree.nodes[0].text.as_deref(), None);
+        assert_eq!(
+            tree.nodes[0].media.as_deref(),
+            Some("https://example.test/thumb-a")
+        );
+        let items = collect_forward_dataitems(xml);
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|item| item.contains(r#"datatype="2""#)));
+        assert!(items[0].contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     }
 
     #[test]
