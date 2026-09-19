@@ -576,6 +576,34 @@ fn clean_content(content: &str, local_type: i64) -> String {
     }
 }
 
+
+/// Decode the XML payload stored in `<refermsg><content>…</content></refermsg>`.
+/// WeChat usually HTML-entity-escapes the inner message (and may wrap CDATA).
+pub(crate) fn refermsg_referred_xml(content: &str) -> Option<String> {
+    if !content.contains("<refermsg>") {
+        return None;
+    }
+    let rm_start = content.find("<refermsg>")?;
+    let rm_end = content.find("</refermsg>")? + "</refermsg>".len();
+    let refermsg = &content[rm_start..rm_end];
+    let ref_content = extract_xml_tag(refermsg, "content")?;
+    let unescaped = xml_unescape(&ref_content);
+    let unescaped = unwrap_cdata_payload(&unescaped).to_string();
+    if unescaped.is_empty() {
+        None
+    } else {
+        Some(unescaped)
+    }
+}
+
+/// True when XML looks like a merged-forward / 聊天记录 (appmsg type 19) card.
+pub(crate) fn is_merged_forward_xml(content: &str) -> bool {
+    if content.contains("<recorditem") {
+        return true;
+    }
+    extract_xml_tag(content, "type").and_then(|value| value.parse::<i32>().ok()) == Some(19)
+}
+
 /// Extract reply info from type 49 (appmsg) messages with <refermsg>.
 fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
     let base = msg_type & 0x7FFFFFFF;
@@ -588,23 +616,19 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
     let refermsg = &content[rm_start..rm_end];
 
     let sender = extract_xml_tag(refermsg, "displayname");
-    let ref_content = extract_xml_tag(refermsg, "content").unwrap_or_default();
+    let unescaped = refermsg_referred_xml(content).unwrap_or_default();
 
-    // The referred content may be XML-escaped — unescape first
-    let unescaped = ref_content
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"");
-
-    let media_error_code = if unescaped.contains("<img") {
+    // Quoted plain images still cannot be re-fetched from the refermsg snapshot.
+    let media_error_code = if unescaped.contains("<img") && !is_merged_forward_xml(&unescaped) {
         Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE".to_string())
     } else {
         None
     };
 
-    // The referred content may itself be XML — clean it to a short text
-    let clean = if unescaped.contains("<msg>") {
+    // Prefer chat-history summary; fall back to title or raw text.
+    let clean = if is_merged_forward_xml(&unescaped) {
+        clean_content(&unescaped, 49)
+    } else if unescaped.contains("<msg>") {
         extract_xml_tag(&unescaped, "title").unwrap_or(unescaped)
     } else {
         unescaped
@@ -907,7 +931,17 @@ fn list_messages_window(
             };
 
             // Extract structured forwarded history before cleaning its display summary.
-            let forwarded = parse_forwarded_tree(&body);
+            // Quote/reply messages keep the original card inside <refermsg><content>.
+            let mut forwarded = parse_forwarded_tree(&body);
+            if forwarded.as_ref().is_none_or(|tree| tree.nodes.is_empty()) {
+                if let Some(referred) = refermsg_referred_xml(&body) {
+                    if let Some(tree) = parse_forwarded_tree(&referred) {
+                        if !tree.nodes.is_empty() || tree.title.is_some() {
+                            forwarded = Some(tree);
+                        }
+                    }
+                }
+            }
             let reply = extract_reply_info(&body, msg_type);
 
             // Clean content for display (replace XML with summaries)
@@ -1102,6 +1136,78 @@ mod merged_forward_tests {
         assert_eq!(items.len(), 3);
         assert!(items.iter().all(|item| item.contains(r#"datatype="2""#)));
         assert!(items[0].contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn quoted_merged_forward_parses_cdata_recorditem() {
+        let inner = concat!(
+            r#"<msg><appmsg><title>Shared history</title><type>19</type><recorditem><![CDATA["#,
+            r#"<recordinfo>"#,
+            r#"<dataitem datatype="2" dataid="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa">"#,
+            r#"<sourcename>Alice</sourcename>"#,
+            r#"<fullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</fullmd5>"#,
+            r#"</dataitem>"#,
+            r#"<dataitem datatype="2" dataid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb">"#,
+            r#"<sourcename>Bob</sourcename>"#,
+            r#"<fullmd5>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</fullmd5>"#,
+            r#"</dataitem>"#,
+            r#"</recordinfo>"#,
+            r#"]]></recorditem></appmsg></msg>"#,
+        );
+        let escaped_inner = inner
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let xml = format!(
+            concat!(
+                r#"<msg><appmsg><title>quote</title><type>57</type><refermsg>"#,
+                r#"<displayname>Du Wan</displayname><content>{escaped_inner}</content>"#,
+                r#"</refermsg></appmsg></msg>"#,
+            ),
+            escaped_inner = escaped_inner
+        );
+        assert!(parse_forwarded_tree(&xml).is_none());
+        let referred = refermsg_referred_xml(&xml).expect("referred");
+        assert!(is_merged_forward_xml(&referred));
+        let tree = parse_forwarded_tree(&referred).expect("tree");
+        assert_eq!(tree.title.as_deref(), Some("Shared history"));
+        assert_eq!(tree.nodes.len(), 2);
+        assert_eq!(tree.nodes[0].sender.as_deref(), Some("Alice"));
+        assert_eq!(tree.nodes[0].message_type, Some(2));
+        assert_eq!(collect_forward_dataitems(&referred).len(), 2);
+        let reply = extract_reply_info(&xml, 49).expect("reply");
+        assert_eq!(reply.sender.as_deref(), Some("Du Wan"));
+        assert!(reply.content.contains("[Chat History] Shared history"));
+        assert!(reply.content.contains("Alice: [media]"));
+        assert!(reply.media_error_code.is_none());
+    }
+
+    #[test]
+    fn quoted_merged_forward_parses_entity_escaped_recorditem() {
+        let referred = concat!(
+            r#"<msg><appmsg><title>Team history</title><type>19</type><recorditem>"#,
+            r#"&lt;recordinfo&gt;&lt;dataitem&gt;&lt;sourcename&gt;Alice&lt;/sourcename&gt;"#,
+            r#"&lt;datatitle&gt;Hello&lt;/datatitle&gt;&lt;/dataitem&gt;&lt;/recordinfo&gt;"#,
+            r#"</recorditem></appmsg></msg>"#,
+        );
+        let escaped_inner = referred
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let xml = format!(
+            concat!(
+                r#"<msg><appmsg><type>57</type><refermsg>"#,
+                r#"<displayname>Alice</displayname><content>{escaped_inner}</content>"#,
+                r#"</refermsg></appmsg></msg>"#,
+            ),
+            escaped_inner = escaped_inner
+        );
+        let payload = refermsg_referred_xml(&xml).expect("referred");
+        let tree = parse_forwarded_tree(&payload).expect("tree");
+        assert_eq!(tree.nodes.len(), 1);
+        assert_eq!(tree.nodes[0].text.as_deref(), Some("Hello"));
     }
 
     #[test]
