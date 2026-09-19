@@ -1108,10 +1108,97 @@ fn nested_item_aeskey(item: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// WeChat CDN host suffixes (label-boundary match only).
+const WECHAT_CDN_HOST_SUFFIXES: &[&str] = &[
+    "qpic.cn",
+    "qlogo.cn",
+    "weixin.qq.com",
+    "wx.qq.com",
+];
+
+fn host_matches_label_suffix(host: &str, suffix: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = suffix.trim_end_matches('.').to_ascii_lowercase();
+    host == suffix || host.ends_with(&format!(".{suffix}"))
+}
+
+fn is_ipv4_literal(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    parts.iter().all(|p| {
+        !p.is_empty()
+            && p.len() <= 3
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u8>().is_ok()
+    })
+}
+
+fn is_ipv6_literal(host: &str) -> bool {
+    // Bracketed form is stripped by the caller; accept compressed IPv6 heuristically.
+    let h = host.trim();
+    if h.is_empty() || !h.contains(':') {
+        return false;
+    }
+    h.bytes()
+        .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.')
+}
+
+fn parse_https_authority_host(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url.strip_prefix("https://")?;
+    // Reject other schemes / missing host.
+    if rest.is_empty() {
+        return None;
+    }
+    let authority_end = rest
+        .find(|c| c == '/' || c == '?' || c == '#')
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        // No userinfo allowed.
+        return None;
+    }
+    let host = if let Some(inner) = authority.strip_prefix('[') {
+        let end = inner.find(']')?;
+        inner[..end].to_string()
+    } else {
+        // host or host:port
+        authority.split(':').next()?.to_string()
+    };
+    let host = host.trim().trim_end_matches('.').to_string();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Gate for nested CDN fetches: HTTPS-only, allowlisted WeChat CDN hosts,
+/// label-boundary suffix match, no userinfo, no literal IP hosts.
+fn is_allowed_wechat_cdn_url(url: &str) -> bool {
+    let Some(host) = parse_https_authority_host(url) else {
+        return false;
+    };
+    // Reject literal IPs entirely (loopback / private / link-local / metadata / public).
+    if is_ipv4_literal(&host) || is_ipv6_literal(&host) {
+        return false;
+    }
+    WECHAT_CDN_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host_matches_label_suffix(&host, suffix))
+}
+
 fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
+    // Hard gate before spawning curl — never fetch non-allowlisted URLs.
+    if !is_allowed_wechat_cdn_url(url) {
+        return None;
+    }
     let output = Command::new("curl")
         .args([
-            "-fsSL",
+            // No -L: do not follow redirects (avoids hopping off the allowlist).
+            "-fsS",
             "--max-time",
             "25",
             "--connect-timeout",
@@ -1686,6 +1773,39 @@ mod tests {
         assert_eq!(media.filename, "chat_history_9_2.jpg");
         assert!(media.data.is_some());
     }
+
+
+    #[test]
+    fn wechat_cdn_url_allowlist_https_and_label_boundary() {
+        assert!(is_allowed_wechat_cdn_url("https://wx.qpic.cn/path"));
+        assert!(is_allowed_wechat_cdn_url("https://mmbiz.qpic.cn/mmbiz_png/x/0"));
+        assert!(is_allowed_wechat_cdn_url(
+            "https://szminorshort.weixin.qq.com/download"
+        ));
+        assert!(is_allowed_wechat_cdn_url("https://short.wx.qq.com/cdn"));
+        // Reject http, evil hosts, boundary bypass, loopback/metadata.
+        assert!(!is_allowed_wechat_cdn_url("http://wx.qpic.cn/path"));
+        assert!(!is_allowed_wechat_cdn_url("https://evil.test/"));
+        assert!(!is_allowed_wechat_cdn_url("https://evilqpic.cn/"));
+        assert!(!is_allowed_wechat_cdn_url("https://not-qpic.cn.evil.test/"));
+        assert!(!is_allowed_wechat_cdn_url("http://127.0.0.1/"));
+        assert!(!is_allowed_wechat_cdn_url("http://169.254.169.254/"));
+        assert!(!is_allowed_wechat_cdn_url("https://127.0.0.1/"));
+        assert!(!is_allowed_wechat_cdn_url("https://169.254.169.254/latest/meta"));
+        assert!(!is_allowed_wechat_cdn_url("https://[::1]/"));
+        assert!(!is_allowed_wechat_cdn_url("https://user@wx.qpic.cn/path"));
+    }
+
+    #[test]
+    fn http_get_bytes_returns_none_for_disallowed_urls_without_network() {
+        // Gate returns before Command::new("curl"), so these need no network/mock.
+        assert!(http_get_bytes("http://127.0.0.1/").is_none());
+        assert!(http_get_bytes("http://169.254.169.254/").is_none());
+        assert!(http_get_bytes("https://evil.test/").is_none());
+        assert!(http_get_bytes("https://evilqpic.cn/").is_none());
+        assert!(http_get_bytes("http://wx.qpic.cn/path").is_none());
+    }
+
 
 
     #[test]
