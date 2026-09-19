@@ -1073,6 +1073,186 @@ fn get_file_attachment(
     pending_with("file", ext, filename, "FILE_NOT_DOWNLOADED")
 }
 
+
+fn looks_like_image(data: &[u8]) -> bool {
+    matches!(detect_image_format(data).0, "jpeg" | "png" | "gif" | "webp")
+}
+
+fn nested_cdn_urls(item: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for key in [
+        "cdnbigimgurl",
+        "cdnmidimgurl",
+        "cdnthumburl",
+        "cdnurl",
+        "dataurl",
+    ] {
+        if let Some(url) = extract_xml_tag(item, key).or_else(|| xml_attr(item, key)) {
+            let url = url.replace("&amp;", "&");
+            if url.starts_with("http://") || url.starts_with("https://") {
+                if !urls.iter().any(|existing| existing == &url) {
+                    urls.push(url);
+                }
+            }
+        }
+    }
+    urls
+}
+
+fn nested_item_aeskey(item: &str) -> Option<String> {
+    extract_xml_tag(item, "aeskey")
+        .or_else(|| xml_attr(item, "aeskey"))
+        .or_else(|| extract_xml_tag(item, "cdnthumbaeskey"))
+        .or_else(|| xml_attr(item, "cdnthumbaeskey"))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn http_get_bytes(url: &str) -> Option<Vec<u8>> {
+    let output = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "25",
+            "--connect-timeout",
+            "8",
+            "-A",
+            "Mozilla/5.0",
+            url,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    // Cap nested CDN payloads.
+    if output.stdout.len() > 12 * 1024 * 1024 {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+/// Decrypt WeChat CDN image bytes with the XML `aeskey` when the body is not already an image.
+fn decrypt_cdn_image_bytes(data: &[u8], aeskey: &str) -> Option<Vec<u8>> {
+    if looks_like_image(data) {
+        return Some(data.to_vec());
+    }
+    let key_hex = if aeskey.len() == 32 && aeskey.bytes().all(|b| b.is_ascii_hexdigit()) {
+        aeskey.to_ascii_lowercase()
+    } else if aeskey.len() >= 16 {
+        // Session-style keys: first 16 ASCII bytes, hex-encoded for openssl -K.
+        hex_encode(&aeskey.as_bytes()[..16])
+    } else {
+        return None;
+    };
+    let mut child = Command::new("openssl")
+        .args(["enc", "-d", "-aes-128-ecb", "-K", &key_hex])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    use std::io::Write;
+    child.stdin.take()?.write_all(data).ok()?;
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    if looks_like_image(&output.stdout) {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
+    let md5 = md5.to_ascii_lowercase();
+    for base in &account_base_paths(account_dir) {
+        let attach = Path::new(base).join("msg/attach");
+        if !attach.exists() {
+            continue;
+        }
+        // Shallow walk: attach/<chat>/<yyyy-mm>/Img/<hash>.dat
+        let Ok(chat_dirs) = fs::read_dir(&attach) else {
+            continue;
+        };
+        for chat_entry in chat_dirs.flatten() {
+            let Ok(month_dirs) = fs::read_dir(chat_entry.path()) else {
+                continue;
+            };
+            for month_entry in month_dirs.flatten() {
+                let img_dir = month_entry.path().join("Img");
+                if !img_dir.is_dir() {
+                    continue;
+                }
+                for suffix in ["", "_t"] {
+                    let candidate = img_dir.join(format!("{md5}{suffix}.dat"));
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn media_from_image_bytes(
+    data: Vec<u8>,
+    local_id: i64,
+    index: usize,
+    source: &str,
+) -> Option<MediaResult> {
+    if !looks_like_image(&data) {
+        return None;
+    }
+    let (format, ext) = detect_image_format(&data);
+    Some(MediaResult {
+        media_type: "image".into(),
+        data: Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &data,
+        )),
+        url: None,
+        format: format.into(),
+        filename: format!("chat_history_{local_id}_{index}.{ext}"),
+        source: Some(source.into()),
+        error_code: None,
+        items: Vec::new(),
+    })
+}
+
+fn download_nested_cdn_image(item: &str, local_id: i64, index: usize) -> Option<MediaResult> {
+    let aeskey = nested_item_aeskey(item);
+    for url in nested_cdn_urls(item) {
+        let Some(raw) = http_get_bytes(&url) else {
+            continue;
+        };
+        let decoded = if let Some(key) = aeskey.as_deref() {
+            decrypt_cdn_image_bytes(&raw, key).or_else(|| {
+                if looks_like_image(&raw) {
+                    Some(raw)
+                } else {
+                    None
+                }
+            })
+        } else if looks_like_image(&raw) {
+            Some(raw)
+        } else {
+            None
+        };
+        if let Some(data) = decoded {
+            tracing::info!(
+                "[media:nested-cdn] downloaded nested image index={} bytes={}",
+                index,
+                data.len()
+            );
+            return media_from_image_bytes(data, local_id, index, "cdn");
+        }
+    }
+    None
+}
+
 fn get_nested_image(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1081,22 +1261,38 @@ fn get_nested_image(
     index: usize,
     image_keys: Option<&ImageKeys>,
 ) -> Option<MediaResult> {
-    let md5 = nested_image_md5(item)?;
-    let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
-    let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)?;
-    let image_keys = image_keys?;
-    let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
-    if result.data.is_none() {
-        return None;
+    let md5 = nested_image_md5(item);
+
+    // 1) Local .dat via hardlink / filename match + session image keys.
+    if let (Some(md5), Some(image_keys)) = (md5.as_ref(), image_keys) {
+        let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
+        let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
+            .or_else(|| find_dat_via_md5_filename(account_dir, md5));
+        if let Some(dat_path) = dat_path {
+            let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+            if result.data.is_some() {
+                let ext = Path::new(&result.filename)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("jpg")
+                    .to_string();
+                result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+                result.source = Some("local-dat".into());
+                if let Some(media) = media_with_data(result) {
+                    return Some(media);
+                }
+            }
+        }
     }
-    let ext = Path::new(&result.filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("jpg")
-        .to_string();
-    result.filename = format!("chat_history_{local_id}_{index}.{ext}");
-    media_with_data(result)
+
+    // 2) CDN fallback: download mid/big/thumb URL; decrypt with dataitem aeskey when needed.
+    if let Some(media) = download_nested_cdn_image(item, local_id, index) {
+        return Some(media);
+    }
+
+    None
 }
+
 
 fn get_nested_file(
     account_dir: &str,
@@ -1447,6 +1643,50 @@ mod tests {
             1700000000
         );
     }
+
+
+    #[test]
+    fn nested_cdn_urls_prefer_big_then_mid_then_thumb() {
+        let item = concat!(
+            r#"<dataitem datatype="2">"#,
+            r#"<cdnthumburl>https://example.test/thumb</cdnthumburl>"#,
+            r#"<cdnmidimgurl>https://example.test/mid</cdnmidimgurl>"#,
+            r#"<cdnbigimgurl>https://example.test/big</cdnbigimgurl>"#,
+            r#"<aeskey>0123456789abcdef0123456789abcdef</aeskey>"#,
+            r#"</dataitem>"#,
+        );
+        assert_eq!(
+            nested_cdn_urls(item),
+            vec![
+                "https://example.test/big".to_string(),
+                "https://example.test/mid".to_string(),
+                "https://example.test/thumb".to_string(),
+            ]
+        );
+        assert_eq!(
+            nested_item_aeskey(item).as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn decrypt_cdn_image_bytes_passes_through_plain_jpeg() {
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let out = decrypt_cdn_image_bytes(&jpeg, "0123456789abcdef0123456789abcdef").unwrap();
+        assert_eq!(out, jpeg);
+    }
+
+    #[test]
+    fn media_from_image_bytes_rejects_non_image() {
+        assert!(media_from_image_bytes(vec![0, 1, 2, 3], 1, 0, "cdn").is_none());
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xd9];
+        let media = media_from_image_bytes(jpeg, 9, 2, "cdn").unwrap();
+        assert_eq!(media.media_type, "image");
+        assert_eq!(media.source.as_deref(), Some("cdn"));
+        assert_eq!(media.filename, "chat_history_9_2.jpg");
+        assert!(media.data.is_some());
+    }
+
 
     #[test]
     fn generic_unsupported_media_still_sets_error_code() {
