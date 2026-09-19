@@ -3,7 +3,7 @@ use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_message_type::normalize_local_type;
 use crate::tools::wechat_messages::{
     collect_forward_dataitems, decode_message_content, extract_xml_tag, find_message_db,
-    get_msg_table_name,
+    get_msg_table_name, is_merged_forward_xml, refermsg_referred_xml,
 };
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -1209,6 +1209,26 @@ pub fn get_message_media(
                 image_keys_raw,
             );
         }
+        49 => {
+            // Quote/reply of a merged-forward card keeps the type-19 XML in refermsg.
+            if let Some(referred) = refermsg_referred_xml(&content) {
+                if is_merged_forward_xml(&referred) || is_chat_history_appmsg(0, &referred) {
+                    return get_chat_history_media(
+                        account_dir,
+                        keys,
+                        &referred,
+                        local_id,
+                        create_time,
+                        image_keys_raw,
+                    );
+                }
+            }
+            // Fall through to generic handlers below for other appmsg subtypes.
+            if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
+                return thumb;
+            }
+            return unsupported();
+        }
         3 => {
             // Image
             tracing::info!(
@@ -1381,6 +1401,23 @@ mod tests {
             6,
             "<msg><appmsg><type>6</type></appmsg></msg>"
         ));
+    }
+
+    #[test]
+    fn quoted_chat_history_refermsg_is_treated_as_merged_forward() {
+        let inner = r#"<msg><appmsg><title>Shared</title><type>19</type><recorditem><![CDATA[<recordinfo><dataitem datatype="2"><fullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</fullmd5></dataitem></recordinfo>]]></recorditem></appmsg></msg>"#;
+        let escaped = inner
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let xml = format!(
+            r#"<msg><appmsg><type>57</type><refermsg><content>{escaped}</content></refermsg></appmsg></msg>"#
+        );
+        let referred = refermsg_referred_xml(&xml).expect("referred");
+        assert!(is_merged_forward_xml(&referred));
+        assert!(is_chat_history_appmsg(0, &referred));
+        assert_eq!(collect_forward_dataitems(&referred).len(), 1);
     }
 
     #[test]
