@@ -82,12 +82,10 @@ export function applyEmptyUnreadSkip(
 }
 
 /**
- * Cursor already caught up, but WeChat still reports unreadCount>0 after openChat
- * (common for @openim enterprise DMs whose badge will not clear via UI).
- *
- * Prefer tip-ack over pure time backoff: once we have opened/attempted mark-read
- * for this conversation tip, treat it as logically read until lastMsgLocalId
- * advances. Time backoff remains a short guard against same-tick reopen storms.
+ * Cursor caught up (or inbound was allowlist-denied) while WeChat still reports
+ * unreadCount>0. Tip-ack skips reprocessing until lastMsgLocalId advances, and
+ * intentionally leaves the badge alone — denied senders should stay unread.
+ * Time backoff remains a short guard against same-tick reopen storms.
  */
 export type StickyUnreadAck = Map<string, string>;
 
