@@ -1,5 +1,12 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.14.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @kyan-du/agent-wechat-wechaty-puppet@0.14.3
+
 ## 0.14.2
 
 ### Patch Changes

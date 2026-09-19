@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.14.3
+
+### Patch Changes
+
+- [#133](https://github.com/kyan-du/agent-wechat/pull/133) [`a4ba543`](https://github.com/kyan-du/agent-wechat/commit/a4ba5438a7a21915258469cebb1896beb54aebe4) Thanks [@kyan-du](https://github.com/kyan-du)! - Report logged-in idle chat list as `chat_idle` instead of `composer_unavailable` / `COMPOSER_UNAVAILABLE`, so `wx status` and `/api/status` can tell "no conversation selected" apart from a missing composer after open/focus.
+
 ## 0.14.2
 
 ### Patch Changes
