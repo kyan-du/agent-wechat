@@ -387,6 +387,11 @@ export function safeBodyAfterKnownMediaFailure(baseType: number, content: string
   return baseType === 3 ? "[Image unavailable]" : content;
 }
 
+export function formatType49MediaFailureBody(content: string, mediaErrorCode: string): string {
+  const text = content || "File attachment";
+  return `${text}\n[Attachment unavailable: ${mediaErrorCode}]`;
+}
+
 export async function saveValidatedInboundMedia(
   result: MediaResult,
   save: (buffer: Buffer, mime: string, filename: string) => Promise<{ path?: string } | undefined>,

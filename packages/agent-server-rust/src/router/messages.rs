@@ -81,13 +81,18 @@ pub async fn list_messages(
         params.cursor.as_deref(),
     );
     let has_more = crate::tools::page_cursor::truncate_lookahead(&mut messages, params.limit);
-    let next_cursor = has_more.then(|| messages.last()).flatten().and_then(|message| {
-        crate::tools::page_cursor::encode(
-            &format!("messages:{chat_id}"),
-            (message.timestamp.clone(), message.local_id),
-        ).ok()
-    });
-    Json(serde_json::json!({ "schemaVersion": 1, "items": messages, "nextCursor": next_cursor })).into_response()
+    let next_cursor = has_more
+        .then(|| messages.last())
+        .flatten()
+        .and_then(|message| {
+            crate::tools::page_cursor::encode(
+                &format!("messages:{chat_id}"),
+                (message.timestamp.clone(), message.local_id),
+            )
+            .ok()
+        });
+    Json(serde_json::json!({ "schemaVersion": 1, "items": messages, "nextCursor": next_cursor }))
+        .into_response()
 }
 
 pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
@@ -102,6 +107,7 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 filename: String::new(),
                 source: None,
                 error_code: Some("SESSION_UNAVAILABLE".to_string()),
+                items: Vec::new(),
             })
         }
     };
@@ -116,6 +122,7 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 filename: String::new(),
                 source: None,
                 error_code: Some("NOT_LOGGED_IN".to_string()),
+                items: Vec::new(),
             })
         }
     };

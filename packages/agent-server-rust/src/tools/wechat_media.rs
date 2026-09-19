@@ -1,7 +1,10 @@
 use crate::ia::types::MediaResult;
 use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_message_type::normalize_local_type;
-use crate::tools::wechat_messages::{decode_message_content, extract_xml_tag, find_message_db, get_msg_table_name};
+use crate::tools::wechat_messages::{
+    collect_forward_dataitems, decode_message_content, extract_xml_tag, find_message_db,
+    get_msg_table_name,
+};
 use md5::{Digest, Md5};
 use std::collections::HashMap;
 use std::fs;
@@ -32,6 +35,7 @@ fn media_result(
         filename: filename.into(),
         source: None,
         error_code: None,
+        items: Vec::new(),
     }
 }
 
@@ -39,6 +43,65 @@ fn unsupported() -> MediaResult {
     let mut result = media_result("unsupported", None, "", "");
     result.error_code = Some("MEDIA_UNSUPPORTED".into());
     result
+}
+
+/// Chat history / merged-forward cards are display text, not failed attachments.
+fn unsupported_without_error() -> MediaResult {
+    media_result("unsupported", None, "", "")
+}
+
+fn is_chat_history_appmsg(sub: i32, content: &str) -> bool {
+    if sub == 19 {
+        return true;
+    }
+    extract_xml_tag(content, "type").and_then(|value| value.parse::<i32>().ok()) == Some(19)
+}
+
+const MAX_NESTED_CHAT_HISTORY_MEDIA: usize = 16;
+const NESTED_IMAGE_TYPE: i32 = 2;
+const NESTED_FILE_TYPE: i32 = 8;
+
+fn sanitize_md5(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(value.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn dataitem_type(item: &str) -> i32 {
+    xml_attr(item, "datatype")
+        .or_else(|| extract_xml_tag(item, "datatype"))
+        .or_else(|| extract_xml_tag(item, "type"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+fn nested_image_md5(item: &str) -> Option<String> {
+    for key in ["fullmd5", "md5", "thumbfullmd5"] {
+        if let Some(value) = xml_attr(item, key).or_else(|| extract_xml_tag(item, key)) {
+            if let Some(md5) = sanitize_md5(&value) {
+                return Some(md5);
+            }
+        }
+    }
+    None
+}
+
+fn nested_item_time(item: &str, fallback: i64) -> i64 {
+    extract_xml_tag(item, "sourcetime")
+        .or_else(|| extract_xml_tag(item, "createtime"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(fallback)
+}
+
+fn media_with_data(result: MediaResult) -> Option<MediaResult> {
+    if result.data.as_ref().is_some_and(|data| !data.is_empty()) && result.error_code.is_none() {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 fn pending_with(
@@ -57,12 +120,7 @@ fn pending() -> MediaResult {
 }
 
 fn pending_image(local_id: i64, code: &str) -> MediaResult {
-    pending_with(
-        "pending",
-        "jpeg",
-        format!("msg_{local_id}.jpg"),
-        code,
-    )
+    pending_with("pending", "jpeg", format!("msg_{local_id}.jpg"), code)
 }
 
 /// Read a snapshot only after observing the complete file twice across a small
@@ -204,6 +262,7 @@ fn get_image_thumbnail(
                     filename: format!("msg_{local_id}.jpg"),
                     source: None,
                     error_code: None,
+                    items: Vec::new(),
                 });
             }
         }
@@ -232,6 +291,7 @@ fn get_image_thumbnail(
                             filename: format!("msg_{local_id}.jpg"),
                             source: None,
                             error_code: None,
+                            items: Vec::new(),
                         });
                     }
                 }
@@ -286,10 +346,7 @@ fn decrypt_dat_head(dat: &[u8], aes_key_hex: &str) -> Option<(Vec<u8>, u32)> {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
 }
 
 fn derive_xor_byte(dat: &[u8], dec_head: &[u8]) -> Option<u8> {
@@ -327,11 +384,7 @@ fn derive_xor_byte(dat: &[u8], dec_head: &[u8]) -> Option<u8> {
     None
 }
 
-fn resolve_xor_byte(
-    dat_path: &str,
-    dat: &[u8],
-    image_keys: &ImageKeys,
-) -> Option<u8> {
+fn resolve_xor_byte(dat_path: &str, dat: &[u8], image_keys: &ImageKeys) -> Option<u8> {
     if let Some(xb) = image_keys.xor_byte {
         return Some(xb);
     }
@@ -352,9 +405,7 @@ fn resolve_xor_byte(
                 if sib.len() < 15 || sib[..6] != DAT_MAGIC {
                     continue;
                 }
-                if let Some((sib_head, _)) =
-                    decrypt_dat_head(&sib, &image_keys.aes_key_hex)
-                {
+                if let Some((sib_head, _)) = decrypt_dat_head(&sib, &image_keys.aes_key_hex) {
                     if let Some(xb) = derive_xor_byte(&sib, &sib_head) {
                         return Some(xb);
                     }
@@ -445,7 +496,10 @@ fn find_dat_via_hardlink(
     let image_md5 = match xml_attr(content, "md5") {
         Some(m) => m,
         None => {
-            tracing::warn!("[media:hardlink] no md5 attr in content (len={})", content.len());
+            tracing::warn!(
+                "[media:hardlink] no md5 attr in content (len={})",
+                content.len()
+            );
             return None;
         }
     };
@@ -614,6 +668,7 @@ fn get_video_data(
                         filename: format!("msg_{local_id}.mp4"),
                         source: None,
                         error_code: None,
+                        items: Vec::new(),
                     };
                 }
             }
@@ -634,6 +689,7 @@ fn get_video_data(
                         filename: format!("msg_{local_id}_cover.jpg"),
                         source: None,
                         error_code: None,
+                        items: Vec::new(),
                     };
                 }
             }
@@ -654,6 +710,7 @@ fn get_video_data(
                         filename: format!("msg_{local_id}_thumb.jpg"),
                         source: None,
                         error_code: None,
+                        items: Vec::new(),
                     };
                 }
             }
@@ -681,7 +738,10 @@ fn extract_file_hash_from_packed_info(hex_info: &str) -> Option<String> {
         if window.iter().all(|&b| b.is_ascii_hexdigit()) {
             let candidate = std::str::from_utf8(window).ok()?;
             // Verify it's lowercase hex (not random ASCII digits)
-            if candidate.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+            if candidate
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+            {
                 return Some(candidate.to_string());
             }
         }
@@ -689,11 +749,7 @@ fn extract_file_hash_from_packed_info(hex_info: &str) -> Option<String> {
     None
 }
 
-fn decrypt_and_return(
-    dat_path: &str,
-    image_keys: &ImageKeys,
-    local_id: i64,
-) -> MediaResult {
+fn decrypt_and_return(dat_path: &str, image_keys: &ImageKeys, local_id: i64) -> MediaResult {
     let dat = match read_stable_file(Path::new(dat_path)) {
         Some(d) => d,
         None => return pending_image(local_id, "IMAGE_NOT_STABLE"),
@@ -730,6 +786,7 @@ fn decrypt_and_return(
                 filename: format!("msg_{local_id}.{cext}"),
                 source: None,
                 error_code: None,
+                items: Vec::new(),
             };
         }
         // Try _t.dat thumbnail
@@ -737,9 +794,7 @@ fn decrypt_and_return(
         if Path::new(&thumb_path).exists() {
             if let Some(thumb_dat) = read_stable_file(Path::new(&thumb_path)) {
                 if let Some(xb2) = resolve_xor_byte(&thumb_path, &thumb_dat, image_keys) {
-                    if let Some(dec) =
-                        decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2)
-                    {
+                    if let Some(dec) = decrypt_dat(&thumb_dat, &image_keys.aes_key_hex, xb2) {
                         let (tf, te) = detect_image_format(&dec);
                         return MediaResult {
                             media_type: "image".into(),
@@ -752,6 +807,7 @@ fn decrypt_and_return(
                             filename: format!("msg_{local_id}.{te}"),
                             source: Some("thumbnail".into()),
                             error_code: None,
+                            items: Vec::new(),
                         };
                     }
                 }
@@ -770,6 +826,7 @@ fn decrypt_and_return(
         filename: format!("msg_{local_id}.{ext}"),
         source: Some("original".into()),
         error_code: None,
+        items: Vec::new(),
     }
 }
 
@@ -792,9 +849,7 @@ fn get_emoji_media(
         let rows = query_wechat_db(
             &emoticon_db,
             emoticon_key,
-            &format!(
-                "SELECT cdn_url FROM kNonStoreEmoticonTable WHERE md5 = '{md5_val}' LIMIT 1;"
-            ),
+            &format!("SELECT cdn_url FROM kNonStoreEmoticonTable WHERE md5 = '{md5_val}' LIMIT 1;"),
         );
         if let Some(row) = rows.first() {
             if let Some(url) = row.get("cdn_url").and_then(|v| v.as_str()) {
@@ -807,6 +862,7 @@ fn get_emoji_media(
                         filename: format!("emoji_{md5_val}.gif"),
                         source: None,
                         error_code: None,
+                        items: Vec::new(),
                     };
                 }
             }
@@ -824,6 +880,7 @@ fn get_emoji_media(
                 filename: format!("emoji_{md5_val}.gif"),
                 source: None,
                 error_code: None,
+                items: Vec::new(),
             };
         }
     }
@@ -836,6 +893,7 @@ fn get_emoji_media(
         filename: format!("emoji_{md5_val}"),
         source: None,
         error_code: None,
+        items: Vec::new(),
     }
 }
 
@@ -880,10 +938,7 @@ fn get_voice_data(
                  LIMIT 1;"
             ),
         );
-        let hex_data = match voice_rows
-            .first()
-            .and_then(|r| r.get("hex_data")?.as_str())
-        {
+        let hex_data = match voice_rows.first().and_then(|r| r.get("hex_data")?.as_str()) {
             Some(h) if !h.is_empty() => h.to_string(),
             _ => continue,
         };
@@ -906,6 +961,7 @@ fn get_voice_data(
                 filename: format!("msg_{local_id}.mp3"),
                 source: None,
                 error_code: None,
+                items: Vec::new(),
             };
         }
 
@@ -921,10 +977,16 @@ fn get_voice_data(
             filename: format!("msg_{local_id}.silk"),
             source: None,
             error_code: None,
+            items: Vec::new(),
         };
     }
 
-    pending_with("voice", "", format!("msg_{local_id}"), "VOICE_NOT_DOWNLOADED")
+    pending_with(
+        "voice",
+        "",
+        format!("msg_{local_id}"),
+        "VOICE_NOT_DOWNLOADED",
+    )
 }
 
 // ── File attachment ──────────────────────────────────────────────────────────
@@ -1011,6 +1073,104 @@ fn get_file_attachment(
     pending_with("file", ext, filename, "FILE_NOT_DOWNLOADED")
 }
 
+fn get_nested_image(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    item: &str,
+    local_id: i64,
+    index: usize,
+    image_keys: Option<&ImageKeys>,
+) -> Option<MediaResult> {
+    let md5 = nested_image_md5(item)?;
+    let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
+    let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)?;
+    let image_keys = image_keys?;
+    let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+    if result.data.is_none() {
+        return None;
+    }
+    let ext = Path::new(&result.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jpg")
+        .to_string();
+    result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+    media_with_data(result)
+}
+
+fn get_nested_file(
+    account_dir: &str,
+    item: &str,
+    local_id: i64,
+    index: usize,
+    fallback_time: i64,
+) -> Option<MediaResult> {
+    let raw_filename = extract_xml_tag(item, "datatitle")
+        .or_else(|| extract_xml_tag(item, "title"))
+        .unwrap_or_default();
+    let filename = sanitize_inbound_filename(&raw_filename, local_id);
+    let create_time = nested_item_time(item, fallback_time);
+    let mut result = get_file_attachment(
+        account_dir,
+        &format!("<title>{raw_filename}</title>"),
+        create_time,
+        local_id,
+    );
+    if result.data.is_none() {
+        return None;
+    }
+    let ext = Path::new(&result.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bin")
+        .to_string();
+    let mut nested_name = format!("chat_history_{local_id}_{index}_{filename}");
+    if !nested_name.contains('.') {
+        nested_name = format!("{nested_name}.{ext}");
+    }
+    result.filename = nested_name;
+    media_with_data(result)
+}
+
+fn get_chat_history_media(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    content: &str,
+    local_id: i64,
+    create_time: i64,
+    image_keys_raw: Option<(String, Option<u8>)>,
+) -> MediaResult {
+    let image_keys = image_keys_raw.map(|(aes_key_hex, xor_byte)| ImageKeys {
+        aes_key_hex,
+        xor_byte,
+    });
+    let mut items = Vec::new();
+    for (index, item) in collect_forward_dataitems(content).into_iter().enumerate() {
+        if items.len() >= MAX_NESTED_CHAT_HISTORY_MEDIA {
+            break;
+        }
+        let nested_type = dataitem_type(&item);
+        let resolved = match nested_type {
+            NESTED_IMAGE_TYPE => get_nested_image(
+                account_dir,
+                keys,
+                &item,
+                local_id,
+                index,
+                image_keys.as_ref(),
+            ),
+            NESTED_FILE_TYPE => get_nested_file(account_dir, &item, local_id, index, create_time),
+            _ => None,
+        };
+        if let Some(media) = resolved {
+            items.push(media);
+        }
+    }
+    let mut result = unsupported_without_error();
+    result.items = items;
+    result
+}
+
 // ── Public entry point ───────────────────────────────────────────────────────
 
 /// Get media attachment for a message.
@@ -1039,6 +1199,16 @@ pub fn get_message_media(
             // File attachment (appmsg subtype 6)
             return get_file_attachment(account_dir, &content, create_time, local_id);
         }
+        49 if is_chat_history_appmsg(sub, &content) => {
+            return get_chat_history_media(
+                account_dir,
+                keys,
+                &content,
+                local_id,
+                create_time,
+                image_keys_raw,
+            );
+        }
         3 => {
             // Image
             tracing::info!(
@@ -1048,16 +1218,13 @@ pub fn get_message_media(
             );
 
             // Try cached thumbnail first
-            if let Some(thumb) =
-                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-            {
+            if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
                 tracing::info!("[media] found thumbnail");
                 let mut thumb = thumb;
                 thumb.source = Some("thumbnail".into());
                 return thumb;
             }
             tracing::info!("[media] no thumbnail message_ref_present=true");
-
 
             // Try .dat decryption if we have image keys
             if let Some((aes_hex, xor_byte)) = image_keys_raw {
@@ -1067,15 +1234,16 @@ pub fn get_message_media(
                 };
 
                 // Primary: look up filename from message_resource.db
-                if let Some(dat_path) = find_dat_via_resource_db(
-                    account_dir, keys, chat_id, local_id, create_time,
-                ) {
+                if let Some(dat_path) =
+                    find_dat_via_resource_db(account_dir, keys, chat_id, local_id, create_time)
+                {
                     tracing::info!("[media] found dat via resource-db path_present=true");
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
 
                 // Fallback: try hardlink.db (older images may not be in resource db)
-                if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content) {
+                if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content)
+                {
                     tracing::info!("[media] found dat via hardlink path_present=true");
                     return decrypt_and_return(&dat_path, &image_keys, local_id);
                 }
@@ -1105,9 +1273,7 @@ pub fn get_message_media(
         }
         _ => {
             // Other types: check for cached thumbnail
-            if let Some(thumb) =
-                get_image_thumbnail(account_dir, chat_id, local_id, create_time)
-            {
+            if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
                 return thumb;
             }
             unsupported()
@@ -1160,7 +1326,10 @@ mod tests {
             thread::sleep(Duration::from_millis(15));
             fs::write(writer_path, b"%PDF-1.7\ncomplete document").unwrap();
         });
-        assert_ne!(read_stable_file(&path).as_deref(), Some(truncated.as_slice()));
+        assert_ne!(
+            read_stable_file(&path).as_deref(),
+            Some(truncated.as_slice())
+        );
         writer.join().unwrap();
     }
 
@@ -1202,6 +1371,55 @@ mod tests {
     }
 
     #[test]
+    fn chat_history_appmsg_is_detected_from_packed_subtype_and_xml() {
+        assert!(is_chat_history_appmsg(19, ""));
+        assert!(is_chat_history_appmsg(
+            0,
+            "<msg><appmsg><type>19</type></appmsg></msg>"
+        ));
+        assert!(!is_chat_history_appmsg(
+            6,
+            "<msg><appmsg><type>6</type></appmsg></msg>"
+        ));
+    }
+
+    #[test]
+    fn chat_history_media_is_unsupported_without_error_code() {
+        let result = unsupported_without_error();
+        assert_eq!(result.media_type, "unsupported");
+        assert!(result.error_code.is_none());
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn nested_dataitem_type_and_md5_are_parsed_from_record_xml() {
+        let image = r#"<dataitem datatype="2"><fullmd5>ABCDEF0123456789ABCDEF0123456789</fullmd5></dataitem>"#;
+        assert_eq!(dataitem_type(image), 2);
+        assert_eq!(
+            nested_image_md5(image).as_deref(),
+            Some("abcdef0123456789abcdef0123456789")
+        );
+        let file = r#"<dataitem datatype="8"><datatitle>report.pdf</datatitle></dataitem>"#;
+        assert_eq!(dataitem_type(file), 8);
+        assert_eq!(nested_image_md5(file), None);
+        assert_eq!(
+            nested_item_time(
+                r#"<dataitem><createtime>1700000000</createtime></dataitem>"#,
+                1
+            ),
+            1700000000
+        );
+    }
+
+    #[test]
+    fn generic_unsupported_media_still_sets_error_code() {
+        assert_eq!(
+            unsupported().error_code.as_deref(),
+            Some("MEDIA_UNSUPPORTED")
+        );
+    }
+
+    #[test]
     fn inbound_filenames_preserve_unicode_but_remove_paths() {
         assert_eq!(
             sanitize_inbound_filename("报告 2026.pdf", 7),
@@ -1219,12 +1437,18 @@ mod tests {
     #[test]
     fn hostile_media_failure_logs_are_redacted() {
         let mut keys = HashMap::new();
-        keys.insert("hardlink.db".to_string(), "hostile-secret-hardlink-key".to_string());
+        keys.insert(
+            "hardlink.db".to_string(),
+            "hostile-secret-hardlink-key".to_string(),
+        );
         keys.insert(
             "message_resource.db".to_string(),
             "hostile-secret-resource-key".to_string(),
         );
-        keys.insert("message_0.db".to_string(), "hostile-secret-message-key".to_string());
+        keys.insert(
+            "message_0.db".to_string(),
+            "hostile-secret-message-key".to_string(),
+        );
 
         let account_dir = "hostile-account/Users/kyan/private/xwechat_files";
         let chat_id = "wxid_sensitive_chat@chatroom";
@@ -1249,7 +1473,10 @@ mod tests {
             );
         });
 
-        assert!(logs.contains("[media"), "expected media diagnostics in logs: {logs}");
+        assert!(
+            logs.contains("[media"),
+            "expected media diagnostics in logs: {logs}"
+        );
         for forbidden in [
             account_dir,
             "/Users/kyan/private",
@@ -1267,7 +1494,10 @@ mod tests {
             "hostile-secret-resource-key",
             "hostile-secret-message-key",
         ] {
-            assert!(!logs.contains(forbidden), "leaked {forbidden} in logs: {logs}");
+            assert!(
+                !logs.contains(forbidden),
+                "leaked {forbidden} in logs: {logs}"
+            );
         }
     }
 }

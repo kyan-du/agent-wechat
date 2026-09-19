@@ -120,6 +120,7 @@ export interface MediaResult {
   filename: string;
   source?: "original" | "thumbnail";
   errorCode?: string;
+  items?: MediaResult[];
 }
 
 // ============================================

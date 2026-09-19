@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deflateSync } from "node:zlib";
-import { safeBodyAfterKnownMediaFailure, validateInboundMedia } from "./inbound-media.ts";
+import { formatType49MediaFailureBody, safeBodyAfterKnownMediaFailure, validateInboundMedia } from "./inbound-media.ts";
 
 const FIXTURES: Record<string, Buffer> = {
   jpeg: Buffer.from(
@@ -287,6 +287,14 @@ test("known image failure never exposes original XML", () => {
   const xml = '<msg><img aeskey="secret" cdnmidimgurl="secret"/></msg>';
   assert.equal(safeBodyAfterKnownMediaFailure(3, xml), "[Image unavailable]");
   assert.equal(safeBodyAfterKnownMediaFailure(1, "hello"), "hello");
+  assert.equal(safeBodyAfterKnownMediaFailure(49, "[Chat History] 姐姐狐的聊天记录"), "[Chat History] 姐姐狐的聊天记录");
+});
+
+test("type 49 attachment failure body is only appended when media actually failed", () => {
+  assert.equal(
+    formatType49MediaFailureBody("report.pdf", "FILE_NOT_DOWNLOADED"),
+    "report.pdf\n[Attachment unavailable: FILE_NOT_DOWNLOADED]",
+  );
 });
 
 test("save helper reports absent path and thrown saves without exposing details", async () => {
