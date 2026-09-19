@@ -1,5 +1,80 @@
 import type { MediaResult } from "@kyan-du/agent-wechat-shared";
 
+const DOWNLOADABLE_MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
+const CHAT_HISTORY_APPMSG_TYPE = 19;
+
+/** Merged-forward / 聊天记录 cards keep display text; nested media lives on `items`. */
+export function isWeChatChatHistoryMessage(msg: {
+  type: number;
+  content?: string;
+  forwarded?: unknown;
+}): boolean {
+  if (msg.forwarded) return true;
+  const content = msg.content ?? "";
+  if (content.startsWith("[Chat History]")) return true;
+  const baseType = msg.type & 0x7fffffff;
+  if (baseType !== 49) return false;
+  const packedSubtype = Math.floor(msg.type / 0x1_0000_0000);
+  if (packedSubtype === CHAT_HISTORY_APPMSG_TYPE) return true;
+  return /<type>\s*19\s*<\/type>/.test(content);
+}
+
+export function shouldPollInboundMedia(msg: {
+  type: number;
+  content?: string;
+  forwarded?: unknown;
+}): boolean {
+  const baseType = msg.type & 0x7fffffff;
+  if (DOWNLOADABLE_MEDIA_TYPES.has(baseType)) return true;
+  return baseType === 49;
+}
+
+type NestedMediaItem = {
+  type?: string;
+  data?: string;
+  format?: string;
+  filename?: string;
+  source?: string;
+  errorCode?: string;
+};
+
+export function nestedChatHistoryMedia(
+  result: { type?: string; items?: NestedMediaItem[] } | null | undefined,
+): Array<NestedMediaItem & { type: string; data: string }> {
+  return (result?.items ?? []).filter(
+    (item): item is NestedMediaItem & { type: string; data: string } =>
+      Boolean(item?.data) && Boolean(item?.type) && item.type !== "unsupported",
+  );
+}
+
+export function isUnsupportedInboundMedia(
+  result: { type?: string } | null | undefined,
+): boolean {
+  return result?.type === "unsupported";
+}
+
+export function mediaFlagsFromPollResult(
+  result: { type?: string; data?: string; errorCode?: string; items?: NestedMediaItem[] } | null | undefined,
+  baseType: number,
+): { hasMedia: boolean; mediaErrorCode?: string } {
+  if (nestedChatHistoryMedia(result).length > 0) {
+    return { hasMedia: true };
+  }
+  if (result && result.data && result.type !== "unsupported") {
+    return { hasMedia: true };
+  }
+  if (isUnsupportedInboundMedia(result)) {
+    return { hasMedia: false };
+  }
+  if (result?.errorCode || (result && result.type !== "unsupported") || DOWNLOADABLE_MEDIA_TYPES.has(baseType)) {
+    return {
+      hasMedia: true,
+      mediaErrorCode: result?.errorCode ?? "MEDIA_DOWNLOAD_UNAVAILABLE",
+    };
+  }
+  return { hasMedia: false };
+}
+
 type MediaClient = { getMedia(chatId: string, localId: number): Promise<MediaResult> };
 type MediaRetryTrigger = (result: MediaResult, attempt: number) => Promise<void>;
 type MediaMaterializationClient = {
@@ -136,7 +211,7 @@ export function mediaMaterializationTriggerForMessage(opts: {
 }): MediaRetryTrigger | undefined {
   const baseType = opts.messageType & 0x7fffffff;
   // type=3 images; type=49 appmsg files (server returns type=file for subtype 6).
-  // Non-file type=49 still calls getMedia, which returns unsupported and never fires this trigger.
+  // Chat history still polls getMedia for nested items, but never materializes via overlay.
   if (baseType !== 3 && baseType !== 49) return undefined;
   return createMediaMaterializationTrigger(opts.client, opts.chatId, {
     log: opts.log,

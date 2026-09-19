@@ -251,7 +251,25 @@ export const getMediaParamsSchema = z.object({
   localId: z.number().int(),
 });
 
-export const mediaResultSchema = z.object({
+export const mediaResultSchema: z.ZodType<{
+  type: "image" | "emoji" | "file" | "voice" | "video" | "pending" | "unsupported";
+  data?: string;
+  url?: string;
+  format: string;
+  filename: string;
+  source?: "original" | "thumbnail";
+  errorCode?: string;
+  items?: Array<{
+    type: "image" | "emoji" | "file" | "voice" | "video" | "pending" | "unsupported";
+    data?: string;
+    url?: string;
+    format: string;
+    filename: string;
+    source?: "original" | "thumbnail";
+    errorCode?: string;
+    items?: unknown[];
+  }>;
+}> = z.object({
   type: z.enum(["image", "emoji", "file", "voice", "video", "pending", "unsupported"]),
   data: z.string().optional(),
   url: z.string().optional(),
@@ -259,6 +277,7 @@ export const mediaResultSchema = z.object({
   filename: z.string(),
   source: z.enum(["original", "thumbnail"]).optional(),
   errorCode: z.string().optional(),
+  items: z.array(z.lazy(() => mediaResultSchema)).optional(),
 });
 
 // ============================================

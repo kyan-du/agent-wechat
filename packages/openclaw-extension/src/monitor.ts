@@ -43,8 +43,15 @@ import {
   type WeChatPolicyContext,
 } from "./access-control.js";
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
-import { safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
-import { mediaMaterializationTriggerForMessage, pollMedia } from "./inbound-media-poll.js";
+import { formatType49MediaFailureBody, safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
+import {
+  isWeChatChatHistoryMessage,
+  mediaFlagsFromPollResult,
+  mediaMaterializationTriggerForMessage,
+  nestedChatHistoryMedia,
+  pollMedia,
+  shouldPollInboundMedia,
+} from "./inbound-media-poll.js";
 import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 import {
@@ -58,9 +65,6 @@ import {
   isOfficialAccount,
   type EmptyUnreadBackoff,
 } from "./monitor-skip.js";
-
-// Message types that may have downloadable media
-const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
 
 // History context markers (match openclaw's built-in markers)
 const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
@@ -83,6 +87,8 @@ type ProcessedMessage = {
   mediaMime?: string;
   mediaHash?: string;
   mediaPreviewPath?: string;
+  mediaPaths?: string[];
+  mediaMimes?: string[];
   senderName: string;
   senderId: string;
   isGroup: boolean;
@@ -473,14 +479,18 @@ async function prepareMessage(
   let mediaMime: string | undefined;
   let mediaHash: string | undefined;
   let mediaPreviewPath: string | undefined;
+  let mediaPaths: string[] | undefined;
+  let mediaMimes: string[] | undefined;
   let mediaSource: string | undefined;
   let mediaErrorCode: string | undefined;
   let hasMedia = false;
 
   const baseType = msg.type & 0x7fffffff;
+  const isChatHistory = isWeChatChatHistoryMessage(msg);
   // Type 49 (appmsg) may contain file attachments — the server resolves subtypes
-  // and returns type="file" for subtype 6. Try fetching media for type 49 as well.
-  const mayHaveMedia = MEDIA_TYPES.has(baseType) || baseType === 49;
+  // and returns type="file" for subtype 6. Chat history (merged forward / type 19)
+  // is polled only for nested local images/files on `items`.
+  const mayHaveMedia = shouldPollInboundMedia(msg);
 
   if (mayHaveMedia) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
@@ -492,15 +502,57 @@ async function prepareMessage(
         log,
         undefined,
         undefined,
-        mediaMaterializationTriggerForMessage({
-          client,
-          chatId,
-          messageType: baseType,
-          log,
-          skipOpen,
-        }),
+        isChatHistory
+          ? undefined
+          : mediaMaterializationTriggerForMessage({
+              client,
+              chatId,
+              messageType: baseType,
+              log,
+              skipOpen,
+            }),
       );
-      if (result && result.data && result.type !== "unsupported") {
+      const nestedItems = nestedChatHistoryMedia(result);
+      if (isChatHistory && nestedItems.length > 0) {
+        const savedPaths: string[] = [];
+        const savedMimes: string[] = [];
+        for (const [index, item] of nestedItems.entries()) {
+          const saved = await mediaPipeline.process(
+            item as MediaResult,
+            {
+              eventId: inboundEventIdForMedia(liveAccount.accountId, chatId, {
+                ...msg,
+                localId: msg.localId * 1000 + index,
+              }),
+              chatId,
+              localId: msg.localId * 1000 + index,
+            },
+            async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+            async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
+            async (path) => unlink(path),
+          );
+          if (!saved.ok) {
+            log?.error?.(`[wechat:media] nested chat-history media rejected index=${index} code=${saved.code}`);
+            continue;
+          }
+          if (!saved.originalPath || savedPaths.includes(saved.originalPath)) continue;
+          savedPaths.push(saved.originalPath);
+          savedMimes.push(saved.mime);
+          if (!mediaPath) {
+            mediaPath = saved.originalPath;
+            mediaMime = saved.mime;
+            mediaHash = saved.hash;
+            mediaPreviewPath = saved.previewPath;
+            mediaSource = item.source;
+          }
+        }
+        if (savedPaths.length > 0) {
+          hasMedia = true;
+          mediaPaths = savedPaths;
+          mediaMimes = savedMimes;
+          log?.info?.(`[wechat:media] nested chat-history media saved count=${savedPaths.length}`);
+        }
+      } else if (result && result.data && result.type !== "unsupported") {
         hasMedia = true;
         mediaSource = result.source;
         log?.info?.(`[wechat:media] inbound media received type=${result.type} format=${result.format}`);
@@ -521,15 +573,22 @@ async function prepareMessage(
           mediaPreviewPath = saved.previewPath;
           log?.info?.(`[wechat:media] inbound media saved hash=${saved.hash}${saved.previewPath ? " preview=present" : ""}`);
         }
-      } else if (result?.errorCode || result && result.type !== "unsupported" || MEDIA_TYPES.has(baseType)) {
-        hasMedia = true;
-        mediaErrorCode = result?.errorCode ?? "MEDIA_DOWNLOAD_UNAVAILABLE";
-        log?.info?.(`[wechat:media] inbound media unavailable code=${mediaErrorCode}`);
+      } else {
+        const flags = mediaFlagsFromPollResult(result, baseType);
+        hasMedia = flags.hasMedia;
+        mediaErrorCode = isChatHistory ? undefined : flags.mediaErrorCode;
+        if (mediaErrorCode) {
+          log?.info?.(`[wechat:media] inbound media unavailable code=${mediaErrorCode}`);
+        }
       }
     } catch (err) {
-      hasMedia = true;
-      mediaErrorCode = "MEDIA_DOWNLOAD_FAILED";
-      log?.error?.("[wechat:media] inbound media failed code=MEDIA_DOWNLOAD_FAILED");
+      if (isChatHistory) {
+        log?.error?.("[wechat:media] nested chat-history media failed code=MEDIA_DOWNLOAD_FAILED");
+      } else {
+        hasMedia = true;
+        mediaErrorCode = "MEDIA_DOWNLOAD_FAILED";
+        log?.error?.("[wechat:media] inbound media failed code=MEDIA_DOWNLOAD_FAILED");
+      }
     }
   }
 
@@ -548,9 +607,8 @@ async function prepareMessage(
       // For file attachments, content is the filename — annotate it
       rawBody = `[File: ${rawBody}]`;
     }
-  } else if (mediaErrorCode && baseType === 49) {
-    const text = msg.content || "File attachment";
-    rawBody = `${text}\n[Attachment unavailable: ${mediaErrorCode}]`;
+  } else if (mediaErrorCode && baseType === 49 && !isChatHistory) {
+    rawBody = formatType49MediaFailureBody(msg.content || "", mediaErrorCode);
   }
   if (mediaSource === "thumbnail") {
     rawBody = rawBody ? `${rawBody}\n[Image source: thumbnail]` : "[Image source: thumbnail]";
@@ -580,6 +638,8 @@ async function prepareMessage(
     mediaMime,
     mediaHash,
     mediaPreviewPath,
+    mediaPaths,
+    mediaMimes,
     senderName,
     senderId,
     isGroup,
@@ -637,10 +697,20 @@ async function dispatchSegment(
   const lastMsg = segment[segment.length - 1];
   const { isGroup, senderId, senderName, timestamp, rawBody, commandBody, msg } = lastMsg;
 
-  // Find the media attachment in this batch (at most one per batch)
-  const mediaMsg = segment.find((pm) => pm.mediaPath);
-  const mediaPath = mediaMsg?.mediaPath;
-  const mediaMime = mediaMsg?.mediaMime;
+  // Find the media attachment in this batch (at most one per batch, except nested chat-history items).
+  const mediaMsg = segment.find((pm) => pm.mediaPath || (pm.mediaPaths && pm.mediaPaths.length > 0));
+  const mediaPaths = mediaMsg?.mediaPaths?.length
+    ? mediaMsg.mediaPaths
+    : mediaMsg?.mediaPath
+      ? [mediaMsg.mediaPath]
+      : [];
+  const mediaMimes = mediaMsg?.mediaMimes?.length
+    ? mediaMsg.mediaMimes
+    : mediaMsg?.mediaMime
+      ? [mediaMsg.mediaMime]
+      : [];
+  const mediaPath = mediaPaths[0];
+  const mediaMime = mediaMimes[0];
 
   log?.info?.(
     `[wechat:${liveAccount.accountId}] Dispatching segment: ${segment.length} msg(s), last=${msg.localId}` +
@@ -806,9 +876,9 @@ async function dispatchSegment(
         MediaPath: mediaPath,
         MediaUrl: mediaPath,
         MediaType: mediaMime,
-        MediaPaths: [mediaPath],
-        MediaUrls: [mediaPath],
-        MediaTypes: mediaMime ? [mediaMime] : [],
+        MediaPaths: mediaPaths,
+        MediaUrls: mediaPaths,
+        MediaTypes: mediaMimes,
         ...(mediaMsg?.mediaHash ? { MediaHash: mediaMsg.mediaHash } : {}),
         ...(mediaMsg?.mediaPreviewPath ? { MediaPreviewPath: mediaMsg.mediaPreviewPath } : {}),
       } : {}),
@@ -1299,6 +1369,8 @@ async function processUnreadChat(
               ...processed[i],
               mediaPath: undefined,
               mediaMime: undefined,
+              mediaPaths: undefined,
+              mediaMimes: undefined,
               hasMedia: false,
             };
           }

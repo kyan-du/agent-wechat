@@ -704,6 +704,25 @@ pub struct MediaResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error_code: Option<String>,
+    /// Nested attachments for merged-forward / 聊天记录 cards.
+    /// Empty for ordinary single-media messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<MediaResult>,
+}
+
+impl Default for MediaResult {
+    fn default() -> Self {
+        Self {
+            media_type: String::new(),
+            data: None,
+            url: None,
+            format: String::new(),
+            filename: String::new(),
+            source: None,
+            error_code: None,
+            items: Vec::new(),
+        }
+    }
 }
 
 // ============================================
