@@ -29,6 +29,14 @@ export type CursorPage<T> = {
   errorCode?: string;
 };
 
+export type MonitorInterest = {
+  dmPolicy: "allowlist" | "open" | "disabled" | string;
+  dmAllowFrom: string[];
+  groupPolicy?: "allowlist" | "open" | "disabled" | string;
+  groupAllowFrom?: string[];
+  includeSystemFeeds?: boolean;
+};
+
 export type AuthStatus = {
   status: "logged_in" | "logged_out" | "app_not_running" | "unknown";
   loggedInUser?: string;
@@ -146,6 +154,17 @@ export class WeChatClient {
     return res.json() as Promise<T>;
   }
 
+  private async put<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const res = await fetch(`${this.base}${path}`, {
+      method: "PUT",
+      headers: this.headers,
+      body: body != null ? JSON.stringify(body) : undefined,
+      signal,
+    });
+    if (!res.ok) await throwHttpError(res);
+    return res.json() as Promise<T>;
+  }
+
   // ---- Status ----
 
   async status(): Promise<StatusResponse> {
@@ -179,10 +198,21 @@ export class WeChatClient {
     limit?: number,
     cursor?: string,
     unreadOnly?: boolean,
+    interestOnly?: boolean,
   ): Promise<CursorPage<Chat>> {
-    const page = await this.get<CursorPage<Chat>>(`/api/chats${qs({ limit, cursor, unreadOnly })}`);
+    const page = await this.get<CursorPage<Chat>>(
+      `/api/chats${qs({ limit, cursor, unreadOnly, interestOnly })}`,
+    );
     if (page.errorCode) throw new WeChatHttpError(400, "Bad Request", page.errorCode, page.errorCode);
     return page;
+  }
+
+  async getMonitorInterest(): Promise<{ ok: boolean; interest: MonitorInterest | null }> {
+    return this.get("/api/interest");
+  }
+
+  async setMonitorInterest(interest: MonitorInterest): Promise<{ ok: boolean; interest: MonitorInterest }> {
+    return this.put("/api/interest", interest);
   }
 
   async listChats(limit?: number): Promise<Chat[]> {

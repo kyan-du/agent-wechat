@@ -32,6 +32,7 @@ export {
   type WeChatClientOptions,
   type StatusResponse,
   type AuthStatus,
+  type MonitorInterest,
   type CursorPage,
 } from "./client.js";
 

@@ -469,10 +469,35 @@ mod tests {
         assert!(!process_exists(pid), "process {pid} survived supervision");
     }
 
+    fn parse_pid_pair(value: &str) -> Option<(i32, i32)> {
+        let mut fields = value.split_whitespace();
+        let parent = fields.next()?.parse().ok()?;
+        let child = fields.next()?.parse().ok()?;
+        Some((parent, child))
+    }
+
     fn pid_pair(path: &Path) -> (i32, i32) {
         let value = fs::read_to_string(path).unwrap();
-        let mut fields = value.split_whitespace().map(|field| field.parse().unwrap());
-        (fields.next().unwrap(), fields.next().unwrap())
+        parse_pid_pair(&value).unwrap_or_else(|| panic!("pid file incomplete: {value:?}"))
+    }
+
+    /// Wait until the pid file exists *and* contains two parseable PIDs.
+    /// `wait_for_file` alone races with a partial write under load.
+    async fn wait_for_pid_pair(path: &Path) -> (i32, i32) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(value) = fs::read_to_string(path) {
+                if let Some(pair) = parse_pid_pair(&value) {
+                    return pair;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for complete pid pair at {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn non_waiting_parent_script(pids: &Path, escaped: bool) -> String {
@@ -547,9 +572,8 @@ mod tests {
             )
             .await
         });
-        wait_for_file(&pids_a).await;
-        wait_for_file(&pids_b).await;
-        let (_, descendant_b) = pid_pair(&pids_b);
+        let _ = wait_for_pid_pair(&pids_a).await;
+        let (_, descendant_b) = wait_for_pid_pair(&pids_b).await;
         assert_eq!(task_a.await.unwrap().stderr, "Command timed out");
         assert!(
             process_exists(descendant_b),
@@ -594,8 +618,7 @@ mod tests {
             )
             .await
         });
-        wait_for_file(&pids).await;
-        let (parent, descendant) = pid_pair(&pids);
+        let (parent, descendant) = wait_for_pid_pair(&pids).await;
         task.abort();
         let _ = task.await;
         wait_dead(parent).await;

@@ -5,6 +5,7 @@ mod db;
 mod effects;
 mod execution;
 mod ia;
+mod interest;
 mod outbound;
 mod plans;
 mod risk;
