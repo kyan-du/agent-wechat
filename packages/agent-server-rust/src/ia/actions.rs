@@ -1,4 +1,4 @@
-use super::types::{Action, Bounds};
+use super::types::{Action, Bounds, ScrollDirection};
 
 // ============================================
 // Common Actions
@@ -186,3 +186,42 @@ pub fn click_back() -> Action {
 pub fn sequence(actions: Vec<Action>) -> Action {
     Action::Sequence { actions }
 }
+
+/// Live calibration (msg 70 / vangie): bounds x=423 w=704 → click x≈500 succeeds;
+/// x=440/460/480 fail. Use ~12% of width (clamped to 10–15%), mid-height.
+pub fn chat_history_open_point(bounds: &Bounds) -> (f64, f64) {
+    let frac = 0.12_f64.clamp(0.10, 0.15);
+    let x = (bounds.x + bounds.width * frac).round();
+    let y = (bounds.y + bounds.height / 2.0).round();
+    (x, y)
+}
+
+/// Two ClickCoords with a short wait — Sequence of two clicks is not a true OS
+/// double-click, but matches the proven GUI materialization recipe.
+pub fn double_click_chat_history_card(bounds: &Bounds) -> Action {
+    let (x, y) = chat_history_open_point(bounds);
+    sequence(vec![
+        click_at(x, y),
+        wait(60),
+        click_at(x, y),
+    ])
+}
+
+/// `/opt/tools/scroll` alone often does nothing until Messages is focused.
+/// Recipe: click Messages list center, then Page_Up / Page_Down.
+pub fn focus_messages_and_page(messages_bounds: &Bounds, direction: ScrollDirection) -> Action {
+    let x = (messages_bounds.x + messages_bounds.width / 2.0).round();
+    let y = (messages_bounds.y + messages_bounds.height / 2.0).round();
+    let combo = match direction {
+        ScrollDirection::Up => "Page_Up",
+        ScrollDirection::Down => "Page_Down",
+    };
+    sequence(vec![
+        click_at(x, y),
+        wait(50),
+        Action::Key {
+            combo: combo.to_string(),
+        },
+    ])
+}
+

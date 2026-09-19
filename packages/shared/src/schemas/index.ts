@@ -134,6 +134,17 @@ export const downloadFileResultSchema = openChatResultSchema.extend({
   clicked: z.boolean().optional(),
 });
 
+export const materializeChatHistoryParamsSchema = z.object({
+  chatId: z.string().min(1),
+  title: z.string().min(1).optional(),
+  localId: z.number().int().optional(),
+  executionTimeoutMs: z.number().int().positive().optional(),
+});
+
+export const materializeChatHistoryResultSchema = openChatResultSchema.extend({
+  clicked: z.boolean().optional(),
+});
+
 // ============================================
 // MESSAGES
 // ============================================
@@ -307,6 +318,8 @@ export type OpenChatParams = z.infer<typeof openChatParamsSchema>;
 export type OpenChatResult = z.infer<typeof openChatResultSchema>;
 export type DownloadFileParams = z.infer<typeof downloadFileParamsSchema>;
 export type DownloadFileResult = z.infer<typeof downloadFileResultSchema>;
+export type MaterializeChatHistoryParams = z.infer<typeof materializeChatHistoryParamsSchema>;
+export type MaterializeChatHistoryResult = z.infer<typeof materializeChatHistoryResultSchema>;
 export type Message = z.infer<typeof messageSchema>;
 export type ListMessagesParams = z.infer<typeof listMessagesParamsSchema>;
 export type SendParams = z.infer<typeof sendParamsSchema>;

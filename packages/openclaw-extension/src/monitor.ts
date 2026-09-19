@@ -50,6 +50,7 @@ import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup
 import { formatType49MediaFailureBody, safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import {
   isWeChatChatHistoryMessage,
+  chatHistoryTitleFromMessage,
   mediaFlagsFromPollResult,
   mediaMaterializationTriggerForMessage,
   nestedChatHistoryMedia,
@@ -534,15 +535,19 @@ async function prepareMessage(
         log,
         undefined,
         undefined,
-        isChatHistory
-          ? undefined
-          : mediaMaterializationTriggerForMessage({
-              client,
-              chatId,
-              messageType: baseType,
-              log,
-              skipOpen,
-            }),
+        mediaMaterializationTriggerForMessage({
+          client,
+          chatId,
+          messageType: baseType,
+          log,
+          skipOpen,
+          chatHistory: isChatHistory
+            ? {
+                title: chatHistoryTitleFromMessage(msg),
+                localId: msg.localId,
+              }
+            : undefined,
+        }),
       );
       const nestedItems = nestedChatHistoryMedia(result);
       if (isChatHistory && nestedItems.length > 0) {

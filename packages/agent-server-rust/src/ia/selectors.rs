@@ -67,6 +67,55 @@ pub enum FileBubbleSelectError {
     Ambiguous { count: usize },
 }
 
+/// Messages transcript list-items (English UI). Composer toolbar buttons are not list-items.
+pub const MESSAGES_LIST_ITEM_SELECTOR: &str = r#"list[name="Messages"] > list-item"#;
+pub const MESSAGES_LIST_SELECTOR: &str = r#"list[name="Messages"]"#;
+
+/// Live EN a11y card names look like:
+/// `Chat History姐姐狐的聊天记录姐姐狐: [Photo]\n姐姐狐: [Photo]\n姐姐狐: [Photo]`
+/// (prefix `Chat History` with no space before the title). ZH may use `聊天记录`.
+/// The composer push-button named exactly `Chat History` / `聊天记录` (32x32) must not match.
+pub fn is_chat_history_bubble_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Bare toolbar label — never treat as a Messages card.
+    if trimmed == "Chat History" || trimmed == "聊天记录" {
+        return false;
+    }
+    trimmed.starts_with("Chat History") || trimmed.starts_with("聊天记录")
+}
+
+pub fn chat_history_bubbles<'a>(root: &'a A11yNode, title: Option<&str>) -> Vec<&'a A11yNode> {
+    query_selector_all(root, MESSAGES_LIST_ITEM_SELECTOR)
+        .into_iter()
+        .filter(|node| is_chat_history_bubble_name(&node.name))
+        .filter(|node| match title.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(wanted) => node.name.contains(wanted),
+            None => true,
+        })
+        .collect()
+}
+
+pub fn unique_chat_history_bubble<'a>(
+    root: &'a A11yNode,
+    title: Option<&str>,
+) -> Result<&'a A11yNode, FileBubbleSelectError> {
+    let matches = chat_history_bubbles(root, title);
+    match matches.len() {
+        0 => Err(FileBubbleSelectError::NotFound),
+        1 => Ok(matches[0]),
+        _ => Err(FileBubbleSelectError::Ambiguous {
+            count: matches.len(),
+        }),
+    }
+}
+
+pub fn messages_list<'a>(root: &'a A11yNode) -> Option<&'a A11yNode> {
+    query_selector(root, MESSAGES_LIST_SELECTOR)
+}
+
 // ============================================
 // Ancestor Traversal
 // ============================================
@@ -725,5 +774,79 @@ mod tests {
             Err(FileBubbleSelectError::Ambiguous { count: 2 })
         ));
         assert!(unique_inbound_file_bubble(&tree, Some("a.pdf")).is_ok());
+    }
+
+    fn chat_history_tree() -> A11yNode {
+        node(
+            "application",
+            "WeChat",
+            Some(vec![
+                node(
+                    "list",
+                    "Messages",
+                    Some(vec![
+                        node("list-item", "14:50", None),
+                        node(
+                            "list-item",
+                            "Chat History姐姐狐的聊天记录姐姐狐: [Photo]\n姐姐狐: [Photo]\n姐姐狐: [Photo]",
+                            None,
+                        ),
+                        node("list-item", "15:00", None),
+                        node("list-item", "File\nreport.pdf\n1K\n微信电脑版", None),
+                    ]),
+                ),
+                // Composer decoy — must never be selected as a chat-history card.
+                node("push-button", "Chat History", None),
+            ]),
+        )
+    }
+
+    #[test]
+    fn chat_history_bubble_matches_live_en_name_and_ignores_toolbar_button() {
+        let tree = chat_history_tree();
+        assert!(is_chat_history_bubble_name(
+            "Chat History姐姐狐的聊天记录姐姐狐: [Photo]\n姐姐狐: [Photo]\n姐姐狐: [Photo]"
+        ));
+        assert!(is_chat_history_bubble_name("聊天记录家庭群的聊天记录"));
+        assert!(!is_chat_history_bubble_name("Chat History"));
+        assert!(!is_chat_history_bubble_name("聊天记录"));
+        assert!(!is_chat_history_bubble_name("File\na.pdf\n1K"));
+
+        let matches = chat_history_bubbles(&tree, None);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].name.starts_with("Chat History姐姐狐的聊天记录"));
+
+        let unique = unique_chat_history_bubble(&tree, Some("姐姐狐的聊天记录"))
+            .expect("title filter unique");
+        assert!(unique.name.contains("姐姐狐的聊天记录"));
+
+        assert!(matches!(
+            unique_chat_history_bubble(&tree, Some("missing-title")),
+            Err(FileBubbleSelectError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn chat_history_bubble_fails_closed_when_ambiguous() {
+        let tree = node(
+            "application",
+            "WeChat",
+            Some(vec![
+                node(
+                    "list",
+                    "Messages",
+                    Some(vec![
+                        node("list-item", "Chat HistoryAAA的聊天记录AAA: hi", None),
+                        node("list-item", "Chat HistoryBBB的聊天记录BBB: hi", None),
+                    ]),
+                ),
+                node("push-button", "Chat History", None),
+            ]),
+        );
+        assert!(matches!(
+            unique_chat_history_bubble(&tree, None),
+            Err(FileBubbleSelectError::Ambiguous { count: 2 })
+        ));
+        assert!(unique_chat_history_bubble(&tree, Some("AAA的聊天记录")).is_ok());
     }
 }

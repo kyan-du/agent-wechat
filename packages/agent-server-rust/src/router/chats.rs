@@ -13,6 +13,7 @@ use crate::execution::{run_execution_loop, run_execution_loop_with_timeout};
 use crate::ia::types::{Chat, SubscriptionEvent};
 use crate::plans::chat_open::{ChatOpenParams, ChatOpenPlan, COMPOSER_UNAVAILABLE};
 use crate::plans::download_file::{DownloadFileParams, DownloadFilePlan, FILE_BUBBLE_AMBIGUOUS, FILE_BUBBLE_NOT_FOUND};
+use crate::plans::materialize_chat_history::{MaterializeChatHistoryParams, MaterializeChatHistoryPlan, CHAT_HISTORY_CARD_AMBIGUOUS, CHAT_HISTORY_CARD_NOT_FOUND};
 use crate::sessions::manager::current_session;
 use crate::tools::wechat_chats;
 use crate::tools::wechat_keys::get_stored_keys;
@@ -426,6 +427,113 @@ pub async fn download_file(
     }))
 }
 
+
+
+#[derive(Deserialize)]
+pub struct MaterializeChatHistoryQuery {
+    title: Option<String>,
+    #[serde(default, rename = "localId")]
+    local_id: Option<i64>,
+    #[serde(default, rename = "executionTimeoutMs")]
+    execution_timeout_ms: Option<u64>,
+}
+
+fn materialize_chat_history_error_code(
+    plan_error: Option<&str>,
+    execution_error: Option<&str>,
+) -> &'static str {
+    match plan_error {
+        Some(CHAT_HISTORY_CARD_NOT_FOUND) => CHAT_HISTORY_CARD_NOT_FOUND,
+        Some(CHAT_HISTORY_CARD_AMBIGUOUS) => CHAT_HISTORY_CARD_AMBIGUOUS,
+        _ => chat_open_execution_error_code(execution_error),
+    }
+}
+
+/// Open the chat, scroll Messages until a unique 聊天记录 card is visible, then
+/// double-click the left side of the bubble so WeChat materializes `Rec/*/Img`.
+pub async fn materialize_chat_history(
+    Path(chat_id): Path<String>,
+    Query(params): Query<MaterializeChatHistoryQuery>,
+) -> Json<serde_json::Value> {
+    let session = match current_session() {
+        Some(s) => s,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "errorCode": "SESSION_NOT_FOUND",
+                "error": "No session available"
+            }))
+        }
+    };
+
+    if session.logged_in_user.is_none() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "errorCode": "NOT_LOGGED_IN",
+            "error": "NOT_LOGGED_IN"
+        }))
+    }
+
+    if chat_id.starts_with("gh_") {
+        return Json(serde_json::json!({
+            "ok": false,
+            "errorCode": "OFFICIAL_ACCOUNT_UNSUPPORTED",
+            "error": "Opening official accounts is not supported"
+        }))
+    }
+
+    let mut context = {
+        let db = get_db();
+        create_context(session, &db)
+    };
+
+    let plan = MaterializeChatHistoryPlan;
+    // Scrolling + double-click needs more budget than a single file click.
+    let execution_timeout_ms = params.execution_timeout_ms.or(Some(12_000));
+    let params = MaterializeChatHistoryParams {
+        chat_id,
+        title: params.title,
+        local_id: params.local_id,
+    };
+    let cancel = CancellationToken::new();
+    let noop_emit = std::sync::Arc::new(|_: SubscriptionEvent| {});
+
+    let (result, plan_state) = run_execution_loop_with_timeout(
+        &plan,
+        &params,
+        &mut context,
+        noop_emit,
+        cancel,
+        execution_timeout_ms.unwrap_or(12_000),
+    )
+    .await;
+
+    if result.success && plan_state.clicked {
+        let mut body = serde_json::json!({ "ok": true, "clicked": true });
+        if let Some(open_result) = plan_state.result {
+            if let Ok(value) = serde_json::to_value(open_result) {
+                if let Some(object) = body.as_object_mut() {
+                    if let Some(open_object) = value.as_object() {
+                        for (key, val) in open_object {
+                            object.entry(key.clone()).or_insert(val.clone());
+                        }
+                    }
+                }
+            }
+        }
+        return Json(body);
+    }
+
+    let error_code =
+        materialize_chat_history_error_code(plan_state.diagnostic_error, result.error.as_deref());
+    Json(serde_json::json!({
+        "ok": false,
+        "clicked": plan_state.clicked,
+        "errorCode": error_code,
+        "error": result.error.unwrap_or_else(|| error_code.to_string()),
+    }))
+}
+
 #[cfg(test)]
 mod open_chat_tests {
     use super::*;
@@ -466,6 +574,22 @@ mod open_chat_tests {
         assert_eq!(
             mark_read_error_code(Some("UNRELATED_PLAN_ERROR")),
             "MARK_READ_UNVERIFIED"
+        );
+    }
+
+    #[test]
+    fn materialize_chat_history_maps_card_diagnostics() {
+        assert_eq!(
+            materialize_chat_history_error_code(Some(CHAT_HISTORY_CARD_NOT_FOUND), Some("No action selected")),
+            CHAT_HISTORY_CARD_NOT_FOUND
+        );
+        assert_eq!(
+            materialize_chat_history_error_code(Some(CHAT_HISTORY_CARD_AMBIGUOUS), None),
+            CHAT_HISTORY_CARD_AMBIGUOUS
+        );
+        assert_eq!(
+            materialize_chat_history_error_code(None, Some("Execution timeout after 12s")),
+            "EXECUTION_TIMEOUT"
         );
     }
 

@@ -1176,10 +1176,12 @@ fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
 /// HTTP CDN fallback was removed: nested fileids are opaque and aeskey is often
 /// absent, so CDN never worked in practice.
 ///
-/// TODO(gui-materialize): when `Rec/*/Img` files are missing on disk, opening the
-/// 聊天记录 card via AT-SPI (openChat → scroll to `Chat History…` bubble →
-/// double-click left side) materializes those Rec files. Wire a pending error so
-/// poll retries after card open as a follow-up; ship Rec path lookup first.
+/// When Rec/*/Img files are missing, POST /api/chats/{id}/materialize-chat-history
+/// (AT-SPI: open chat → focus Messages → Page_Up/Down → double-click left side of
+/// the Chat History card) materializes them. get_chat_history_media returns a
+/// retryable pending result with CHAT_HISTORY_NOT_MATERIALIZED so OpenClaw polls
+/// again after the GUI plan runs.
+
 fn get_nested_image(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1263,26 +1265,41 @@ fn get_chat_history_media(
         xor_byte,
     });
     let mut items = Vec::new();
+    let mut nested_image_count = 0usize;
     for (index, item) in collect_forward_dataitems(content).into_iter().enumerate() {
         if items.len() >= MAX_NESTED_CHAT_HISTORY_MEDIA {
             break;
         }
         let nested_type = dataitem_type(&item);
         let resolved = match nested_type {
-            NESTED_IMAGE_TYPE => get_nested_image(
-                account_dir,
-                keys,
-                &item,
-                local_id,
-                index,
-                image_keys.as_ref(),
-            ),
+            NESTED_IMAGE_TYPE => {
+                nested_image_count += 1;
+                get_nested_image(
+                    account_dir,
+                    keys,
+                    &item,
+                    local_id,
+                    index,
+                    image_keys.as_ref(),
+                )
+            }
             NESTED_FILE_TYPE => get_nested_file(account_dir, &item, local_id, index, create_time),
             _ => None,
         };
         if let Some(media) = resolved {
             items.push(media);
         }
+    }
+    // Nested image dataitems present but nothing resolved yet — Rec files are
+    // usually missing until the GUI card is opened. Return retryable pending so
+    // OpenClaw can fire materializeChatHistory and keep polling.
+    if items.is_empty() && nested_image_count > 0 {
+        return pending_with(
+            "pending",
+            "jpeg",
+            format!("chat_history_{local_id}.jpg"),
+            "CHAT_HISTORY_NOT_MATERIALIZED",
+        );
     }
     let mut result = unsupported_without_error();
     result.items = items;
@@ -1543,6 +1560,32 @@ mod tests {
         let result = unsupported_without_error();
         assert_eq!(result.media_type, "unsupported");
         assert!(result.error_code.is_none());
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn chat_history_with_unresolved_images_is_pending_retryable() {
+        let xml = concat!(
+            r#"<msg><appmsg><title>姐姐狐的聊天记录</title><type>19</type><recorditem><![CDATA["#,
+            r#"<recordinfo>"#,
+            r#"<dataitem datatype="2"><fullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</fullmd5></dataitem>"#,
+            r#"<dataitem datatype="2"><fullmd5>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</fullmd5></dataitem>"#,
+            r#"</recordinfo>"#,
+            r#"]]></recorditem></appmsg></msg>"#,
+        );
+        let result = get_chat_history_media(
+            "/tmp/no-such-account",
+            &std::collections::HashMap::new(),
+            xml,
+            70,
+            0,
+            None,
+        );
+        assert_eq!(result.media_type, "pending");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("CHAT_HISTORY_NOT_MATERIALIZED")
+        );
         assert!(result.items.is_empty());
     }
 

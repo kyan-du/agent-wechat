@@ -86,6 +86,23 @@ export interface DownloadFileResult {
   error?: string;
 }
 
+export interface MaterializeChatHistoryParams {
+  chatId: string;
+  title?: string;
+  localId?: number;
+  executionTimeoutMs?: number;
+}
+
+export interface MaterializeChatHistoryResult {
+  ok: boolean;
+  clicked?: boolean;
+  username?: string;
+  skipped?: boolean;
+  verified?: boolean;
+  errorCode?: string;
+  error?: string;
+}
+
 // ============================================
 // MESSAGES (params only — Message type is generated)
 // ============================================
