@@ -1,5 +1,17 @@
 # @agent-wechat/wechat
 
+## 0.14.4
+
+### Patch Changes
+
+- [#135](https://github.com/kyan-du/agent-wechat/pull/135) [`d4825c0`](https://github.com/kyan-du/agent-wechat/commit/d4825c08568d8b415a9e365415db734ba2471490) Thanks [@kyan-du](https://github.com/kyan-du)! - Do not treat WeChat merged-forward / 聊天记录 cards as failed media downloads. Chat history keeps its `[Chat History]` text instead of appending `MEDIA_UNSUPPORTED`. Nested local images (`datatype=2`) and files (`datatype=8`) inside the record are decrypted when a `.dat`/file is on disk and attached as multiple inbound `MediaPaths`. CDN-only nested items without a local file are skipped. Voice/video nested items are not attached. File attachments (appmsg subtype 6) still poll.
+
+- [#142](https://github.com/kyan-du/agent-wechat/pull/142) [`63ffe24`](https://github.com/kyan-du/agent-wechat/commit/63ffe2467c57d1141a6153ab0775a7cdf23f2e74) Thanks [@kyan-du](https://github.com/kyan-du)! - Materialize nested 聊天记录 images via AT-SPI: open chat, focus Messages, Page_Up/Down to the Chat History card, double-click ~12% from the left edge; return retryable `CHAT_HISTORY_NOT_MATERIALIZED` until Rec files appear.
+
+- [#137](https://github.com/kyan-du/agent-wechat/pull/137) [`9cdf654`](https://github.com/kyan-du/agent-wechat/commit/9cdf65424927633bd96bdbc2051a536e9c3a948c) Thanks [@kyan-du](https://github.com/kyan-du)! - Sync OpenClaw allowlist interest to agent-server (`PUT/GET /api/interest`) and filter `listChats?interestOnly=true` so denied DMs stay out of the monitor poll without clearing WeChat badges. Only enable `interestOnly` after a successful server sync; re-GET each tick so an agent-server restart (in-memory wipe) triggers re-PUT.
+
+- Back off sticky uncleared WeChat unreads with exponential retry delay and tip acknowledgements, avoiding repeated processing while the message tip and unread count are unchanged. Keep allowlist-denied badges unread, only open chats with allowed inbound messages, and log actionable unreads rather than every sticky badge (#136).
+
 ## 0.14.3
 
 ## 0.14.2

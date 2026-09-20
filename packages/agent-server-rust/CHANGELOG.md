@@ -1,5 +1,25 @@
 # @agent-wechat/agent-server
 
+## 0.14.4
+
+### Patch Changes
+
+- [#138](https://github.com/kyan-du/agent-wechat/pull/138) [`c97f80a`](https://github.com/kyan-du/agent-wechat/commit/c97f80a7ef09921e7d43bf151fed3097c19c6d93) Thanks [@kyan-du](https://github.com/kyan-du)! - Parse WeChat merged-forward / 聊天记录 cards whose `<recorditem>` payload is wrapped in CDATA (`<![CDATA[<recordinfo>…</recordinfo>]]>`) instead of HTML-entity escaping. Image-only `datatype=2` items without `datatitle`/`datadesc` still become forwarded nodes. Existing entity-escaped recorditem fixtures stay valid. Nested image bytes still require a local image file, including the `Rec/*/Img` paths resolved by #141.
+
+- [#135](https://github.com/kyan-du/agent-wechat/pull/135) [`d4825c0`](https://github.com/kyan-du/agent-wechat/commit/d4825c08568d8b415a9e365415db734ba2471490) Thanks [@kyan-du](https://github.com/kyan-du)! - Do not treat WeChat merged-forward / 聊天记录 cards as failed media downloads. Chat history keeps its `[Chat History]` text instead of appending `MEDIA_UNSUPPORTED`. Nested local images (`datatype=2`) and files (`datatype=8`) inside the record are decrypted when a `.dat`/file is on disk and attached as multiple inbound `MediaPaths`. CDN-only nested items without a local file are skipped. Voice/video nested items are not attached. File attachments (appmsg subtype 6) still poll.
+
+- [#142](https://github.com/kyan-du/agent-wechat/pull/142) [`63ffe24`](https://github.com/kyan-du/agent-wechat/commit/63ffe2467c57d1141a6153ab0775a7cdf23f2e74) Thanks [@kyan-du](https://github.com/kyan-du)! - Materialize nested 聊天记录 images via AT-SPI: open chat, focus Messages, Page_Up/Down to the Chat History card, double-click ~12% from the left edge; return retryable `CHAT_HISTORY_NOT_MATERIALIZED` until Rec files appear.
+
+- [#137](https://github.com/kyan-du/agent-wechat/pull/137) [`9cdf654`](https://github.com/kyan-du/agent-wechat/commit/9cdf65424927633bd96bdbc2051a536e9c3a948c) Thanks [@kyan-du](https://github.com/kyan-du)! - Sync OpenClaw allowlist interest to agent-server (`PUT/GET /api/interest`) and filter `listChats?interestOnly=true` so denied DMs stay out of the monitor poll without clearing WeChat badges. Only enable `interestOnly` after a successful server sync; re-GET each tick so an agent-server restart (in-memory wipe) triggers re-PUT.
+
+- [#140](https://github.com/kyan-du/agent-wechat/pull/140) [`aa2a7c2`](https://github.com/kyan-du/agent-wechat/commit/aa2a7c2b0fe8e97dee06003c7f158d1f58b00840) Thanks [@kyan-du](https://github.com/kyan-du)! - Look up local nested chat-history images by md5 filename when the hardlink lookup misses (#140). The experimental HTTP CDN fallback from that change was removed in #141; CDN-only nested images are not downloaded.
+
+- [#141](https://github.com/kyan-du/agent-wechat/pull/141) [`3fd9795`](https://github.com/kyan-du/agent-wechat/commit/3fd97956334fb91e6100c4943a366446992d5014) Thanks [@kyan-du](https://github.com/kyan-du)! - Resolve nested 聊天记录 images via `msg/attach/<chat>/<yyyy-mm>/Rec/*/Img/{file}` hardlink paths (bare `0`/`1`/`2` without `.dat`); remove the ineffective HTTP CDN nested-image fallback.
+
+- [#139](https://github.com/kyan-du/agent-wechat/pull/139) [`d32f547`](https://github.com/kyan-du/agent-wechat/commit/d32f547abef2db080e1401bb4535f74814bc84f3) Thanks [@kyan-du](https://github.com/kyan-du)! - Parse WeChat quote/reply (`<refermsg>`) of merged-forward / 聊天记录 cards: unwrap the entity-escaped (and CDATA) payload in `refermsg/content`, populate `forwarded.nodes`, and route media through the same nested dataitem path as a direct forward. Plain quoted images still report `QUOTED_IMAGE_RESOURCE_UNAVAILABLE`. Nested image bytes still require a local image file, including the `Rec/*/Img` paths resolved by #141.
+
+  This adds quoted-card parsing and server-side media routing, not verified automatic attachment of nested images to quoted messages. The quoted-message end-to-end attachment path remains unresolved; nested voice/video are not supported.
+
 ## 0.14.3
 
 ### Patch Changes
