@@ -489,6 +489,10 @@ fn derive_xor_byte(dat: &[u8], dec_head: &[u8]) -> Option<u8> {
     None
 }
 
+fn is_dat_thumbnail_name(name: &str) -> bool {
+    name.ends_with("_t.dat") || name.ends_with("_t")
+}
+
 fn resolve_xor_byte(dat_path: &str, dat: &[u8], image_keys: &ImageKeys) -> Option<u8> {
     if let Some(xb) = image_keys.xor_byte {
         return Some(xb);
@@ -498,12 +502,13 @@ fn resolve_xor_byte(dat_path: &str, dat: &[u8], image_keys: &ImageKeys) -> Optio
     if xb.is_some() {
         return xb;
     }
-    // Try sibling _t.dat files (JPEG thumbnails are reliable for XOR derivation)
+    // Try sibling thumbnail files (JPEG thumbs are reliable for XOR derivation).
+    // Ordinary Img uses `{hash}_t.dat`; Rec 聊天记录 uses bare `{n}_t`.
     let dir = Path::new(dat_path).parent()?;
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with("_t.dat") {
+            if !is_dat_thumbnail_name(&name) {
                 continue;
             }
             if let Some(sib) = read_stable_file(&entry.path()) {
@@ -1327,20 +1332,32 @@ fn get_nested_image(
         let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
         let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
             .or_else(|| find_dat_via_md5_filename(account_dir, md5));
-        if let Some(dat_path) = dat_path {
-            let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
-            if result.data.is_some() {
-                let ext = Path::new(&result.filename)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("jpg")
-                    .to_string();
-                result.filename = format!("chat_history_{local_id}_{index}.{ext}");
-                result.source = Some("local-dat".into());
-                if let Some(media) = media_with_data(result) {
-                    return Some(media);
-                }
+        let Some(dat_path) = dat_path else {
+            tracing::warn!(
+                "[media:nested-image] no dat path local_id={local_id} index={index} md5={md5}"
+            );
+            return None;
+        };
+        let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+        if result.data.is_some() {
+            let ext = Path::new(&result.filename)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("jpg")
+                .to_string();
+            result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+            result.source = Some("local-dat".into());
+            if let Some(media) = media_with_data(result) {
+                return Some(media);
             }
+            tracing::warn!(
+                "[media:nested-image] media_with_data rejected local_id={local_id} index={index}"
+            );
+        } else {
+            tracing::warn!(
+                "[media:nested-image] decrypt failed local_id={local_id} index={index} path={dat_path} code={:?}",
+                result.error_code
+            );
         }
     }
 
@@ -2072,6 +2089,16 @@ mod tests {
             fs::write(img.join("0"), card).unwrap();
         }
         assert!(resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0", None).is_none());
+    }
+
+    #[test]
+    fn dat_thumbnail_names_include_rec_bare_suffix() {
+        assert!(is_dat_thumbnail_name("abc_t.dat"));
+        assert!(is_dat_thumbnail_name("0_t"));
+        assert!(is_dat_thumbnail_name("12_t"));
+        assert!(!is_dat_thumbnail_name("0"));
+        assert!(!is_dat_thumbnail_name("0.dat"));
+        assert!(!is_dat_thumbnail_name("photo.jpg"));
     }
 
     #[test]
