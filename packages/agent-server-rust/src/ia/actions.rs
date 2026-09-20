@@ -209,6 +209,32 @@ pub fn double_click_chat_history_card(bounds: &Bounds) -> Action {
 
 /// `/opt/tools/scroll` alone often does nothing until Messages is focused.
 /// Recipe: click Messages list center, then Page_Up / Page_Down.
+/// Nested 聊天记录 detail lists often need wheel scroll (Page_Down alone stalls).
+/// Recipe: click list center (focus + cursor), then `/opt/tools/scroll` at the cursor.
+/// Keep click and scroll adjacent; window-activate between them can move the cursor.
+pub fn focus_list_and_wheel_scroll(list_bounds: &Bounds, direction: ScrollDirection, amount: i32) -> Action {
+    let x = (list_bounds.x + list_bounds.width / 2.0).round();
+    let y = (list_bounds.y + list_bounds.height / 2.0).round();
+    sequence(vec![
+        // Bare coords (no --window) so activate does not steal the pointer.
+        Action::ClickCoords { x, y },
+        wait(80),
+        Action::Scroll {
+            direction,
+            x: Some(x),
+            y: Some(y),
+            amount: Some(amount.max(1)),
+        },
+        wait(80),
+        Action::Scroll {
+            direction,
+            x: Some(x),
+            y: Some(y),
+            amount: Some(amount.max(1)),
+        },
+    ])
+}
+
 pub fn focus_messages_and_page(messages_bounds: &Bounds, direction: ScrollDirection) -> Action {
     let x = (messages_bounds.x + messages_bounds.width / 2.0).round();
     let y = (messages_bounds.y + messages_bounds.height / 2.0).round();

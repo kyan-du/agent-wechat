@@ -113,7 +113,7 @@ export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
 export const FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
 export const FILE_MATERIALIZATION_CLICK_TIMEOUT_MS = 8_000;
 // Chat-history card open needs scroll + double-click; keep fire-and-forget.
-export const CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS = 12_000;
+export const CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS = 25_000;
 
 export type MediaMaterializationTriggerOptions = {
   log?: { info?: (...args: any[]) => void };
