@@ -112,6 +112,13 @@ fn read_verified_payload(path: &Path, md5: &str) -> Option<Vec<u8>> {
     (format!("{:x}", Md5::digest(&data)) == md5).then_some(data)
 }
 
+fn unique_existing_file(mut paths: Vec<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    paths.retain(|path| path.is_file());
+    paths.sort();
+    paths.dedup();
+    (paths.len() == 1).then(|| paths.pop().expect("unique file"))
+}
+
 fn nested_item_time(item: &str, fallback: i64) -> i64 {
     extract_xml_tag(item, "sourcetime")
         .or_else(|| extract_xml_tag(item, "createtime"))
@@ -205,6 +212,14 @@ fn is_quoted_video_xml(xml: &str) -> bool {
     xml.contains("<videomsg")
 }
 
+fn rec_kind_suffixes(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "Video" | "Vid" => &[".mp4"],
+        "Voic" | "Voice" => &[".silk", ".mp3"],
+        _ => &[".dat", ".pdf", ".docx"],
+    }
+}
+
 fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path::PathBuf> {
     let attach = base.join("msg/attach");
     if !attach.is_dir() {
@@ -219,6 +234,7 @@ fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path:
         .filter(|p| p.is_dir())
         .collect();
     chats.sort();
+    let mut found = Vec::new();
     for chat in chats {
         let Ok(month_dirs) = fs::read_dir(&chat) else {
             continue;
@@ -247,22 +263,19 @@ fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path:
                 }
                 let exact = dir.join(stem);
                 if exact.is_file() {
-                    return Some(exact);
+                    found.push(exact);
+                    continue;
                 }
-                for suffix in match kind {
-                    "Video" | "Vid" => &[".mp4"][..],
-                    "Voic" | "Voice" => &[".silk", ".mp3"][..],
-                    _ => &[".dat", ".pdf", ".docx"][..],
-                } {
+                for suffix in rec_kind_suffixes(kind) {
                     let candidate = dir.join(format!("{stem}{suffix}"));
                     if candidate.is_file() {
-                        return Some(candidate);
+                        found.push(candidate);
                     }
                 }
             }
         }
     }
-    None
+    unique_existing_file(found)
 }
 
 fn encode_media_bytes(
@@ -387,37 +400,6 @@ fn get_image_thumbnail(
                     error_code: None,
                     items: Vec::new(),
                 });
-            }
-        }
-
-        // Fallback: find any thumbnail matching this localId
-        let thumb_dir = Path::new(base)
-            .join("cache")
-            .join(&year_month)
-            .join("Message")
-            .join(&hash)
-            .join("Thumb");
-        if let Ok(entries) = fs::read_dir(&thumb_dir) {
-            let prefix = format!("{local_id}_");
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&prefix) {
-                    if let Some(data) = read_stable_file(&entry.path()) {
-                        return Some(MediaResult {
-                            media_type: "image".into(),
-                            data: Some(base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                &data,
-                            )),
-                            url: None,
-                            format: "jpeg".into(),
-                            filename: format!("msg_{local_id}.jpg"),
-                            source: None,
-                            error_code: None,
-                            items: Vec::new(),
-                        });
-                    }
-                }
             }
         }
     }
@@ -689,13 +671,14 @@ fn find_dat_via_hardlink(
              WHERE md5 = '{image_md5}' LIMIT 2;"
         ),
     );
-    let row = match file_rows.first() {
-        Some(r) => r,
-        None => {
-            tracing::warn!("[media:hardlink] no hardlink row md5_present=true");
-            return None;
-        }
-    };
+    if file_rows.len() != 1 {
+        tracing::warn!(
+            "[media:hardlink] ambiguous or missing hardlink row count={}",
+            file_rows.len()
+        );
+        return None;
+    }
+    let row = &file_rows[0];
     let file_name = row.get("file_name")?.as_str()?;
     let dir1 = row.get("dir1")?.as_i64()?;
     let dir2 = row.get("dir2")?.as_i64()?;
@@ -1247,6 +1230,7 @@ fn get_file_attachment(
 
 fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
     let md5 = md5.to_ascii_lowercase();
+    let mut found = Vec::new();
     for base in &account_base_paths(account_dir) {
         let attach = Path::new(base).join("msg/attach");
         if !attach.exists() {
@@ -1265,11 +1249,9 @@ fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
                 let month_path = month_entry.path();
                 let img_dir = month_path.join("Img");
                 if img_dir.is_dir() {
-                    for suffix in ["", "_t"] {
-                        let candidate = img_dir.join(format!("{md5}{suffix}.dat"));
-                        if candidate.is_file() {
-                            return Some(candidate.to_string_lossy().to_string());
-                        }
+                    let candidate = img_dir.join(format!("{md5}.dat"));
+                    if candidate.is_file() {
+                        found.push(candidate);
                     }
                 }
                 let rec_root = month_path.join("Rec");
@@ -1285,18 +1267,16 @@ fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
                         if !img_dir.is_dir() {
                             continue;
                         }
-                        for suffix in ["", "_t"] {
-                            let candidate = img_dir.join(format!("{md5}{suffix}.dat"));
-                            if candidate.is_file() {
-                                return Some(candidate.to_string_lossy().to_string());
-                            }
+                        let candidate = img_dir.join(format!("{md5}.dat"));
+                        if candidate.is_file() {
+                            found.push(candidate);
                         }
                     }
                 }
             }
         }
     }
-    None
+    unique_existing_file(found).map(|path| path.to_string_lossy().to_string())
 }
 
 /// Nested 聊天记录 images resolve via local hardlink / md5 `.dat` only.
@@ -1317,7 +1297,9 @@ fn get_nested_image(
     index: usize,
     image_keys: Option<&ImageKeys>,
 ) -> Option<MediaResult> {
-    let md5 = nested_image_md5(item);
+    // Nested originals require a full-content hash. thumbfullmd5 is a preview
+    // digest and must not select a different cached .dat as the payload.
+    let md5 = nested_payload_md5(item);
 
     // Local .dat via hardlink (incl. Rec/*/Img) / md5 filename + session image keys.
     if let (Some(md5), Some(image_keys)) = (md5.as_ref(), image_keys) {
@@ -1569,7 +1551,7 @@ fn quoted_media_from_xml(
     if is_quoted_image_xml(xml) {
         return get_nested_image(account_dir, keys, xml, local_id, 0, image_keys.as_ref()).or_else(
             || {
-                if nested_image_md5(xml).is_none() {
+                if nested_payload_md5(xml).is_none() {
                     return None;
                 }
                 Some(pending_with(
@@ -2069,6 +2051,78 @@ mod tests {
             fs::write(img.join("0"), card).unwrap();
         }
         assert!(resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0").is_none());
+    }
+
+    #[test]
+    fn rec_named_file_rejects_same_stem_in_two_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        for card in ["card-a", "card-b"] {
+            let voic = dir
+                .path()
+                .join(format!("msg/attach/chat/2026-09/Rec/{card}/Voic"));
+            fs::create_dir_all(&voic).unwrap();
+            fs::write(voic.join(stem), b"\x02#!SILK_V3").unwrap();
+        }
+        assert!(find_rec_named_file(dir.path(), "Voic", stem).is_none());
+    }
+
+    #[test]
+    fn md5_filename_lookup_rejects_thumbnails_and_duplicate_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let md5 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let img = dir.path().join("msg/attach/chat/2026-09/Img");
+        fs::create_dir_all(&img).unwrap();
+        fs::write(img.join(format!("{md5}_t.dat")), b"thumb").unwrap();
+        assert!(find_dat_via_md5_filename(dir.path().to_str().unwrap(), md5).is_none());
+        fs::write(img.join(format!("{md5}.dat")), b"full").unwrap();
+        let found = find_dat_via_md5_filename(dir.path().to_str().unwrap(), md5).unwrap();
+        assert!(found.ends_with(&format!("{md5}.dat")));
+
+        let other = dir.path().join("msg/attach/other/2026-09/Img");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(format!("{md5}.dat")), b"other").unwrap();
+        assert!(find_dat_via_md5_filename(dir.path().to_str().unwrap(), md5).is_none());
+    }
+
+    #[test]
+    fn nested_image_requires_full_payload_hash_not_thumbnail() {
+        let item = r#"<dataitem datatype="2" thumbfullmd5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" />"#;
+        assert!(nested_payload_md5(item).is_none());
+        assert!(get_nested_image(
+            "/tmp/no-such-account",
+            &HashMap::new(),
+            item,
+            7,
+            0,
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn thumbnail_lookup_requires_exact_local_id_and_create_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_id = "wxid_direct";
+        let hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
+        let thumb_dir = dir
+            .path()
+            .join("cache/1970-01/Message")
+            .join(&hash)
+            .join("Thumb");
+        fs::create_dir_all(&thumb_dir).unwrap();
+        fs::write(thumb_dir.join("7_1_thumb.jpg"), b"\xff\xd8\xffold").unwrap();
+        fs::write(thumb_dir.join("70_0_thumb.jpg"), b"\xff\xd8\xffprefix").unwrap();
+        assert!(get_image_thumbnail(dir.path().to_str().unwrap(), chat_id, 7, 0).is_none());
+        fs::write(thumb_dir.join("7_0_thumb.jpg"), b"\xff\xd8\xffexact").unwrap();
+        let found = get_image_thumbnail(dir.path().to_str().unwrap(), chat_id, 7, 0).unwrap();
+        assert_eq!(
+            found.data.as_deref(),
+            Some(
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"\xff\xd8\xffexact")
+                    .as_str()
+            )
+        );
     }
 
     #[test]

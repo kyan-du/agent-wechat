@@ -50,6 +50,7 @@ import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup
 import { formatType49MediaFailureBody, safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import {
   isWeChatChatHistoryMessage,
+  chatHistoryMediaPollWindow,
   chatHistoryTitleFromMessage,
   mediaFlagsFromPollResult,
   mediaMaterializationTriggerForMessage,
@@ -528,13 +529,14 @@ async function prepareMessage(
   if (mayHaveMedia) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
     try {
+      const chatHistoryPoll = isChatHistory ? chatHistoryMediaPollWindow() : undefined;
       const result = await pollMedia(
         client,
         chatId,
         msg.localId,
         log,
-        undefined,
-        undefined,
+        chatHistoryPoll?.maxAttempts,
+        chatHistoryPoll?.intervalMs,
         mediaMaterializationTriggerForMessage({
           client,
           chatId,
