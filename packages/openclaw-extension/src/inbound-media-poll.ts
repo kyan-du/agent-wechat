@@ -104,6 +104,7 @@ const RETRYABLE_MEDIA_ERRORS = new Set([
 // Keep a missing local image from serially blocking the rest of an inbound batch.
 export const DEFAULT_MEDIA_POLL_ATTEMPTS = 6;
 export const DEFAULT_MEDIA_POLL_INTERVAL_MS = 500;
+export const CHAT_HISTORY_MEDIA_POLL_INTERVAL_MS = 1_000;
 // Overlay openChat can stall ~60s on UNKNOWN_UI_STATE_TIMEOUT. Bound the trigger
 // so the short media poll window still returns even if UI never settles.
 export const IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS = 400;
@@ -338,6 +339,20 @@ function isRetryable(result: MediaResult): boolean {
   if (result.data !== undefined) return false;
   if (result.errorCode !== undefined) return RETRYABLE_MEDIA_ERRORS.has(result.errorCode);
   return result.type === "pending";
+}
+
+export function chatHistoryMediaPollWindow(opts?: {
+  timeoutMs?: number;
+  intervalMs?: number;
+}): { maxAttempts: number; intervalMs: number } {
+  const intervalMs = Math.max(1, opts?.intervalMs ?? CHAT_HISTORY_MEDIA_POLL_INTERVAL_MS);
+  const timeoutMs = opts?.timeoutMs ?? CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS;
+  // Cover the fire-and-forget GUI budget plus one extra getMedia after it.
+  const maxAttempts = Math.max(
+    DEFAULT_MEDIA_POLL_ATTEMPTS,
+    Math.ceil(timeoutMs / intervalMs) + 1,
+  );
+  return { maxAttempts, intervalMs };
 }
 
 export async function pollMedia(
