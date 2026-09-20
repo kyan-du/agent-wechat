@@ -389,7 +389,7 @@ test("chat history with nested data does not need materialize trigger", async ()
   assert.equal(nestedChatHistoryMedia(result).length, 1);
 });
 
-test("quoted chat-history pending still materializes the nested card without openChat", async () => {
+test("unidentified quoted chat-history does not click an unrelated card", async () => {
   let opens = 0;
   let materializes = 0;
   const trigger = mediaMaterializationTriggerForMessage({
@@ -416,7 +416,7 @@ test("quoted chat-history pending still materializes the nested card without ope
     },
   } as never, "wxid_quote", 10, undefined, 3, 0, trigger);
   assert.equal(opens, 0);
-  assert.equal(materializes, 1);
+  assert.equal(materializes, 0);
   assert.equal(calls, 3);
   assert.equal(nestedChatHistoryMedia(result).length, 1);
 });
@@ -552,4 +552,30 @@ test("media polling stops immediately for permanent image key and decryption fai
     assert.equal(result?.errorCode, errorCode);
     assert.equal(result?.type, "pending");
   }
+});
+
+test("partial nested results retry within budget and preserve attachments on exhaustion", async () => {
+  let calls = 0;
+  let triggers = 0;
+  const partial = {
+    type: "pending" as const, format: "", filename: "", errorCode: "CHAT_HISTORY_NOT_MATERIALIZED",
+    items: [{ type: "file" as const, data: "JVBERi0x", format: "pdf", filename: "chat_history_7_2_b.pdf" }],
+  };
+  const result = await pollMedia({ getMedia: async () => { calls++; return partial; } }, "chat", 7,
+    undefined, 3, 0, async () => { triggers++; });
+  assert.equal(calls, 3);
+  assert.equal(triggers, 1);
+  assert.deepEqual(result, partial);
+  assert.equal(nestedChatHistoryMedia(result).length, 1);
+});
+
+test("chat-history boolean without a title also fails closed", async () => {
+  let materializes = 0;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: { openChat: async () => {}, materializeChatHistory: async () => { materializes++; } },
+    chatId: "chat", messageType: 49, chatHistory: true,
+  });
+  const pending = { type: "pending" as const, format: "", filename: "", errorCode: "CHAT_HISTORY_NOT_MATERIALIZED" };
+  await pollMedia({ getMedia: async () => pending }, "chat", 7, undefined, 2, 0, trigger);
+  assert.equal(materializes, 0);
 });

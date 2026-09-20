@@ -80,3 +80,16 @@ test("corrupt ledger is quarantined and blocks startup", () => {
     error instanceof InboundLedgerStateError && error.code === "INBOUND_LEDGER_BLOCKED"
   );
 });
+
+test("nested media bindings are distinct and stable across partial-result ordering", async () => {
+  const { nestedMediaEventId } = await import("./monitor-ledger.ts");
+  const parent = inboundEventId("default", "wxid_chat", message(7));
+  // The old localId arithmetic cannot distinguish children: cursorMessageKey ignores localId.
+  assert.equal(parent, inboundEventId("default", "wxid_chat", { ...message(7), localId: 7001 }));
+  const first = { type: "file", filename: "chat_history_7_0_a.pdf" };
+  const second = { type: "file", filename: "chat_history_7_2_b.pdf" };
+  assert.notEqual(nestedMediaEventId(parent, first), nestedMediaEventId(parent, second));
+  assert.notEqual(nestedMediaEventId(parent, first), parent);
+  assert.equal(nestedMediaEventId(parent, second), nestedMediaEventId(parent, [second, first][0]));
+  assert.notEqual(nestedMediaEventId(parent, first), nestedMediaEventId("other-parent", first));
+});

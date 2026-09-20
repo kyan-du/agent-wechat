@@ -25,7 +25,6 @@ const MIME_BY_FORMAT: Record<string, string> = {
   xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   zip: "application/zip", txt: "text/plain", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
-  silk: "audio/mpeg",
 };
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -381,14 +380,6 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
     if (invalidCode) return { ok: false, code: invalidCode };
   } else if (result.type === "voice" || result.type === "video") {
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
-    if (result.type === "voice" && format === "silk") {
-      const silk = buffer[0] === 0x02
-        ? buffer.subarray(1)
-        : buffer;
-      if (silk.length >= 9 && silk.toString("ascii", 0, 9) === "#!SILK_V3") {
-        return { ok: true, value: { buffer, mime: "audio/mpeg" } };
-      }
-    }
     const detected = binaryMimeFromMagic(buffer);
     if (!detected || detected !== declared) return { ok: false, code: "MEDIA_MAGIC_MISMATCH" };
   } else if (result.type === "file") {

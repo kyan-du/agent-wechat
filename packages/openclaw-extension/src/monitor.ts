@@ -57,7 +57,7 @@ import {
   pollMedia,
   shouldPollInboundMedia,
 } from "./inbound-media-poll.js";
-import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, loadInboundEventLedger } from "./monitor-ledger.js";
+import { InboundEventLedger, inboundEventId as inboundEventIdForMedia, nestedMediaEventId, loadInboundEventLedger } from "./monitor-ledger.js";
 import { loadMediaPipeline, MEDIA_RETENTION_MS, type MediaPipeline } from "./media-pipeline.js";
 import {
   isNewsappChat,
@@ -557,12 +557,9 @@ async function prepareMessage(
           const saved = await mediaPipeline.process(
             item as MediaResult,
             {
-              eventId: inboundEventIdForMedia(liveAccount.accountId, chatId, {
-                ...msg,
-                localId: msg.localId * 1000 + index,
-              }),
+              eventId: nestedMediaEventId(inboundEventIdForMedia(liveAccount.accountId, chatId, msg), item),
               chatId,
-              localId: msg.localId * 1000 + index,
+              localId: msg.localId,
             },
             async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),
             async (buffer, mime, filename) => core.channel.media.saveMediaBuffer(buffer, mime, "inbound", undefined, filename),

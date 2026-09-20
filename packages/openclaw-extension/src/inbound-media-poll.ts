@@ -120,6 +120,8 @@ export type MediaMaterializationTriggerOptions = {
   // Catch-up processUnreadChat(..., skipOpen=true) must still reopen for type=3
   // and type=49 file attachments. Callers can pass skipOpen without gating the trigger.
   skipOpen?: boolean;
+  title?: string;
+  localId?: number;
 };
 export type ImageMaterializationTriggerOptions = MediaMaterializationTriggerOptions;
 
@@ -222,7 +224,7 @@ export function createChatHistoryMaterializationTrigger(
   options?: MediaMaterializationTriggerOptions & { title?: string; localId?: number },
 ): MediaRetryTrigger {
   return async (result, attempt) => {
-    if (!shouldTriggerChatHistoryMaterialization(result)) return;
+    if (!shouldTriggerChatHistoryMaterialization(result) || !options?.title?.trim()) return;
     triggerChatHistoryMaterialize(client, chatId, result, attempt, options);
   };
 }
@@ -248,6 +250,9 @@ export function createMediaMaterializationTrigger(
   const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
   return async (result, attempt) => {
     if (result.errorCode === "CHAT_HISTORY_NOT_MATERIALIZED") {
+      // A quoted card without a title cannot be mapped to a transcript bubble.
+      // localId is only logged by the server; never click an unrelated unique card.
+      if (!options?.title?.trim()) return;
       triggerChatHistoryMaterialize(client, chatId, result, attempt, options);
       return;
     }

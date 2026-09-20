@@ -119,6 +119,15 @@ export function inboundEventId(accountId: string, chatId: string, message: Messa
     .digest("hex");
 }
 
+/** Bind a nested attachment to its parent without inventing message localIds.
+ * Server filenames retain the original dataitem index even in partial results.
+ */
+export function nestedMediaEventId(parentEventId: string, item: { type?: string; filename?: string }): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["nested-media", parentEventId, item.type ?? "", item.filename ?? ""]))
+    .digest("hex");
+}
+
 export class InboundEventLedger {
   private readonly path: string;
   private readonly entries = new Map<string, InboundEventRecord>();

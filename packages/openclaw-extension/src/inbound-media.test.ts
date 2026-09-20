@@ -327,3 +327,11 @@ test("save helper reports absent path and thrown saves without exposing details"
   assert.deepEqual(await saveValidatedInboundMedia(fixture, async () => { throw new Error("redacted fixture detail"); }), { ok: false, code: "MEDIA_SAVE_FAILED" });
   assert.deepEqual(await saveValidatedInboundMedia(fixture, async () => ({ path: "/opaque/media" })), { ok: true, path: "/opaque/media", mime: "image/jpeg" });
 });
+
+test("raw SILK and disguised MPEG are not accepted as MPEG audio", async () => {
+  for (const bytes of [Buffer.from("#!SILK_V3payload"), Buffer.from("\x02#!SILK_V3payload"), Buffer.from("ID3payload")]) {
+    assert.deepEqual(await validateInboundMedia({
+      type: "voice", data: bytes.toString("base64"), format: "silk", filename: "voice.silk",
+    }), { ok: false, code: "MEDIA_MAGIC_MISMATCH" });
+  }
+});
