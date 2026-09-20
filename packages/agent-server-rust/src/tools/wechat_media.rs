@@ -59,7 +59,11 @@ fn is_chat_history_appmsg(sub: i32, content: &str) -> bool {
 
 const MAX_NESTED_CHAT_HISTORY_MEDIA: usize = 16;
 const NESTED_IMAGE_TYPE: i32 = 2;
+const NESTED_VOICE_TYPE: i32 = 3;
+const NESTED_VIDEO_TYPE: i32 = 4;
 const NESTED_FILE_TYPE: i32 = 8;
+const NESTED_VOICE_MSG_TYPE: i32 = 34;
+const NESTED_VIDEO_MSG_TYPE: i32 = 43;
 
 fn sanitize_md5(raw: &str) -> Option<String> {
     let value = raw.trim();
@@ -73,6 +77,7 @@ fn sanitize_md5(raw: &str) -> Option<String> {
 fn dataitem_type(item: &str) -> i32 {
     xml_attr(item, "datatype")
         .or_else(|| extract_xml_tag(item, "datatype"))
+        .or_else(|| xml_attr(item, "type"))
         .or_else(|| extract_xml_tag(item, "type"))
         .and_then(|value| value.parse().ok())
         .unwrap_or(0)
@@ -156,11 +161,117 @@ fn read_stable_file(path: &Path) -> Option<Vec<u8>> {
     Some(second)
 }
 
-fn account_base_paths(account_dir: &str) -> [String; 2] {
-    [
+fn account_base_paths(account_dir: &str) -> Vec<String> {
+    if account_dir.starts_with('/') {
+        return vec![account_dir.to_string()];
+    }
+    vec![
         format!("/home/wechat/xwechat_files/{account_dir}"),
         format!("/home/wechat/Documents/xwechat_files/{account_dir}"),
     ]
+}
+
+fn is_quoted_image_xml(xml: &str) -> bool {
+    xml.contains("<img") && !is_merged_forward_xml(xml)
+}
+
+fn is_quoted_file_xml(xml: &str) -> bool {
+    extract_xml_tag(xml, "type").and_then(|value| value.parse::<i32>().ok()) == Some(6)
+}
+
+fn is_quoted_voice_xml(xml: &str) -> bool {
+    xml.contains("<voicemsg")
+}
+
+fn is_quoted_video_xml(xml: &str) -> bool {
+    xml.contains("<videomsg")
+}
+
+fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path::PathBuf> {
+    let attach = base.join("msg/attach");
+    if !attach.is_dir() {
+        return None;
+    }
+    let Ok(chat_dirs) = fs::read_dir(&attach) else {
+        return None;
+    };
+    let mut chats: Vec<_> = chat_dirs
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    chats.sort();
+    for chat in chats {
+        let Ok(month_dirs) = fs::read_dir(&chat) else {
+            continue;
+        };
+        let mut months: Vec<_> = month_dirs
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        months.sort();
+        for month in months {
+            let rec_root = month.join("Rec");
+            let Ok(rec_dirs) = fs::read_dir(&rec_root) else {
+                continue;
+            };
+            let mut recs: Vec<_> = rec_dirs
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            recs.sort();
+            for rec in recs {
+                let dir = rec.join(kind);
+                if !dir.is_dir() {
+                    continue;
+                }
+                let exact = dir.join(stem);
+                if exact.is_file() {
+                    return Some(exact);
+                }
+                for suffix in [".dat", ".mp4", ".jpg", ".silk"] {
+                    let candidate = dir.join(format!("{stem}{suffix}"));
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    let mut files: Vec<_> = entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_file())
+                        .collect();
+                    files.sort();
+                    for file in files {
+                        let name = file.file_name()?.to_string_lossy();
+                        if name == stem || name.starts_with(stem) {
+                            return Some(file);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn encode_media_bytes(
+    media_type: &str,
+    data: &[u8],
+    format: impl Into<String>,
+    filename: impl Into<String>,
+) -> MediaResult {
+    media_result(
+        media_type,
+        Some(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            data,
+        )),
+        format,
+        filename,
+    )
 }
 
 /// Look up a single message's raw content by localId.
@@ -1116,8 +1227,6 @@ fn get_file_attachment(
     pending_with("file", ext, filename, "FILE_NOT_DOWNLOADED")
 }
 
-
-
 fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
     let md5 = md5.to_ascii_lowercase();
     for base in &account_base_paths(account_dir) {
@@ -1217,7 +1326,6 @@ fn get_nested_image(
     None
 }
 
-
 fn get_nested_file(
     account_dir: &str,
     item: &str,
@@ -1237,6 +1345,28 @@ fn get_nested_file(
         local_id,
     );
     if result.data.is_none() {
+        if let Some(md5) = nested_image_md5(item) {
+            for base in account_base_paths(account_dir) {
+                if let Some(path) = find_rec_named_file(Path::new(&base), "File", &md5)
+                    .or_else(|| find_rec_named_file(Path::new(&base), "Files", &md5))
+                {
+                    if let Some(data) = read_stable_file(&path) {
+                        let ext = Path::new(&filename)
+                            .extension()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("bin");
+                        result = encode_media_bytes(
+                            "file",
+                            &data,
+                            ext,
+                            format!("chat_history_{local_id}_{index}_{filename}"),
+                        );
+                        result.source = Some("local-rec".into());
+                        return media_with_data(result);
+                    }
+                }
+            }
+        }
         return None;
     }
     let ext = Path::new(&result.filename)
@@ -1252,6 +1382,109 @@ fn get_nested_file(
     media_with_data(result)
 }
 
+fn get_nested_voice(
+    account_dir: &str,
+    item: &str,
+    local_id: i64,
+    index: usize,
+) -> Option<MediaResult> {
+    let md5 = nested_image_md5(item)?;
+    for base in account_base_paths(account_dir) {
+        let Some(path) = find_rec_named_file(Path::new(&base), "Voic", &md5)
+            .or_else(|| find_rec_named_file(Path::new(&base), "Voice", &md5))
+        else {
+            continue;
+        };
+        let Some(data) = read_stable_file(&path) else {
+            continue;
+        };
+        if let Some((mp3, _)) = convert_media("silk2mp3", &data) {
+            let mut result = encode_media_bytes(
+                "voice",
+                &mp3,
+                "mp3",
+                format!("chat_history_{local_id}_{index}.mp3"),
+            );
+            result.source = Some("local-rec".into());
+            return media_with_data(result);
+        }
+        if data.starts_with(b"ID3")
+            || (data.len() >= 2 && data[0] == 0xff && data[1] & 0xe0 == 0xe0)
+        {
+            let mut result = encode_media_bytes(
+                "voice",
+                &data,
+                "mp3",
+                format!("chat_history_{local_id}_{index}.mp3"),
+            );
+            result.source = Some("local-rec".into());
+            return media_with_data(result);
+        }
+        let mut result = encode_media_bytes(
+            "voice",
+            &data,
+            "silk",
+            format!("chat_history_{local_id}_{index}.silk"),
+        );
+        result.source = Some("local-rec".into());
+        return media_with_data(result);
+    }
+    None
+}
+
+fn get_nested_video(
+    account_dir: &str,
+    item: &str,
+    local_id: i64,
+    index: usize,
+) -> Option<MediaResult> {
+    let md5 = nested_image_md5(item)?;
+    for base in account_base_paths(account_dir) {
+        let Some(path) = find_rec_named_file(Path::new(&base), "Video", &md5)
+            .or_else(|| find_rec_named_file(Path::new(&base), "Vid", &md5))
+        else {
+            continue;
+        };
+        let Some(data) = read_stable_file(&path) else {
+            continue;
+        };
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("mp4")
+            .to_ascii_lowercase();
+        let (media_type, format, filename) = if ext == "jpg" || ext == "jpeg" {
+            (
+                "image",
+                "jpeg",
+                format!("chat_history_{local_id}_{index}_cover.jpg"),
+            )
+        } else {
+            (
+                "video",
+                "mp4",
+                format!("chat_history_{local_id}_{index}.mp4"),
+            )
+        };
+        let mut result = encode_media_bytes(media_type, &data, format, filename);
+        result.source = Some("local-rec".into());
+        return media_with_data(result);
+    }
+    None
+}
+
+fn is_nested_media_type(nested_type: i32) -> bool {
+    matches!(
+        nested_type,
+        NESTED_IMAGE_TYPE
+            | NESTED_VOICE_TYPE
+            | NESTED_VIDEO_TYPE
+            | NESTED_FILE_TYPE
+            | NESTED_VOICE_MSG_TYPE
+            | NESTED_VIDEO_MSG_TYPE
+    )
+}
+
 fn get_chat_history_media(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1265,23 +1498,29 @@ fn get_chat_history_media(
         xor_byte,
     });
     let mut items = Vec::new();
-    let mut nested_image_count = 0usize;
+    let mut nested_media_count = 0usize;
     for (index, item) in collect_forward_dataitems(content).into_iter().enumerate() {
         if items.len() >= MAX_NESTED_CHAT_HISTORY_MEDIA {
             break;
         }
         let nested_type = dataitem_type(&item);
+        if is_nested_media_type(nested_type) {
+            nested_media_count += 1;
+        }
         let resolved = match nested_type {
-            NESTED_IMAGE_TYPE => {
-                nested_image_count += 1;
-                get_nested_image(
-                    account_dir,
-                    keys,
-                    &item,
-                    local_id,
-                    index,
-                    image_keys.as_ref(),
-                )
+            NESTED_IMAGE_TYPE => get_nested_image(
+                account_dir,
+                keys,
+                &item,
+                local_id,
+                index,
+                image_keys.as_ref(),
+            ),
+            NESTED_VOICE_TYPE | NESTED_VOICE_MSG_TYPE => {
+                get_nested_voice(account_dir, &item, local_id, index)
+            }
+            NESTED_VIDEO_TYPE | NESTED_VIDEO_MSG_TYPE => {
+                get_nested_video(account_dir, &item, local_id, index)
             }
             NESTED_FILE_TYPE => get_nested_file(account_dir, &item, local_id, index, create_time),
             _ => None,
@@ -1290,20 +1529,91 @@ fn get_chat_history_media(
             items.push(media);
         }
     }
-    // Nested image dataitems present but nothing resolved yet — Rec files are
-    // usually missing until the GUI card is opened. Return retryable pending so
+    // Nested media present but nothing resolved yet — Rec files are usually
+    // missing until the GUI card is opened. Return retryable pending so
     // OpenClaw can fire materializeChatHistory and keep polling.
-    if items.is_empty() && nested_image_count > 0 {
-        return pending_with(
+    if nested_media_count > 0 && items.len() < nested_media_count.min(MAX_NESTED_CHAT_HISTORY_MEDIA)
+    {
+        let mut pending = pending_with(
             "pending",
             "jpeg",
             format!("chat_history_{local_id}.jpg"),
             "CHAT_HISTORY_NOT_MATERIALIZED",
         );
+        pending.items = items;
+        return pending;
     }
     let mut result = unsupported_without_error();
     result.items = items;
     result
+}
+
+fn quoted_media_from_xml(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    xml: &str,
+    local_id: i64,
+    create_time: i64,
+    image_keys_raw: Option<(String, Option<u8>)>,
+) -> Option<MediaResult> {
+    if is_merged_forward_xml(xml) || is_chat_history_appmsg(0, xml) {
+        return Some(get_chat_history_media(
+            account_dir,
+            keys,
+            xml,
+            local_id,
+            create_time,
+            image_keys_raw,
+        ));
+    }
+    let image_keys = image_keys_raw.map(|(aes_key_hex, xor_byte)| ImageKeys {
+        aes_key_hex,
+        xor_byte,
+    });
+    if is_quoted_image_xml(xml) {
+        return get_nested_image(account_dir, keys, xml, local_id, 0, image_keys.as_ref()).or_else(
+            || {
+                if nested_image_md5(xml).is_none() {
+                    return None;
+                }
+                Some(pending_with(
+                    "pending",
+                    "jpeg",
+                    format!("quoted_{local_id}.jpg"),
+                    "IMAGE_RESOURCE_UNAVAILABLE",
+                ))
+            },
+        );
+    }
+    if is_quoted_file_xml(xml) {
+        let mut result = get_file_attachment(account_dir, xml, create_time, local_id);
+        if result.data.is_some() {
+            return Some(result);
+        }
+        result.error_code = Some("FILE_NOT_DOWNLOADED".into());
+        return Some(result);
+    }
+    if is_quoted_voice_xml(xml) {
+        return get_nested_voice(account_dir, xml, local_id, 0).or_else(|| {
+            Some(pending_with(
+                "pending",
+                "mp3",
+                format!("quoted_{local_id}.mp3"),
+                "VOICE_NOT_DOWNLOADED",
+            ))
+        });
+    }
+    if is_quoted_video_xml(xml) {
+        return get_nested_video(account_dir, xml, local_id, 0).or_else(|| {
+            Some(pending_with(
+                "pending",
+                "mp4",
+                format!("quoted_{local_id}.mp4"),
+                "MEDIA_NOT_DOWNLOADED",
+            ))
+        });
+    }
+    None
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
@@ -1347,15 +1657,15 @@ pub fn get_message_media(
         49 => {
             // Quote/reply of a merged-forward card keeps the type-19 XML in refermsg.
             if let Some(referred) = refermsg_referred_xml(&content) {
-                if is_merged_forward_xml(&referred) || is_chat_history_appmsg(0, &referred) {
-                    return get_chat_history_media(
-                        account_dir,
-                        keys,
-                        &referred,
-                        local_id,
-                        create_time,
-                        image_keys_raw,
-                    );
+                if let Some(media) = quoted_media_from_xml(
+                    account_dir,
+                    keys,
+                    &referred,
+                    local_id,
+                    create_time,
+                    image_keys_raw.clone(),
+                ) {
+                    return media;
                 }
             }
             // Fall through to generic handlers below for other appmsg subtypes.
@@ -1600,6 +1910,18 @@ mod tests {
         let file = r#"<dataitem datatype="8"><datatitle>report.pdf</datatitle></dataitem>"#;
         assert_eq!(dataitem_type(file), 8);
         assert_eq!(nested_image_md5(file), None);
+        let voice = r#"<dataitem datatype="3"><fullmd5>cccccccccccccccccccccccccccccccc</fullmd5></dataitem>"#;
+        assert_eq!(dataitem_type(voice), 3);
+        assert_eq!(
+            nested_image_md5(voice).as_deref(),
+            Some("cccccccccccccccccccccccccccccccc")
+        );
+        let video = r#"<dataitem datatype="4"><fullmd5>dddddddddddddddddddddddddddddddd</fullmd5></dataitem>"#;
+        assert_eq!(dataitem_type(video), 4);
+        let voice_msg_type = r#"<dataitem type="34"><datatitle>voice</datatitle></dataitem>"#;
+        assert_eq!(dataitem_type(voice_msg_type), 34);
+        let video_msg_type = r#"<dataitem type="43"></dataitem>"#;
+        assert_eq!(dataitem_type(video_msg_type), 43);
         assert_eq!(
             nested_item_time(
                 r#"<dataitem><createtime>1700000000</createtime></dataitem>"#,
@@ -1609,6 +1931,118 @@ mod tests {
         );
     }
 
+    fn chat_history_xml(items: &str) -> String {
+        format!(
+            concat!(
+                r#"<msg><appmsg><title>混合记录</title><type>19</type><recorditem><![CDATA["#,
+                r#"<recordinfo>{items}</recordinfo>"#,
+                r#"]]></recorditem></appmsg></msg>"#,
+            ),
+            items = items
+        )
+    }
+
+    #[test]
+    fn chat_history_with_unresolved_voice_video_or_file_is_pending_retryable() {
+        let xml = chat_history_xml(concat!(
+            r#"<dataitem datatype="3"><fullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</fullmd5></dataitem>"#,
+            r#"<dataitem datatype="4"><fullmd5>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</fullmd5></dataitem>"#,
+            r#"<dataitem datatype="8"><datatitle>参观路线.docx</datatitle></dataitem>"#,
+        ));
+        let result = get_chat_history_media(
+            "/tmp/no-such-account",
+            &std::collections::HashMap::new(),
+            &xml,
+            81,
+            0,
+            None,
+        );
+        assert_eq!(result.media_type, "pending");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("CHAT_HISTORY_NOT_MATERIALIZED")
+        );
+        assert!(result.items.is_empty());
+    }
+
+    #[test]
+    fn chat_history_keeps_resolved_items_when_other_nested_media_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec_img = dir
+            .path()
+            .join("msg/attach")
+            .join("chat_md5")
+            .join("2026-09")
+            .join("Rec")
+            .join("card")
+            .join("Img");
+        fs::create_dir_all(&rec_img).unwrap();
+        fs::write(rec_img.join("0"), b"not-used-directly").unwrap();
+        let xml = chat_history_xml(concat!(
+            r#"<dataitem datatype="1"><datadesc>hello</datadesc></dataitem>"#,
+            r#"<dataitem datatype="8"><datatitle>missing.docx</datatitle></dataitem>"#,
+        ));
+        let result = get_chat_history_media(
+            "/tmp/no-such-account",
+            &std::collections::HashMap::new(),
+            &xml,
+            82,
+            1_725_000_000,
+            None,
+        );
+        assert_eq!(result.media_type, "pending");
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("CHAT_HISTORY_NOT_MATERIALIZED")
+        );
+    }
+
+    #[test]
+    fn find_rec_named_file_scans_voic_and_video_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let month = dir.path().join("msg/attach").join("chat").join("2026-09");
+        let voic = month.join("Rec").join("id").join("Voic");
+        let video = month.join("Rec").join("id").join("Video");
+        fs::create_dir_all(&voic).unwrap();
+        fs::create_dir_all(&video).unwrap();
+        fs::write(
+            voic.join("cccccccccccccccccccccccccccccccc"),
+            b"\x02#!SILK_V3",
+        )
+        .unwrap();
+        fs::write(video.join("dddddddddddddddddddddddddddddddd.mp4"), b"mp4").unwrap();
+        let found_voice =
+            find_rec_named_file(dir.path(), "Voic", "cccccccccccccccccccccccccccccccc").unwrap();
+        assert_eq!(found_voice, voic.join("cccccccccccccccccccccccccccccccc"));
+        let found_video =
+            find_rec_named_file(dir.path(), "Video", "dddddddddddddddddddddddddddddddd").unwrap();
+        assert_eq!(
+            found_video,
+            video.join("dddddddddddddddddddddddddddddddd.mp4")
+        );
+    }
+
+    #[test]
+    fn quoted_image_xml_exposes_md5_for_local_lookup() {
+        let referred = r#"<msg><img md5="ABCDEF0123456789ABCDEF0123456789" /></msg>"#;
+        assert_eq!(
+            nested_image_md5(referred).as_deref(),
+            Some("abcdef0123456789abcdef0123456789")
+        );
+        assert!(is_quoted_image_xml(referred));
+        assert!(!is_quoted_image_xml(
+            r#"<msg><appmsg><type>6</type><title>a.pdf</title></appmsg></msg>"#
+        ));
+        assert!(is_quoted_file_xml(
+            r#"<msg><appmsg><type>6</type><title>a.pdf</title></appmsg></msg>"#
+        ));
+        assert!(is_quoted_voice_xml(
+            r#"<msg><voicemsg voicelength="1200" /></msg>"#
+        ));
+        assert!(is_quoted_video_xml(
+            r#"<msg><videomsg md5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" /></msg>"#
+        ));
+    }
 
     #[test]
     fn resolve_hardlink_dat_path_finds_ordinary_img_with_and_without_dat_suffix() {

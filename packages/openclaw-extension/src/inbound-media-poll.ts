@@ -247,6 +247,10 @@ export function createMediaMaterializationTrigger(
 ): MediaRetryTrigger {
   const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
   return async (result, attempt) => {
+    if (result.errorCode === "CHAT_HISTORY_NOT_MATERIALIZED") {
+      triggerChatHistoryMaterialize(client, chatId, result, attempt, options);
+      return;
+    }
     if (!shouldTriggerMediaMaterialization(result)) return;
     if (isFileMaterialization(result)) {
       triggerFileBubbleClick(client, chatId, result, attempt, options);
@@ -261,15 +265,7 @@ export function createImageMaterializationTrigger(
   chatId: string,
   options?: ImageMaterializationTriggerOptions,
 ): MediaRetryTrigger {
-  const timeoutMs = options?.timeoutMs ?? IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS;
-  return async (result, attempt) => {
-    if (!shouldTriggerMediaMaterialization(result)) return;
-    if (isFileMaterialization(result)) {
-      triggerFileBubbleClick(client, chatId, result, attempt, options);
-      return;
-    }
-    await triggerImageOpenChat(client, chatId, timeoutMs, result, attempt, options);
-  };
+  return createMediaMaterializationTrigger(client, chatId, options);
 }
 
 export function mediaMaterializationTriggerForMessage(opts: {

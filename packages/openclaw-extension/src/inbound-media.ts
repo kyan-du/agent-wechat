@@ -25,6 +25,7 @@ const MIME_BY_FORMAT: Record<string, string> = {
   xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   zip: "application/zip", txt: "text/plain", mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+  silk: "audio/mpeg",
 };
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -61,10 +62,20 @@ function safeInboundFilename(raw: string): string | undefined {
   return cleaned || undefined;
 }
 
-const SUPPORTED_FILE_FORMATS = new Set(["pdf"]);
+const SUPPORTED_FILE_FORMATS = new Set(["pdf", "docx"]);
 
 function documentMimeFromMagic(buf: Buffer): string | undefined {
   if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  if (
+    buf.length >= 4
+    && buf[0] === 0x50
+    && buf[1] === 0x4b
+    && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07)
+    && buf[3] === 0x04
+    && buf.includes(Buffer.from("word/document.xml", "ascii"))
+  ) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
   return undefined;
 }
 
@@ -370,13 +381,25 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
     if (invalidCode) return { ok: false, code: invalidCode };
   } else if (result.type === "voice" || result.type === "video") {
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
+    if (result.type === "voice" && format === "silk") {
+      const silk = buffer[0] === 0x02
+        ? buffer.subarray(1)
+        : buffer;
+      if (silk.length >= 9 && silk.toString("ascii", 0, 9) === "#!SILK_V3") {
+        return { ok: true, value: { buffer, mime: "audio/mpeg" } };
+      }
+    }
     const detected = binaryMimeFromMagic(buffer);
     if (!detected || detected !== declared) return { ok: false, code: "MEDIA_MAGIC_MISMATCH" };
   } else if (result.type === "file") {
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
     if (!safeInboundFilename(result.filename)) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
     if (!SUPPORTED_FILE_FORMATS.has(format)) return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
-    if (documentMimeFromMagic(buffer) !== "application/pdf") {
+    const detected = documentMimeFromMagic(buffer);
+    if (format === "pdf" && detected !== "application/pdf") {
+      return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
+    }
+    if (format === "docx" && detected !== "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
       return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
     }
   }

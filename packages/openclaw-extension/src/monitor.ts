@@ -550,7 +550,7 @@ async function prepareMessage(
         }),
       );
       const nestedItems = nestedChatHistoryMedia(result);
-      if (isChatHistory && nestedItems.length > 0) {
+      if (nestedItems.length > 0) {
         const savedPaths: string[] = [];
         const savedMimes: string[] = [];
         for (const [index, item] of nestedItems.entries()) {

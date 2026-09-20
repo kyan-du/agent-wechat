@@ -31,6 +31,8 @@ test("inbound downloaded media populates singular and plural runtime fields", ()
   assert.match(source, /MediaTypes:\s*mediaMimes/);
   assert.match(source, /shouldPollInboundMedia\(msg\)/);
   assert.match(source, /nestedChatHistoryMedia\(result\)/);
+  assert.match(source, /if \(nestedItems\.length > 0\) \{/);
+  assert.doesNotMatch(source, /isChatHistory && nestedItems/);
   assert.match(source, /mediaFlagsFromPollResult\(result, baseType\)/);
 });
 
@@ -81,11 +83,13 @@ test("chat history nested items attach as inbound media without attachment failu
     items: [
       { type: "image", data: "/9j/AA==", format: "jpeg", filename: "a.jpg" },
       { type: "file", data: "JVBERi0x", format: "pdf", filename: "b.pdf" },
+      { type: "voice", data: "//uQ", format: "mp3", filename: "c.mp3" },
+      { type: "video", data: "AAAA", format: "mp4", filename: "d.mp4" },
       { type: "unsupported", format: "", filename: "" },
     ],
   };
   assert.deepEqual(mediaFlagsFromPollResult(result, 49), { hasMedia: true });
-  assert.equal(nestedChatHistoryMedia(result).length, 2);
+  assert.equal(nestedChatHistoryMedia(result).length, 4);
   const inbound = inboundType49Body(
     { type: 49, content: "[Chat History] 姐姐狐的聊天记录" },
     result,
@@ -382,6 +386,38 @@ test("chat history with nested data does not need materialize trigger", async ()
   } as never, "vangie", 70, undefined, 3, 0, trigger);
   // unsupported with nested data returns immediately without calling trigger
   assert.equal(materializes, 0);
+  assert.equal(nestedChatHistoryMedia(result).length, 1);
+});
+
+test("quoted chat-history pending still materializes the nested card without openChat", async () => {
+  let opens = 0;
+  let materializes = 0;
+  const trigger = mediaMaterializationTriggerForMessage({
+    client: {
+      openChat: async () => { opens += 1; },
+      materializeChatHistory: async () => { materializes += 1; },
+    },
+    chatId: "wxid_quote",
+    messageType: 49,
+  });
+  assert.ok(trigger);
+  let calls = 0;
+  const result = await pollMedia({
+    getMedia: async () => {
+      calls += 1;
+      return calls < 3
+        ? { type: "pending", format: "jpeg", filename: "quoted_10.jpg", errorCode: "CHAT_HISTORY_NOT_MATERIALIZED" }
+        : {
+            type: "unsupported",
+            format: "",
+            filename: "",
+            items: [{ type: "image", data: "abc", format: "jpeg", filename: "quoted_10_0.jpg" }],
+          };
+    },
+  } as never, "wxid_quote", 10, undefined, 3, 0, trigger);
+  assert.equal(opens, 0);
+  assert.equal(materializes, 1);
+  assert.equal(calls, 3);
   assert.equal(nestedChatHistoryMedia(result).length, 1);
 });
 

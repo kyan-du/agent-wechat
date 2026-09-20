@@ -576,7 +576,6 @@ fn clean_content(content: &str, local_type: i64) -> String {
     }
 }
 
-
 /// Decode the XML payload stored in `<refermsg><content>…</content></refermsg>`.
 /// WeChat usually HTML-entity-escapes the inner message (and may wrap CDATA).
 pub(crate) fn refermsg_referred_xml(content: &str) -> Option<String> {
@@ -618,8 +617,12 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
     let sender = extract_xml_tag(refermsg, "displayname");
     let unescaped = refermsg_referred_xml(content).unwrap_or_default();
 
-    // Quoted plain images still cannot be re-fetched from the refermsg snapshot.
-    let media_error_code = if unescaped.contains("<img") && !is_merged_forward_xml(&unescaped) {
+    // Quoted images with a 32-char md5 can still be resolved from local Rec/Img.
+    // CDN-only snapshots without md5 remain a stable resource limitation.
+    let media_error_code = if unescaped.contains("<img")
+        && !is_merged_forward_xml(&unescaped)
+        && quoted_image_lacks_md5(&unescaped)
+    {
         Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE".to_string())
     } else {
         None
@@ -650,6 +653,17 @@ fn extract_xml_attr(xml: &str, attr: &str) -> Option<String> {
         None
     } else {
         Some(val)
+    }
+}
+
+fn quoted_image_lacks_md5(xml: &str) -> bool {
+    let md5 = extract_xml_attr(xml, "md5").or_else(|| extract_xml_tag(xml, "md5"));
+    match md5 {
+        Some(value) => {
+            let value = value.trim();
+            !(value.len() == 32 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+        }
+        None => true,
     }
 }
 
@@ -1035,14 +1049,21 @@ mod merged_forward_tests {
     }
 
     #[test]
-    fn quoted_image_reports_stable_resource_limitation() {
-        let xml = r#"<msg><appmsg><refermsg><displayname>Alice</displayname><content>&lt;msg&gt;&lt;img md5=&quot;redacted&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+    fn quoted_image_with_md5_does_not_mark_attachment_unavailable() {
+        let xml = r#"<msg><appmsg><refermsg><displayname>Alice</displayname><content>&lt;msg&gt;&lt;img md5=&quot;abcdef0123456789abcdef0123456789&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+        let reply = extract_reply_info(xml, 49).expect("reply");
+        assert_eq!(reply.media_error_code, None);
+        assert!(!reply.content.is_empty());
+    }
+
+    #[test]
+    fn quoted_image_without_md5_still_reports_resource_limitation() {
+        let xml = r#"<msg><appmsg><refermsg><displayname>Alice</displayname><content>&lt;msg&gt;&lt;img cdnmidimgurl=&quot;https://example.invalid/x&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
         let reply = extract_reply_info(xml, 49).expect("reply");
         assert_eq!(
             reply.media_error_code.as_deref(),
             Some("QUOTED_IMAGE_RESOURCE_UNAVAILABLE")
         );
-        assert!(!reply.content.is_empty());
     }
 
     #[test]
