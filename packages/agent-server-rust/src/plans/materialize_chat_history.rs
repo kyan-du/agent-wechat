@@ -374,12 +374,17 @@ impl Plan for MaterializeChatHistoryPlan {
                     };
 
                     let rows = chat_history_media_rows(list);
+                    let Some(list_bounds) = list.bounds.as_ref() else {
+                        plan_state.phase = MaterializeChatHistoryPhase::ClosingDetail;
+                        return Some(SelectedAction {
+                            action: actions::wait_short(),
+                            frame: detail_frame.clone(),
+                        });
+                    };
                     for row in &rows {
                         let Some(bounds) = row.bounds.as_ref() else {
                             continue;
                         };
-                        // Images/photos usually materialize from wheel-scroll alone;
-                        // File/Voice/Video rows still need an explicit click.
                         let trimmed = row.name.trim_start();
                         let image_like = trimmed.starts_with("Image")
                             || trimmed.starts_with("Photo")
@@ -387,13 +392,29 @@ impl Plan for MaterializeChatHistoryPlan {
                             || trimmed.starts_with("[Image]")
                             || trimmed.starts_with("[Photo]")
                             || trimmed.starts_with("[图片]");
-                        if image_like {
-                            continue;
-                        }
                         // Names often collide; include y.
                         let key = format!("{}@{:.0}", row.name, bounds.y);
                         if plan_state.nested_clicked_keys.contains(&key) {
                             continue;
+                        }
+                        if image_like {
+                            // Scroll alone is enough for first-time lazy materialize, but
+                            // deleted Rec files need Photos open (left-thumb double-click).
+                            let Some(action) =
+                                actions::open_nested_image_for_download(bounds, list_bounds)
+                            else {
+                                continue;
+                            };
+                            plan_state.nested_clicked_keys.insert(key);
+                            tracing::info!(
+                                "[materialize_chat_history] open nested image for download clicked={}",
+                                plan_state.nested_clicked_keys.len(),
+                            );
+                            return Some(SelectedAction {
+                                // Bare coords — detail list, not Weixin --window.
+                                action,
+                                frame: None,
+                            });
                         }
                         plan_state.nested_clicked_keys.insert(key);
                         tracing::info!(
@@ -446,13 +467,6 @@ impl Plan for MaterializeChatHistoryPlan {
                         });
                     }
 
-                    let Some(list_bounds) = list.bounds.as_ref() else {
-                        plan_state.phase = MaterializeChatHistoryPhase::ClosingDetail;
-                        return Some(SelectedAction {
-                            action: actions::wait_short(),
-                            frame: detail_frame.clone(),
-                        });
-                    };
                     tracing::info!(
                         "[materialize_chat_history] nested wheel scroll attempt={}/{}",
                         plan_state.nested_scroll_attempts,

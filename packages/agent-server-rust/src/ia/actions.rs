@@ -207,6 +207,38 @@ pub fn double_click_chat_history_card(bounds: &Bounds) -> Action {
     ])
 }
 
+/// Nested Image rows: thumbnail sits on the LEFT. Center clicks (x≈640) do nothing;
+/// left-band double-click opens `Photos and Videos` and re-downloads missing Rec files.
+/// `list_bounds` clamps Y into the visible list viewport (rows often extend above it).
+pub fn nested_image_thumb_point(row: &Bounds, list_bounds: &Bounds) -> Option<(f64, f64)> {
+    let vis_top = row.y.max(list_bounds.y);
+    let vis_bottom = (row.y + row.height).min(list_bounds.y + list_bounds.height);
+    let vis_h = vis_bottom - vis_top;
+    if vis_h < 24.0 {
+        return None;
+    }
+    // ~23% of row width ≈ x+140 for w=596; calibrated open at (480–500, upper third).
+    let x = (row.x + (row.width * 0.23).clamp(100.0, 160.0)).round();
+    let y = (vis_top + (vis_h * 0.28).min(90.0)).round();
+    Some((x, y))
+}
+
+/// Double-click nested image thumb, wait for re-download, dismiss Photos lightbox.
+pub fn open_nested_image_for_download(row: &Bounds, list_bounds: &Bounds) -> Option<Action> {
+    let (x, y) = nested_image_thumb_point(row, list_bounds)?;
+    Some(sequence(vec![
+        click_at(x, y),
+        wait(60),
+        click_at(x, y),
+        // Photos open triggers CDN/Rec rewrite; Escape too early leaves files missing.
+        wait(2200),
+        Action::Key {
+            combo: "Escape".into(),
+        },
+        wait(200),
+    ]))
+}
+
 /// `/opt/tools/scroll` alone often does nothing until Messages is focused.
 /// Recipe: click Messages list center, then Page_Up / Page_Down.
 /// Nested 聊天记录 detail lists often need wheel scroll (Page_Down alone stalls).
