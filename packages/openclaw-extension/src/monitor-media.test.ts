@@ -4,6 +4,8 @@ import {
   FILE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
   IMAGE_MATERIALIZATION_OPEN_CHAT_TIMEOUT_MS,
   CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS,
+  DEFAULT_MEDIA_POLL_ATTEMPTS,
+  chatHistoryMediaPollWindow,
   createChatHistoryMaterializationTrigger,
   createImageMaterializationTrigger,
   createMediaMaterializationTrigger,
@@ -34,6 +36,8 @@ test("inbound downloaded media populates singular and plural runtime fields", ()
   assert.match(source, /if \(nestedItems\.length > 0\) \{/);
   assert.doesNotMatch(source, /isChatHistory && nestedItems/);
   assert.match(source, /mediaFlagsFromPollResult\(result, baseType\)/);
+  assert.match(source, /chatHistoryMediaPollWindow\(\)/);
+  assert.match(source, /chatHistoryPoll\?\.maxAttempts/);
 });
 
 function inboundType49Body(
@@ -567,6 +571,15 @@ test("partial nested results retry within budget and preserve attachments on exh
   assert.equal(triggers, 1);
   assert.deepEqual(result, partial);
   assert.equal(nestedChatHistoryMedia(result).length, 1);
+});
+
+test("chat history poll window covers the GUI click budget", () => {
+  const window = chatHistoryMediaPollWindow();
+  assert.ok(window.maxAttempts >= DEFAULT_MEDIA_POLL_ATTEMPTS);
+  assert.ok(window.maxAttempts * window.intervalMs >= CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS);
+  const custom = chatHistoryMediaPollWindow({ timeoutMs: 12_000, intervalMs: 1_000 });
+  assert.equal(custom.intervalMs, 1_000);
+  assert.equal(custom.maxAttempts, 13);
 });
 
 test("chat-history boolean without a title also fails closed", async () => {
