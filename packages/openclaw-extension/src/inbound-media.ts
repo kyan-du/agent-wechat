@@ -61,10 +61,20 @@ function safeInboundFilename(raw: string): string | undefined {
   return cleaned || undefined;
 }
 
-const SUPPORTED_FILE_FORMATS = new Set(["pdf"]);
+const SUPPORTED_FILE_FORMATS = new Set(["pdf", "docx"]);
 
 function documentMimeFromMagic(buf: Buffer): string | undefined {
   if (buf.length >= 5 && buf.toString("ascii", 0, 5) === "%PDF-") return "application/pdf";
+  if (
+    buf.length >= 4
+    && buf[0] === 0x50
+    && buf[1] === 0x4b
+    && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07)
+    && buf[3] === 0x04
+    && buf.includes(Buffer.from("word/document.xml", "ascii"))
+  ) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
   return undefined;
 }
 
@@ -376,7 +386,11 @@ export async function validateInboundMedia(result: MediaResult): Promise<Inbound
     if (buffer.length > MAX_FILE_BYTES) return { ok: false, code: "MEDIA_FILE_TOO_LARGE" };
     if (!safeInboundFilename(result.filename)) return { ok: false, code: "MEDIA_FILENAME_INVALID" };
     if (!SUPPORTED_FILE_FORMATS.has(format)) return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
-    if (documentMimeFromMagic(buffer) !== "application/pdf") {
+    const detected = documentMimeFromMagic(buffer);
+    if (format === "pdf" && detected !== "application/pdf") {
+      return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
+    }
+    if (format === "docx" && detected !== "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
       return { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" };
     }
   }

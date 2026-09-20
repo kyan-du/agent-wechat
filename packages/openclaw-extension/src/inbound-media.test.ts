@@ -247,6 +247,28 @@ test("accepts valid PDF with Chinese filename and preserves the safe basename", 
   assert.equal(savedName, "报告 2026.pdf");
 });
 
+test("accepts Office Open XML Word and silk-converted mp3 voice", async () => {
+  const docx = Buffer.concat([Buffer.from("PK\u0003\u0004"), Buffer.from("word/document.xml")]);
+  const validated = await validateInboundMedia({
+    type: "file",
+    data: docx.toString("base64"),
+    format: "docx",
+    filename: "小队参观路线.docx",
+  });
+  assert.equal(validated.ok, true);
+  if (validated.ok) {
+    assert.equal(validated.value.mime, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  }
+  const mp3 = Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00]);
+  const voice = await validateInboundMedia({
+    type: "voice",
+    data: mp3.toString("base64"),
+    format: "mp3",
+    filename: "chat_history_81_0.mp3",
+  });
+  assert.equal(voice.ok, true);
+});
+
 test("rejects spoofed, unsupported, oversized, and path-shaped file attachments", async () => {
   const file = (bytes: Buffer, filename = "report.pdf") => ({
     type: "file" as const,
@@ -258,7 +280,7 @@ test("rejects spoofed, unsupported, oversized, and path-shaped file attachments"
     await validateInboundMedia(file(Buffer.from("not a pdf"))),
     { ok: false, code: "MEDIA_FILE_TYPE_MISMATCH" },
   );
-  for (const format of ["docx", "zip", "txt", "exe"]) {
+  for (const format of ["zip", "txt", "exe"]) {
     assert.deepEqual(
       await validateInboundMedia({
         type: "file",
@@ -304,4 +326,12 @@ test("save helper reports absent path and thrown saves without exposing details"
   assert.deepEqual(await saveValidatedInboundMedia(fixture, async () => ({ path: "  " })), { ok: false, code: "MEDIA_SAVE_FAILED" });
   assert.deepEqual(await saveValidatedInboundMedia(fixture, async () => { throw new Error("redacted fixture detail"); }), { ok: false, code: "MEDIA_SAVE_FAILED" });
   assert.deepEqual(await saveValidatedInboundMedia(fixture, async () => ({ path: "/opaque/media" })), { ok: true, path: "/opaque/media", mime: "image/jpeg" });
+});
+
+test("raw SILK and disguised MPEG are not accepted as MPEG audio", async () => {
+  for (const bytes of [Buffer.from("#!SILK_V3payload"), Buffer.from("\x02#!SILK_V3payload"), Buffer.from("ID3payload")]) {
+    assert.deepEqual(await validateInboundMedia({
+      type: "voice", data: bytes.toString("base64"), format: "silk", filename: "voice.silk",
+    }), { ok: false, code: "MEDIA_MAGIC_MISMATCH" });
+  }
 });
