@@ -1,5 +1,11 @@
 # @kyan-du/agent-wechat-shared
 
+## 0.1.3
+
+### Patch Changes
+
+- [#142](https://github.com/kyan-du/agent-wechat/pull/142) [`63ffe24`](https://github.com/kyan-du/agent-wechat/commit/63ffe2467c57d1141a6153ab0775a7cdf23f2e74) Thanks [@kyan-du](https://github.com/kyan-du)! - Materialize nested 聊天记录 images via AT-SPI: open chat, focus Messages, Page_Up/Down to the Chat History card, double-click ~12% from the left edge; return retryable `CHAT_HISTORY_NOT_MATERIALIZED` until Rec files appear.
+
 ## 0.1.2
 
 ### Patch Changes
