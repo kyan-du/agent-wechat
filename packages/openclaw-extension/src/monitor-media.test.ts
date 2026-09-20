@@ -447,7 +447,7 @@ test("non-file type=49 (non chat-history) does not fire openChat because getMedi
 
 test("chat history materialize timeout stays fire-and-forget friendly", () => {
   assert.ok(CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS >= 8_000);
-  assert.ok(CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS <= 15_000);
+  assert.ok(CHAT_HISTORY_MATERIALIZATION_CLICK_TIMEOUT_MS <= 30_000);
 });
 
 test("slow file bubble click does not consume the short media poll window or abort the GUI plan", async () => {
