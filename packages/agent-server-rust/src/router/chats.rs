@@ -488,8 +488,8 @@ pub async fn materialize_chat_history(
     };
 
     let plan = MaterializeChatHistoryPlan;
-    // Scrolling + double-click needs more budget than a single file click.
-    let execution_timeout_ms = params.execution_timeout_ms.or(Some(12_000));
+    // Open card + nested wheel scrolls / media-row clicks need a wider budget.
+    let execution_timeout_ms = params.execution_timeout_ms.or(Some(25_000));
     let params = MaterializeChatHistoryParams {
         chat_id,
         title: params.title,

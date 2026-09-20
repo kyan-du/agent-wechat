@@ -116,6 +116,106 @@ pub fn messages_list<'a>(root: &'a A11yNode) -> Option<&'a A11yNode> {
     query_selector(root, MESSAGES_LIST_SELECTOR)
 }
 
+/// Nested media rows inside an opened 聊天记录 detail frame (EN / ZH).
+pub fn is_chat_history_media_row_name(name: &str) -> bool {
+    let trimmed = name.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    const PREFIXES: &[&str] = &[
+        "Image",
+        "Photo",
+        "图片",
+        "File",
+        "文件",
+        "Voice",
+        "语音",
+        "Video",
+        "视频",
+        "[Image]",
+        "[Photo]",
+        "[File]",
+        "[Voice]",
+        "[Video]",
+        "[图片]",
+        "[文件]",
+        "[语音]",
+        "[视频]",
+    ];
+    PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn frame_matches_chat_history_title(frame_name: &str, title: &str) -> bool {
+    let frame_name = frame_name.trim();
+    let title = title.trim();
+    !title.is_empty() && (frame_name == title || frame_name.contains(title))
+}
+
+/// Detail window opened by double-clicking a Chat History card.
+pub fn chat_history_detail_frame<'a>(root: &'a A11yNode, title: &str) -> Option<&'a A11yNode> {
+    let mut frames = Vec::new();
+    collect_chat_history_detail_frames(root, title, &mut frames);
+    (frames.len() == 1).then_some(frames[0])
+}
+
+fn collect_chat_history_detail_frames<'a>(
+    node: &'a A11yNode,
+    title: &str,
+    out: &mut Vec<&'a A11yNode>,
+) {
+    if node.role == "frame" && frame_matches_chat_history_title(&node.name, title) {
+        out.push(node);
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_chat_history_detail_frames(child, title, out);
+        }
+    }
+}
+
+/// Primary scrollable list inside the detail frame (unnamed `list` with media rows).
+pub fn chat_history_detail_list<'a>(frame: &'a A11yNode) -> Option<&'a A11yNode> {
+    fn walk<'a>(node: &'a A11yNode) -> Option<&'a A11yNode> {
+        if node.role == "list" {
+            let has_media = node.children.as_ref().is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| child.role == "list-item" && is_chat_history_media_row_name(&child.name))
+            });
+            if has_media {
+                return Some(node);
+            }
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                if let Some(found) = walk(child) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    walk(frame)
+}
+
+pub fn chat_history_media_rows<'a>(list: &'a A11yNode) -> Vec<&'a A11yNode> {
+    list.children
+        .as_ref()
+        .map(|children| {
+            children
+                .iter()
+                .filter(|child| child.role == "list-item" && is_chat_history_media_row_name(&child.name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn chat_history_detail_close_button<'a>(frame: &'a A11yNode) -> Option<&'a A11yNode> {
+    query_selector(frame, r#"tool-bar push-button[name="Disable"]"#)
+        .or_else(|| query_selector(frame, r#"tool-bar push-button[name="Close"]"#))
+        .or_else(|| query_selector(frame, r#"push-button[name="Disable"]"#))
+}
+
 // ============================================
 // Ancestor Traversal
 // ============================================
@@ -848,5 +948,49 @@ mod tests {
             Err(FileBubbleSelectError::Ambiguous { count: 2 })
         ));
         assert!(unique_chat_history_bubble(&tree, Some("AAA的聊天记录")).is_ok());
+    }
+
+    #[test]
+    fn chat_history_media_row_names_cover_en_zh_and_file_voice_video() {
+        assert!(is_chat_history_media_row_name("Image09-20 01:26 \n"));
+        assert!(is_chat_history_media_row_name("图片 昨天"));
+        assert!(is_chat_history_media_row_name("File report.pdf"));
+        assert!(is_chat_history_media_row_name("文件 说明.docx"));
+        assert!(is_chat_history_media_row_name("Voice 0:12"));
+        assert!(is_chat_history_media_row_name("语音"));
+        assert!(is_chat_history_media_row_name("Video"));
+        assert!(is_chat_history_media_row_name("视频 00:03"));
+        assert!(!is_chat_history_media_row_name(""));
+        assert!(!is_chat_history_media_row_name("姐姐狐: hi"));
+    }
+
+    #[test]
+    fn chat_history_detail_frame_and_list_find_media_rows() {
+        let tree = node(
+            "desktop-frame",
+            "",
+            Some(vec![
+                node("frame", "Weixin", None),
+                node(
+                    "frame",
+                    "姐姐狐的聊天记录",
+                    Some(vec![node(
+                        "list",
+                        "",
+                        Some(vec![
+                            node("list-item", "Image09-20 01:26 \n", None),
+                            node("list-item", "File notes.pdf", None),
+                            node("list-item", "", None),
+                        ]),
+                    )]),
+                ),
+            ]),
+        );
+        let frame = chat_history_detail_frame(&tree, "姐姐狐的聊天记录").unwrap();
+        let list = chat_history_detail_list(frame).unwrap();
+        let rows = chat_history_media_rows(list);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].name.starts_with("Image"));
+        assert!(rows[1].name.starts_with("File"));
     }
 }

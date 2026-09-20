@@ -489,6 +489,10 @@ fn derive_xor_byte(dat: &[u8], dec_head: &[u8]) -> Option<u8> {
     None
 }
 
+fn is_dat_thumbnail_name(name: &str) -> bool {
+    name.ends_with("_t.dat") || name.ends_with("_t")
+}
+
 fn resolve_xor_byte(dat_path: &str, dat: &[u8], image_keys: &ImageKeys) -> Option<u8> {
     if let Some(xb) = image_keys.xor_byte {
         return Some(xb);
@@ -498,12 +502,13 @@ fn resolve_xor_byte(dat_path: &str, dat: &[u8], image_keys: &ImageKeys) -> Optio
     if xb.is_some() {
         return xb;
     }
-    // Try sibling _t.dat files (JPEG thumbnails are reliable for XOR derivation)
+    // Try sibling thumbnail files (JPEG thumbs are reliable for XOR derivation).
+    // Ordinary Img uses `{hash}_t.dat`; Rec 聊天记录 uses bare `{n}_t`.
     let dir = Path::new(dat_path).parent()?;
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with("_t.dat") {
+            if !is_dat_thumbnail_name(&name) {
                 continue;
             }
             if let Some(sib) = read_stable_file(&entry.path()) {
@@ -591,11 +596,23 @@ fn convert_media(mode: &str, input: &[u8]) -> Option<(Vec<u8>, String)> {
 /// Prefer ordinary `Img/{file_name}` (with optional `.dat`), then scan
 /// `Rec/*/Img/{file_name}` used by WeChat 聊天记录 nested images (often bare
 /// `0`/`1`/`2` with no `.dat` suffix). Rec is only walked when Img misses.
+fn rec_dat_size_matches(path: &Path, expected_file_size: u64) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let len = meta.len();
+    // hardlink.file_size is the logical payload length; on-disk Rec `.dat`
+    // frames are typically a few dozen bytes larger (AES/XOR header+tail).
+    len == expected_file_size
+        || (len > expected_file_size && len - expected_file_size <= 64)
+}
+
 fn resolve_hardlink_dat_path(
     base: &Path,
     chat_dir: &str,
     date_dir: &str,
     file_name: &str,
+    expected_file_size: Option<u64>,
 ) -> Option<std::path::PathBuf> {
     let month = base.join("msg/attach").join(chat_dir).join(date_dir);
     let names: Vec<String> = if file_name.ends_with(".dat") {
@@ -620,22 +637,30 @@ fn resolve_hardlink_dat_path(
             .filter(|p| p.is_dir())
             .collect();
         dirs.sort();
-        let mut found = None;
+        let mut found: Vec<std::path::PathBuf> = Vec::new();
         for rec_dir in dirs {
             for name in &names {
                 let candidate = rec_dir.join("Img").join(name);
                 if candidate.is_file() {
-                    // Numeric Rec names are local to a card, not global ids.
-                    if found.is_some() {
-                        return None;
-                    }
-                    found = Some(candidate);
+                    found.push(candidate);
                 }
             }
         }
-        return found;
+        match found.len() {
+            0 => None,
+            1 => Some(found.pop().expect("one Rec path")),
+            _ => {
+                // Numeric Rec names (0/1/2) are local to a card. When several
+                // 聊天记录 cards share a chat+month, disambiguate with the
+                // hardlink row's file_size; refuse if still ambiguous.
+                let expected = expected_file_size?;
+                found.retain(|path| rec_dat_size_matches(path, expected));
+                (found.len() == 1).then(|| found.pop().expect("unique size match"))
+            }
+        }
+    } else {
+        None
     }
-    None
 }
 
 fn find_dat_via_hardlink(
@@ -667,7 +692,7 @@ fn find_dat_via_hardlink(
         &hardlink_db,
         hardlink_key,
         &format!(
-            "SELECT file_name, dir1, dir2 FROM image_hardlink_info_v4
+            "SELECT file_name, file_size, dir1, dir2 FROM image_hardlink_info_v4
              WHERE md5 = '{image_md5}' LIMIT 2;"
         ),
     );
@@ -680,6 +705,7 @@ fn find_dat_via_hardlink(
     }
     let row = &file_rows[0];
     let file_name = row.get("file_name")?.as_str()?;
+    let file_size = row.get("file_size").and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n as u64)));
     let dir1 = row.get("dir1")?.as_i64()?;
     let dir2 = row.get("dir2")?.as_i64()?;
 
@@ -702,7 +728,7 @@ fn find_dat_via_hardlink(
 
     for base in &account_base_paths(account_dir) {
         if let Some(dat_path) =
-            resolve_hardlink_dat_path(Path::new(base), chat_dir, date_dir, file_name)
+            resolve_hardlink_dat_path(Path::new(base), chat_dir, date_dir, file_name, file_size)
         {
             return Some(dat_path.to_string_lossy().to_string());
         }
@@ -1306,20 +1332,32 @@ fn get_nested_image(
         let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
         let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
             .or_else(|| find_dat_via_md5_filename(account_dir, md5));
-        if let Some(dat_path) = dat_path {
-            let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
-            if result.data.is_some() {
-                let ext = Path::new(&result.filename)
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("jpg")
-                    .to_string();
-                result.filename = format!("chat_history_{local_id}_{index}.{ext}");
-                result.source = Some("local-dat".into());
-                if let Some(media) = media_with_data(result) {
-                    return Some(media);
-                }
+        let Some(dat_path) = dat_path else {
+            tracing::warn!(
+                "[media:nested-image] no dat path local_id={local_id} index={index} md5={md5}"
+            );
+            return None;
+        };
+        let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+        if result.data.is_some() {
+            let ext = Path::new(&result.filename)
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("jpg")
+                .to_string();
+            result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+            result.source = Some("local-dat".into());
+            if let Some(media) = media_with_data(result) {
+                return Some(media);
             }
+            tracing::warn!(
+                "[media:nested-image] media_with_data rejected local_id={local_id} index={index}"
+            );
+        } else {
+            tracing::warn!(
+                "[media:nested-image] decrypt failed local_id={local_id} index={index} path={dat_path} code={:?}",
+                result.error_code
+            );
         }
     }
 
@@ -1510,16 +1548,16 @@ fn get_chat_history_media(
     // Nested media present but nothing resolved yet — Rec files are usually
     // missing until the GUI card is opened. Return retryable pending so
     // OpenClaw can fire materializeChatHistory and keep polling.
-    if nested_media_count > 0 && items.len() < nested_media_count.min(MAX_NESTED_CHAT_HISTORY_MEDIA)
-    {
-        let mut pending = pending_with(
+    // If some nested items already resolved (partial card), return them:
+    // OpenClaw's poll treats top-level CHAT_HISTORY_NOT_MATERIALIZED as
+    // forever-retryable even when `items` already carry bytes.
+    if nested_media_count > 0 && items.is_empty() {
+        return pending_with(
             "pending",
             "jpeg",
             format!("chat_history_{local_id}.jpg"),
             "CHAT_HISTORY_NOT_MATERIALIZED",
         );
-        pending.items = items;
-        return pending;
     }
     let mut result = unsupported_without_error();
     result.items = items;
@@ -1970,10 +2008,10 @@ mod tests {
             0,
             None,
         );
-        assert_eq!(
-            result.error_code.as_deref(),
-            Some("CHAT_HISTORY_NOT_MATERIALIZED")
-        );
+        // Partial success must not stay on CHAT_HISTORY_NOT_MATERIALIZED:
+        // OpenClaw retries that code forever even when `items` already have bytes.
+        assert_eq!(result.error_code.as_deref(), None);
+        assert_ne!(result.media_type, "pending");
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].filename, "chat_history_82_0_found.pdf");
         assert_eq!(
@@ -2050,7 +2088,38 @@ mod tests {
             fs::create_dir_all(&img).unwrap();
             fs::write(img.join("0"), card).unwrap();
         }
-        assert!(resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0").is_none());
+        assert!(resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0", None).is_none());
+    }
+
+    #[test]
+    fn dat_thumbnail_names_include_rec_bare_suffix() {
+        assert!(is_dat_thumbnail_name("abc_t.dat"));
+        assert!(is_dat_thumbnail_name("0_t"));
+        assert!(is_dat_thumbnail_name("12_t"));
+        assert!(!is_dat_thumbnail_name("0"));
+        assert!(!is_dat_thumbnail_name("0.dat"));
+        assert!(!is_dat_thumbnail_name("photo.jpg"));
+    }
+
+    #[test]
+    fn rec_numeric_image_names_disambiguate_by_hardlink_file_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir
+            .path()
+            .join("msg/attach/chat/2026-09/Rec/first/Img");
+        let second = dir
+            .path()
+            .join("msg/attach/chat/2026-09/Rec/second/Img");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        // Simulate ciphertext framing: on-disk len = logical file_size + 31.
+        fs::write(first.join("0"), vec![0u8; 100 + 31]).unwrap();
+        fs::write(second.join("0"), vec![1u8; 200 + 31]).unwrap();
+        let found = resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0", Some(200)).unwrap();
+        assert!(found.ends_with("second/Img/0"));
+        let found = resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0", Some(100)).unwrap();
+        assert!(found.ends_with("first/Img/0"));
+        assert!(resolve_hardlink_dat_path(dir.path(), "chat", "2026-09", "0", Some(999)).is_none());
     }
 
     #[test]
@@ -2183,11 +2252,11 @@ mod tests {
             .join("Img");
         fs::create_dir_all(&img).unwrap();
         fs::write(img.join("abc.dat"), b"ordinary").unwrap();
-        let found = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "abc").unwrap();
+        let found = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "abc", None).unwrap();
         assert_eq!(found, img.join("abc.dat"));
 
         fs::write(img.join("bare"), b"bare-img").unwrap();
-        let found_bare = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "bare").unwrap();
+        let found_bare = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "bare", None).unwrap();
         assert_eq!(found_bare, img.join("bare"));
     }
 
@@ -2207,11 +2276,11 @@ mod tests {
         fs::write(rec_img.join("0"), b"rec0").unwrap();
         fs::write(rec_img.join("1"), b"rec1").unwrap();
 
-        let found0 = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "0").unwrap();
+        let found0 = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "0", None).unwrap();
         assert_eq!(found0, rec_img.join("0"));
-        let found1 = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "1").unwrap();
+        let found1 = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "1", None).unwrap();
         assert_eq!(found1, rec_img.join("1"));
-        assert!(resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "2").is_none());
+        assert!(resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "2", None).is_none());
     }
 
     #[test]
@@ -2225,7 +2294,7 @@ mod tests {
         fs::create_dir_all(&rec_img).unwrap();
         fs::write(img.join("0"), b"ordinary").unwrap();
         fs::write(rec_img.join("0"), b"rec").unwrap();
-        let found = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "0").unwrap();
+        let found = resolve_hardlink_dat_path(base, "chat_md5", "2026-09", "0", None).unwrap();
         assert_eq!(found, img.join("0"));
     }
 

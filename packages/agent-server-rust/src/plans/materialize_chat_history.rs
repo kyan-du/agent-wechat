@@ -1,8 +1,9 @@
 use super::Plan;
 use crate::ia::actions;
-use crate::ia::helpers::action_frame;
+use crate::ia::helpers::{action_frame, frame_hint_from_node};
 use crate::ia::selectors::{
-    messages_list, unique_chat_history_bubble, FileBubbleSelectError,
+    chat_history_detail_close_button, chat_history_detail_frame, chat_history_detail_list,
+    chat_history_media_rows, messages_list, unique_chat_history_bubble, FileBubbleSelectError,
 };
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
@@ -20,7 +21,9 @@ pub struct MaterializeChatHistoryParams {
 pub enum MaterializeChatHistoryPhase {
     Opening,
     Finding,
-    WaitingMaterialize,
+    /// Scroll/click nested Image/File/Voice/Video rows inside the opened detail frame.
+    MaterializingNested,
+    ClosingDetail,
     Done,
 }
 
@@ -30,11 +33,20 @@ pub struct MaterializeChatHistoryPlanState {
     pub clicked: bool,
     pub diagnostic_error: Option<&'static str>,
     scroll_attempts: u8,
+    nested_wait_attempts: u8,
+    nested_scroll_attempts: u8,
+    nested_stagnant_scrolls: u8,
+    nested_clicked_keys: std::collections::HashSet<String>,
+    nested_last_fingerprint: String,
 }
 
 pub const CHAT_HISTORY_CARD_NOT_FOUND: &str = "CHAT_HISTORY_CARD_NOT_FOUND";
 pub const CHAT_HISTORY_CARD_AMBIGUOUS: &str = "CHAT_HISTORY_CARD_AMBIGUOUS";
 const MAX_SCROLL_ATTEMPTS: u8 = 10;
+const MAX_NESTED_WAIT_ATTEMPTS: u8 = 20;
+const MAX_NESTED_SCROLL_ATTEMPTS: u8 = 20;
+const MAX_NESTED_STAGNANT_SCROLLS: u8 = 3;
+const NESTED_WHEEL_AMOUNT: i32 = 8;
 
 fn title_param(params: &MaterializeChatHistoryParams) -> Option<&str> {
     params
@@ -91,6 +103,11 @@ impl Plan for MaterializeChatHistoryPlan {
             clicked: false,
             diagnostic_error: None,
             scroll_attempts: 0,
+            nested_wait_attempts: 0,
+            nested_scroll_attempts: 0,
+            nested_stagnant_scrolls: 0,
+            nested_clicked_keys: std::collections::HashSet::new(),
+            nested_last_fingerprint: String::new(),
         }
     }
 
@@ -244,10 +261,10 @@ impl Plan for MaterializeChatHistoryPlan {
                                 return None;
                             };
                             plan_state.clicked = true;
-                            plan_state.phase = MaterializeChatHistoryPhase::WaitingMaterialize;
+                            plan_state.phase = MaterializeChatHistoryPhase::MaterializingNested;
                             let (x, y) = actions::chat_history_open_point(bounds);
                             tracing::info!(
-                                "[materialize_chat_history] Finding → WaitingMaterialize click=({x},{y}) title={:?} local_id={:?}",
+                                "[materialize_chat_history] Finding → MaterializingNested click=({x},{y}) title={:?} local_id={:?}",
                                 title_param(params),
                                 params.local_id,
                             );
@@ -296,9 +313,201 @@ impl Plan for MaterializeChatHistoryPlan {
                     }
                 }
 
-                MaterializeChatHistoryPhase::WaitingMaterialize => {
+                MaterializeChatHistoryPhase::MaterializingNested => {
+                    let Some(title) = title_param(params) else {
+                        // No title → cannot map the detail frame; keep legacy short wait.
+                        plan_state.phase = MaterializeChatHistoryPhase::Done;
+                        return Some(SelectedAction {
+                            action: actions::wait_long(),
+                            frame: action_frame(identified),
+                        });
+                    };
+
+                    let Some(frame) = chat_history_detail_frame(a11y, title) else {
+                        plan_state.nested_wait_attempts =
+                            plan_state.nested_wait_attempts.saturating_add(1);
+                        tracing::info!(
+                            "[materialize_chat_history] waiting for detail frame attempt={}/{}",
+                            plan_state.nested_wait_attempts,
+                            MAX_NESTED_WAIT_ATTEMPTS,
+                        );
+                        if plan_state.nested_wait_attempts >= MAX_NESTED_WAIT_ATTEMPTS {
+                            plan_state.phase = MaterializeChatHistoryPhase::Done;
+                        }
+                        return Some(SelectedAction {
+                            action: actions::wait(200),
+                            frame: action_frame(identified),
+                        });
+                    };
+                    // Detail is its own window; clicks/scrolls must target it, not Weixin.
+                    let detail_frame = frame_hint_from_node(frame);
+
+                    // A leftover image lightbox steals wheel focus from the detail list.
+                    if crate::ia::selectors::query_selector(
+                        a11y,
+                        r#"frame[name="Photos and Videos"]"#,
+                    )
+                    .is_some()
+                    {
+                        tracing::info!("[materialize_chat_history] dismissing photos lightbox");
+                        return Some(SelectedAction {
+                            action: actions::sequence(vec![
+                                Action::Key {
+                                    combo: "Escape".into(),
+                                },
+                                actions::wait(150),
+                            ]),
+                            frame: None,
+                        });
+                    }
+
+                    let Some(list) = chat_history_detail_list(frame) else {
+                        plan_state.nested_wait_attempts =
+                            plan_state.nested_wait_attempts.saturating_add(1);
+                        if plan_state.nested_wait_attempts >= MAX_NESTED_WAIT_ATTEMPTS {
+                            plan_state.phase = MaterializeChatHistoryPhase::ClosingDetail;
+                        }
+                        return Some(SelectedAction {
+                            action: actions::wait(200),
+                            frame: detail_frame.clone(),
+                        });
+                    };
+
+                    let rows = chat_history_media_rows(list);
+                    let Some(list_bounds) = list.bounds.as_ref() else {
+                        plan_state.phase = MaterializeChatHistoryPhase::ClosingDetail;
+                        return Some(SelectedAction {
+                            action: actions::wait_short(),
+                            frame: detail_frame.clone(),
+                        });
+                    };
+                    for row in &rows {
+                        let Some(bounds) = row.bounds.as_ref() else {
+                            continue;
+                        };
+                        let trimmed = row.name.trim_start();
+                        let image_like = trimmed.starts_with("Image")
+                            || trimmed.starts_with("Photo")
+                            || trimmed.starts_with("图片")
+                            || trimmed.starts_with("[Image]")
+                            || trimmed.starts_with("[Photo]")
+                            || trimmed.starts_with("[图片]");
+                        // Names often collide; include y.
+                        let key = format!("{}@{:.0}", row.name, bounds.y);
+                        if plan_state.nested_clicked_keys.contains(&key) {
+                            continue;
+                        }
+                        if image_like {
+                            // Scroll alone is enough for first-time lazy materialize, but
+                            // deleted Rec files need Photos open (left-thumb double-click).
+                            let Some(action) =
+                                actions::open_nested_image_for_download(bounds, list_bounds)
+                            else {
+                                continue;
+                            };
+                            plan_state.nested_clicked_keys.insert(key);
+                            tracing::info!(
+                                "[materialize_chat_history] open nested image for download clicked={}",
+                                plan_state.nested_clicked_keys.len(),
+                            );
+                            return Some(SelectedAction {
+                                // Bare coords — detail list, not Weixin --window.
+                                action,
+                                frame: None,
+                            });
+                        }
+                        plan_state.nested_clicked_keys.insert(key);
+                        tracing::info!(
+                            "[materialize_chat_history] click nested media row clicked={}",
+                            plan_state.nested_clicked_keys.len(),
+                        );
+                        return Some(SelectedAction {
+                            action: actions::sequence(vec![
+                                actions::click_bounds(bounds),
+                                actions::wait(220),
+                            ]),
+                            frame: detail_frame.clone(),
+                        });
+                    }
+
+                    let fingerprint = rows
+                        .iter()
+                        .filter_map(|row| {
+                            let bounds = row.bounds.as_ref()?;
+                            Some(format!("{}@{:.0}", row.name, bounds.y))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\x1e");
+                    if fingerprint == plan_state.nested_last_fingerprint {
+                        plan_state.nested_stagnant_scrolls =
+                            plan_state.nested_stagnant_scrolls.saturating_add(1);
+                    } else {
+                        plan_state.nested_stagnant_scrolls = 0;
+                        plan_state.nested_last_fingerprint = fingerprint;
+                    }
+
+                    plan_state.nested_scroll_attempts =
+                        plan_state.nested_scroll_attempts.saturating_add(1);
+                    // Image rows often share identical a11y names (`Image09-20 01:26`),
+                    // so name@y fingerprints do not move when the list scrolls. Always
+                    // spend the full wheel budget instead of trusting stagnant early-exit.
+                    let budget_exhausted =
+                        plan_state.nested_scroll_attempts >= MAX_NESTED_SCROLL_ATTEMPTS;
+                    if budget_exhausted {
+                        tracing::info!(
+                            "[materialize_chat_history] MaterializingNested → ClosingDetail scrolls={} stagnant={} clicked={}",
+                            plan_state.nested_scroll_attempts,
+                            plan_state.nested_stagnant_scrolls,
+                            plan_state.nested_clicked_keys.len(),
+                        );
+                        plan_state.phase = MaterializeChatHistoryPhase::ClosingDetail;
+                        return Some(SelectedAction {
+                            action: actions::wait_short(),
+                            frame: detail_frame.clone(),
+                        });
+                    }
+
+                    tracing::info!(
+                        "[materialize_chat_history] nested wheel scroll attempt={}/{}",
+                        plan_state.nested_scroll_attempts,
+                        MAX_NESTED_SCROLL_ATTEMPTS,
+                    );
+                    return Some(SelectedAction {
+                        action: actions::sequence(vec![
+                            actions::focus_list_and_wheel_scroll(
+                                list_bounds,
+                                ScrollDirection::Down,
+                                NESTED_WHEEL_AMOUNT,
+                            ),
+                            actions::wait(220),
+                        ]),
+                        // No --window prefix: keep pointer where the list click left it.
+                        frame: None,
+                    });
+                }
+
+                MaterializeChatHistoryPhase::ClosingDetail => {
+                    if let Some(title) = title_param(params) {
+                        if let Some(frame) = chat_history_detail_frame(a11y, title) {
+                            let detail_frame = frame_hint_from_node(frame);
+                            if let Some(close) = chat_history_detail_close_button(frame) {
+                                if let Some(bounds) = close.bounds.as_ref() {
+                                    plan_state.phase = MaterializeChatHistoryPhase::Done;
+                                    tracing::info!(
+                                        "[materialize_chat_history] ClosingDetail → Done"
+                                    );
+                                    return Some(SelectedAction {
+                                        action: actions::sequence(vec![
+                                            actions::click_bounds(bounds),
+                                            actions::wait(150),
+                                        ]),
+                                        frame: detail_frame,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     plan_state.phase = MaterializeChatHistoryPhase::Done;
-                    tracing::info!("[materialize_chat_history] WaitingMaterialize → Done");
                     return Some(SelectedAction {
                         action: actions::wait_short(),
                         frame: action_frame(identified),
@@ -447,7 +656,7 @@ mod tests {
         assert!(state.clicked);
         assert!(matches!(
             state.phase,
-            MaterializeChatHistoryPhase::WaitingMaterialize
+            MaterializeChatHistoryPhase::MaterializingNested
         ));
     }
 
