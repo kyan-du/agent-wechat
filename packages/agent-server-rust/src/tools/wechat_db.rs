@@ -75,9 +75,16 @@ pub fn query_wechat_db_checked(
 /// Find the WeChat process PID.
 pub fn find_wechat_pid() -> Option<i64> {
     let output = Command::new("pgrep")
-        .args(["-f", "/usr/bin/wechat"])
+        .args(["-f", "/opt/wechat/wechat"])
         .output()
-        .ok()?;
+        .ok()
+        .filter(|o| !o.stdout.is_empty())
+        .or_else(|| {
+            Command::new("pgrep")
+                .args(["-f", "/usr/bin/wechat"])
+                .output()
+                .ok()
+        })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let pids: Vec<i64> = stdout
@@ -253,6 +260,17 @@ mod tests {
     use rusqlite::{Connection, OpenFlags};
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn find_wechat_pid_prefers_opt_wechat_binary() {
+        let src = include_str!("wechat_db.rs");
+        assert!(src.contains("pgrep"));
+        assert!(src.contains("/opt/wechat/wechat"));
+        assert!(src.contains("/usr/bin/wechat"));
+        let opt = src.find("/opt/wechat/wechat").unwrap();
+        let usr = src.find("/usr/bin/wechat").unwrap();
+        assert!(opt < usr);
+    }
 
     #[test]
     fn database_capability_classifies_known_storage_roles() {

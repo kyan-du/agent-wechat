@@ -78,6 +78,20 @@ BUILD_PROFILES = {
         "CUR_SESS_UNAME_OFF": 0x120,
         "VEC_KEY_OFF": 0x158,
     },
+    # WeChat Linux v4.1.13.23 aarch64 (BuildID: e9f1cd04...)
+    # Structure fields shifted +0x10 vs 4.1.1.8. SELECT_SESSION recovered from
+    # the same prologue/index-check body as 4.1.1.8 (sub sp; mov wN,w1; lsr #4).
+    "e9f1cd04": {
+        "ARCH": "aarch64",
+        "SELECT_SESSION": 0x48543d0,
+        "USERNAME_OFF": 0x130,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x9fe8cc8,
+        "CTRL_OFF": 0xe8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x130,
+        "VEC_KEY_OFF": 0x168,
+    },
     # WeChat Linux 4.x x86_64 (BuildID: eba86b80...)
     "eba86b80": {
         "ARCH": "x86_64",
@@ -90,6 +104,20 @@ BUILD_PROFILES = {
         "CUR_SESS_UNAME_OFF": 0x98,
         "VEC_KEY_OFF": 0x168,
         "VEC_MAP_OFF": 0xe8,
+    },
+    # WeChat Linux v4.1.13.23 x86_64 (BuildID: ce28c347...)
+    # Flattened like aarch64: vector at ctrl+0/8, no unordered_map.
+    # SELECT_SESSION recovered from [rdi]/[rdi+8] sar-4 body plus mov r12,rsi.
+    "ce28c347": {
+        "ARCH": "x86_64",
+        "SELECT_SESSION": 0x85dafd0,
+        "USERNAME_OFF": 0x130,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0xa6a95c8,
+        "CTRL_OFF": 0xe8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x130,
+        "VEC_KEY_OFF": 0x168,
     },
 }
 
@@ -125,6 +153,22 @@ def is_official_account(username):
     return bool(_GH_RE.match(username))
 
 
+def filtered_session_index(raw_sessions):
+    """Map username -> selectSession index, skipping official accounts.
+
+    raw_sessions is [(raw_index, username), ...] in vector order. Official
+    accounts remain in the raw vector but are not passed to selectSession.
+    """
+    sessions = {}
+    filtered_idx = 0
+    for _, uname in raw_sessions:
+        if is_official_account(uname):
+            continue
+        sessions[uname] = filtered_idx
+        filtered_idx += 1
+    return sessions
+
+
 def result_json(ok, **kwargs):
     """Print a redacted, machine-readable result and exit."""
     out = {
@@ -143,29 +187,54 @@ def fail(code, message, **kwargs):
 
 
 def get_pid():
-    """Get WeChat PID."""
+    """Get WeChat PID, skipping zombies left after restarts."""
+    seen = []
     for cmd in [["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]]:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True)
-            pids = r.stdout.strip().split()
-            if pids:
-                return pids[0]
         except Exception:
-            pass
+            continue
+        for tok in r.stdout.strip().split():
+            if tok in seen:
+                continue
+            seen.append(tok)
+    for pid in seen:
+        try:
+            with open(f"/proc/{pid}/status") as fh:
+                status = fh.read()
+        except OSError:
+            continue
+        if "\nState:\tZ" in status or status.startswith("State:\tZ"):
+            continue
+        return pid
+    return seen[0] if seen else None
+
+
+def wechat_binary_path(pid):
+    """Resolve the WeChat ELF for this PID, including sidecar /proc/<pid>/root."""
+    mapped = None
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            for line in f:
+                if "/wechat" in line and line.strip().endswith("/wechat"):
+                    mapped = line.split()[-1]
+                    break
+    except Exception:
+        mapped = None
+    candidates = []
+    if mapped:
+        candidates.append(f"/proc/{pid}/root{mapped}")
+        candidates.append(mapped)
+    candidates.append("/opt/wechat/wechat")
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
     return None
 
 
 def get_build_id(pid):
     """Read the WeChat binary's BuildID from /proc/pid/maps + readelf."""
-    wechat_path = None
-    try:
-        with open(f"/proc/{pid}/maps") as f:
-            for line in f:
-                if "/wechat" in line and line.strip().endswith("/wechat"):
-                    wechat_path = line.split()[-1]
-                    break
-    except Exception:
-        pass
+    wechat_path = wechat_binary_path(pid)
     if not wechat_path:
         return None
     try:
@@ -547,13 +616,25 @@ if (!manager) {{
             }} catch(e) {{}}
         }}
 
-        // Step 4: Read current selection
+        // Step 4: Read current selection.
+        // 4.1.13.23 aarch64: a normal chat is a pointer at CUR_SESS_OFF. The
+        // built-in filehelper session leaves that pointer NULL and stores a
+        // filtered index nearby (observed at +0x30). Prefer the pointer.
         var curSelName = "NONE";
         try {{
             var curPtr = ctrl.add(CUR_SESS_OFF).readPointer();
             if (!curPtr.isNull() && curPtr.compare(ptr(0x10000)) >= 0) {{
                 var s = readStdString(curPtr.add(CUR_SESS_UNAME));
                 if (s) curSelName = s;
+            }} else {{
+                var idxWord = Number(ctrl.add(0x30).readU64());
+                if (idxWord === idxWord && idxWord >= 0 && idxWord < count) {{
+                    var ep = vectorBegin.add(idxWord * ELEM_SZ).readPointer();
+                    if (ep && !ep.isNull()) {{
+                        var s2 = readStdString(ep.add(UNAME_OFF));
+                        if (s2) curSelName = s2;
+                    }}
+                }}
             }}
         }} catch(e) {{}}
         console.log("CURRENT_SEL " + curSelName);
@@ -597,13 +678,7 @@ if (!manager) {{
 
             # Build filtered index: skip official accounts, re-number from 0
             # selectSession() uses indices that exclude official accounts
-            sessions = {}
-            filtered_idx = 0
-            for _, uname in raw_sessions:
-                if is_official_account(uname):
-                    continue
-                sessions[uname] = filtered_idx
-                filtered_idx += 1
+            sessions = filtered_session_index(raw_sessions)
 
             if current_sel:
                 log("[chat-select] Current selection identity available=true")
@@ -668,20 +743,22 @@ function readFilteredUsername(filteredIdx) {{
 
 console.log("READY");
 
+// Keep the interceptor alive across incidental selectSession calls (list
+// refresh, hover). 4.1.13 copies w1 into w23 a few instructions after entry,
+// so rewrite both the ABI register and x23. Detach on a timer so the
+// prologue is restored while no thread is inside the function.
 var hook = Interceptor.attach(addr, {{
     onEnter: function(args) {{
-        var orig = args[1].toInt32();
         console.log("REDIRECT");
         args[1] = ptr(TARGET);
         this.context.{reg} = TARGET;
-    }},
-    onLeave: function(retval) {{
-        // Detach after selectSession returns so the prologue is restored
-        // while no thread is inside the function.
-        hook.detach();
-        console.log("DETACHED");
+        try {{ this.context.x23 = TARGET; }} catch (e) {{}}
     }}
 }});
+setTimeout(function() {{
+    try {{ hook.detach(); }} catch (e) {{}}
+    console.log("DETACHED");
+}}, 2500);
 """)
 
     proc = run_frida_bg(pid, "/tmp/_cs_select.js")

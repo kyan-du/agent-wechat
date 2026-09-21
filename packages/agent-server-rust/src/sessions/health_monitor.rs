@@ -11,7 +11,10 @@ use crate::tools::a11y::get_a11y_desktop;
 use crate::tools::exec::ExecOptions;
 use crate::tools::screenshot::capture_screenshot;
 use crate::tools::wechat_db::find_wechat_pid;
-use crate::tools::wechat_keys::{extract_keys_async, needs_key_extraction, store_keys};
+use crate::tools::wechat_keys::{
+    clear_passphrase_capture, ensure_passphrase_capture, extract_keys_async,
+    needs_key_extraction, store_keys,
+};
 
 /// How often to run the health scan (in seconds).
 const SCAN_INTERVAL_SECS: u64 = 1;
@@ -411,6 +414,7 @@ pub fn spawn_health_monitor() {
                         waiting_restart_since = Some(Instant::now());
                         login_resume.reset();
                         login_resume_exhausted_logged = false;
+                        clear_passphrase_capture();
                     }
 
                     // Handle restart with crash loop protection
@@ -499,6 +503,14 @@ pub fn spawn_health_monitor() {
             login_resume.observe(candidate.state_id.as_deref());
             if candidate.state_id.as_deref() != Some("login_account") {
                 login_resume_exhausted_logged = false;
+            }
+
+            if matches!(
+                candidate.state_id.as_deref(),
+                Some("login_qr") | Some("login_account") | Some("login_phone_confirm")
+                    | Some("login_loading")
+            ) {
+                ensure_passphrase_capture(wechat_pid).await;
             }
 
             if is_logged_in_chat_state(candidate.state_id.as_deref()) {
@@ -855,6 +867,24 @@ mod tests {
             backoff_until: None,
             now,
         }
+    }
+
+    #[test]
+    fn login_states_start_passphrase_capture_before_hot_path_extract() {
+        let src = include_str!("health_monitor.rs");
+        assert!(src.contains("ensure_passphrase_capture(wechat_pid).await"));
+        assert!(src.contains("clear_passphrase_capture()"));
+        let login_block = src
+            .split("if matches!(")
+            .nth(1)
+            .and_then(|rest| rest.split("match login_resume.decide").next())
+            .expect("login capture block");
+        assert!(login_block.contains("login_qr"));
+        assert!(login_block.contains("ensure_passphrase_capture"));
+        assert!(login_block.contains("maybe_spawn_hot_path_key_extract"));
+        let capture_at = login_block.find("ensure_passphrase_capture").unwrap();
+        let extract_at = login_block.find("maybe_spawn_hot_path_key_extract").unwrap();
+        assert!(capture_at < extract_at);
     }
 
     #[test]

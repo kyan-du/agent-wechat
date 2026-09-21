@@ -135,11 +135,11 @@ RUN mkdir -p /tmp/.X11-unix && chown root:root /tmp/.X11-unix && chmod 1777 /tmp
 # fail closed. This provenance evidence is not a redistribution grant.
 # ============================================
 ARG TARGETARCH
-RUN WECHAT_VERSION=4.1.1.8 \
-    && WECHAT_AMD64_URL=https://web.archive.org/web/20260818044438id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb \
-    && WECHAT_AMD64_SHA256=c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b \
-    && WECHAT_ARM64_URL=https://web.archive.org/web/20260818044442id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb \
-    && WECHAT_ARM64_SHA256=c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f \
+RUN WECHAT_VERSION=4.1.13.23 \
+    && WECHAT_AMD64_URL=https://web.archive.org/web/20260921152423if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb \
+    && WECHAT_AMD64_SHA256=b7d0f8d53e9f648bc2c77a6096a04100d008f2d9f0d3988a2a4859b5992aca0a \
+    && WECHAT_ARM64_URL=https://web.archive.org/web/20260921152526if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb \
+    && WECHAT_ARM64_SHA256=51784a262c725ef1595dd833f456190e913583dd81c24dd8fe587532bc91c0dc \
     && case "$TARGETARCH" in \
       amd64) WECHAT_URL="$WECHAT_AMD64_URL"; WECHAT_SHA256="$WECHAT_AMD64_SHA256"; DEB_ARCH=amd64 ;; \
       arm64) WECHAT_URL="$WECHAT_ARM64_URL"; WECHAT_SHA256="$WECHAT_ARM64_SHA256"; DEB_ARCH=arm64 ;; \

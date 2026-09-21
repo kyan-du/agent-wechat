@@ -35,7 +35,7 @@ const approvedSensitiveInstructionHashes=new Set([
   '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
   '29745539dec974d85e96332400d4d9911ef953f356213ea8150ea6b5b72a29bc', // noVNC
   '9b8d3cee08d655c745e64a8669864c81ba19db346c0d22821c2f5a1901282c02', // SQLCipher
-  'a756d19876ff5a30c7f8ae42e037fa77b8c43a2fbccd1b950c1a1a34a854ecd2', // WeChat
+  'af1172329cbcbf4eb7c5784b075b86f48a23393519ae7b3c788e264e477223bb', // WeChat
   '5a9255760fcbb53017961e56d2e5da80582bee575930f90407bddae7436dd21f', // debug-only gdbserver
 ]);
 const digest=x=>createHash('sha256').update(x).digest('hex');
@@ -89,11 +89,11 @@ for(const instruction of runs.filter(x=>/\bapt-get(?:\s+-o\s+\S+)*\s+(?:update|i
 assert.equal(runs.filter(x=>/\bpip3?\s+install\b/.test(x)).length,1,'only locked pip install is allowed');
 for(const forbidden of ['archive.ubuntu.com','security.ubuntu.com','deb.debian.org'])assert.ok(!instructions.some(x=>x.includes(forbidden)),`mutable repository forbidden: ${forbidden}`);
 for(const name of ['novnc','sqlcipher']){const s=manifest.sources[name],key=name.toUpperCase();assert.equal(s.url,`https://github.com/${name==='novnc'?'novnc/noVNC':'sqlcipher/sqlcipher'}/archive/refs/tags/v${s.version}.tar.gz`,`${name} version must bind its URL`);const run=one(`RUN ${key}_VERSION=`,`${name} source installation`);assert.ok(run.startsWith(`RUN ${key}_VERSION=${s.version} && ${key}_URL=${s.url} && ${key}_SHA256=${s.sha256} && `),`${name}: immutable source constants must exactly match manifest`);assert.ok(run.includes(`curl --fail --location --retry 3`)&&run.includes(`"$${key}_URL"`));assert.ok(run.includes(`echo "$${key}_SHA256 `)&&run.includes('| sha256sum --check --strict &&'),`${name} verification must gate extraction`);}
-const w=manifest.sources.wechat;assert.equal(w.version,'4.1.1.8');const wrun=one('RUN WECHAT_VERSION=','WeChat source installation');
-const wechatUrls={amd64:'https://web.archive.org/web/20260818044438id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb',arm64:'https://web.archive.org/web/20260818044442id_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb'};
-const wechatPins={amd64:'c9765e87ee5133bf4bb50d585c1814fafd995e3fb0da62c5ed07259b43dada7b',arm64:'c3ed1a481247e6a1b166e87a66cccdee898c3ae0b76613b39bb6e9795e50929f'};
+const w=manifest.sources.wechat;assert.equal(w.version,'4.1.13.23');const wrun=one('RUN WECHAT_VERSION=','WeChat source installation');
+const wechatUrls={amd64:'https://web.archive.org/web/20260921152423if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb',arm64:'https://web.archive.org/web/20260921152526if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb'};
+const wechatPins={amd64:'b7d0f8d53e9f648bc2c77a6096a04100d008f2d9f0d3988a2a4859b5992aca0a',arm64:'51784a262c725ef1595dd833f456190e913583dd81c24dd8fe587532bc91c0dc'};
 const liveWeChatDeb=/^https:\/\/dldir1v6\.qq\.com\/weixin\/Universal\/Linux\/WeChatLinux_(?:x86_64|arm64)\.deb$/;
-for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageArchitecture,a);assert.equal(v.url,wechatUrls[a]);assert.equal(v.sha256,wechatPins[a]);assert.match(v.url,/web\.archive\.org\/web\/20260818/);assert.ok(v.url.includes('id_'));assert.ok(!liveWeChatDeb.test(v.url),`${a}: live Tencent CDN must not be the build URL`);assert.ok(wrun.includes(`WECHAT_${a.toUpperCase()}_URL=${v.url} && WECHAT_${a.toUpperCase()}_SHA256=${v.sha256} && `),`${a}: immutable WeChat constants must exactly match manifest`);assert.ok(wrun.includes(`${a}) WECHAT_URL=`));}
+for(const a of ['amd64','arm64']){const v=w.artifacts[a];assert.equal(v.packageArchitecture,a);assert.equal(v.url,wechatUrls[a]);assert.equal(v.sha256,wechatPins[a]);assert.match(v.url,/web\.archive\.org\/web\/20260921/);assert.ok(v.url.includes('if_'));assert.ok(!liveWeChatDeb.test(v.url),`${a}: live Tencent CDN must not be the build URL`);assert.ok(wrun.includes(`WECHAT_${a.toUpperCase()}_URL=${v.url} && WECHAT_${a.toUpperCase()}_SHA256=${v.sha256} && `),`${a}: immutable WeChat constants must exactly match manifest`);assert.ok(wrun.includes(`${a}) WECHAT_URL=`));}
 assert.doesNotMatch(wrun,/(?:WECHAT_(?:AMD64|ARM64)_URL|WECHAT_URL)=https:\/\/dldir1v6\.qq\.com\/weixin\/Universal\/Linux\/WeChatLinux_/);
 const downloadWeChat=read('scripts/download-wechat.sh');
 assert.ok(downloadWeChat.includes(wechatUrls.amd64)&&downloadWeChat.includes(wechatUrls.arm64));
