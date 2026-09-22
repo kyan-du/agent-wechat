@@ -19,7 +19,7 @@ import { buildDockerRunArgs } from "./device-identity.js";
 import { validatePublishedImageReference } from "./image-reference.js";
 import { CliError, EXIT } from "./exit-contract.js";
 import { outboundFromEnvEntries } from "./outbound-config.js";
-import { sameFixedInstance } from "./adopt.js";
+import { sameFixedInstance } from "./lifecycle-policy.js";
 import {
   IMAGE_LABEL,
   INSTANCE_LABEL,
@@ -143,7 +143,7 @@ function rebindIfSameInstance(info: DockerInspect, inventory: InstanceInventory)
   if (isReconcileableContainer(info, inventory)) return inventory;
   const roles = ["data", "wechat-home"] as const;
   const volumes = roles.map((_role, index) => inspectVolume(inventory.volumes[index])) as [VolumeInspect | undefined, VolumeInspect | undefined];
-  if (!sameFixedInstance({ containerName: CONTAINER_NAME, volumes, inventory })) {
+  if (!sameFixedInstance({ containerName: CONTAINER_NAME, volumes, mounts: info.Mounts, inventory })) {
     throw new CliError("CONTAINER_OWNERSHIP_MISMATCH", "refusing to operate on an unowned container with the fixed name", EXIT.ENVIRONMENT);
   }
   const next = { ...inventory, containerId: info.Id, updatedAt: new Date().toISOString() };

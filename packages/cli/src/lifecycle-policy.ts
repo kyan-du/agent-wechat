@@ -37,3 +37,25 @@ export function inventoryBinding(
 export function hasOwnedVolume(existing: VolumeInspect, name: string, role: "data" | "wechat-home"): boolean {
   return existing.Name === name && existing.Driver === "local" && existing.Labels?.[INSTANCE_LABEL] === "default" && existing.Labels?.[VOLUME_ROLE_LABEL] === role;
 }
+
+export type LiveMount = { Name?: string; Destination?: string; Type?: string };
+
+const DESTINATIONS = ["/data", "/home/wechat"] as const;
+
+/** Same instance only when the live container mounts both owned volumes at the instance paths. */
+export function sameFixedInstance(evidence: {
+  containerName: string;
+  volumes: [VolumeInspect | undefined, VolumeInspect | undefined];
+  mounts: LiveMount[] | undefined;
+  inventory: Pick<InstanceInventory, "containerName" | "volumes">;
+}): boolean {
+  if (evidence.containerName !== evidence.inventory.containerName) return false;
+  const roles = ["data", "wechat-home"] as const;
+  return roles.every((role, index) => {
+    const volume = evidence.volumes[index];
+    const name = evidence.inventory.volumes[index];
+    if (!volume || !hasOwnedVolume(volume, name, role)) return false;
+    const mounted = (evidence.mounts ?? []).filter((mount) => mount.Destination === DESTINATIONS[index]);
+    return mounted.length === 1 && mounted[0].Type === "volume" && mounted[0].Name === name;
+  });
+}
