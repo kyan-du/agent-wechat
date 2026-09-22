@@ -1,5 +1,11 @@
 # @agent-wechat/cli
 
+## 0.14.6
+
+### Patch Changes
+
+- When the live container id has drifted from instance.json, rebind the instance if the fixed name still mounts both owned volumes at `/data` and `/home/wechat`. Refresh the recorded container id and treat the drift as stale instead of blocking `wx upgrade` with `CONTAINER_OWNERSHIP_MISMATCH`. Host volume labels alone are not enough.
+
 ## 0.14.5
 
 ## 0.14.4
