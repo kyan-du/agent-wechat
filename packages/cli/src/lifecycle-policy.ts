@@ -24,6 +24,16 @@ export function isReconcileableContainer(
   return Boolean(id && (info.Id === id || info.Id.startsWith(id) || id.startsWith(info.Id)));
 }
 
+/** Read-only: a live container whose id drifted is stale, not an error and not trusted. */
+export function inventoryBinding(
+  live: { Id: string; Config?: { Labels?: Record<string, string> } } | undefined,
+  inventory?: Pick<InstanceInventory, "containerId">,
+): "trusted" | "stale" | "absent" {
+  if (!inventory) return "absent";
+  if (live && !isReconcileableContainer(live, inventory)) return "stale";
+  return "trusted";
+}
+
 export function hasOwnedVolume(existing: VolumeInspect, name: string, role: "data" | "wechat-home"): boolean {
   return existing.Name === name && existing.Driver === "local" && existing.Labels?.[INSTANCE_LABEL] === "default" && existing.Labels?.[VOLUME_ROLE_LABEL] === role;
 }

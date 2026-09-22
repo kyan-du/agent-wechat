@@ -47,6 +47,7 @@ import {
   waitHealthy,
 } from "./lifecycle.js";
 import { CliError, EXIT, failure, printJson, success } from "./exit-contract.js";
+import { inventoryBinding } from "./lifecycle-policy.js";
 import { checkCliUpgrade, CliUpgradeError } from "./cli-upgrade.js";
 import { resolveOutboundConfig, OUTBOUND_ENV_KEYS } from "./outbound-config.js";
 
@@ -197,15 +198,12 @@ function programStatus(): Record<string, unknown> {
   const inventory = loadInventory();
   if (!dockerAvailable()) throw new CliError("DOCKER_UNAVAILABLE", "Docker daemon is unavailable", EXIT.ENVIRONMENT, { diagnostics: { docker: "unavailable", inventory: inventory ? "trusted" : "absent" } });
   const container = inspectContainer();
-  if (container) {
-    if (!inventory) throw new CliError("INSTANCE_INVENTORY_MISSING", "existing container has no trusted inventory", EXIT.ENVIRONMENT);
-  }
   return {
     cliVersion: VERSION,
     docker: "available",
     container: container ? (container.State?.Running ? "running" : "stopped") : "absent",
     imageDigest: inventory?.imageDigest,
-    inventory: inventory ? "trusted" : "absent",
+    inventory: inventoryBinding(container, inventory),
   };
 }
 

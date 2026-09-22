@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasOwnedContainer, hasOwnedVolume, isReconcileableContainer } from "./lifecycle-policy.ts";
+import { hasOwnedContainer, hasOwnedVolume, inventoryBinding, isReconcileableContainer } from "./lifecycle-policy.ts";
 import { outboundFromEnvEntries, OUTBOUND_ENV_KEYS } from "./outbound-config.ts";
 
 test("restart extraction preserves every supported outbound policy key and rejects lookalikes", () => {
@@ -22,6 +22,13 @@ test("legacy fixed-name containers reconcile only through trusted inventory", ()
   assert.equal(isReconcileableContainer(info, { containerId: "a".repeat(64) }), true);
   assert.equal(isReconcileableContainer(info, { containerId: "b".repeat(64) }), false);
   assert.equal(isReconcileableContainer(info), false);
+});
+
+test("status reports a replaced container as stale instead of trusted", () => {
+  const live = { Id: "a".repeat(64), Config: { Labels: {} } };
+  assert.equal(inventoryBinding(live, { containerId: "b".repeat(64) }), "stale");
+  assert.equal(inventoryBinding(live, { containerId: live.Id }), "trusted");
+  assert.equal(inventoryBinding(undefined, { containerId: "b".repeat(64) }), "trusted");
 });
 
 test("lifecycle volumes require local driver, instance label, and matching role", () => {
