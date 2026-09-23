@@ -18,7 +18,7 @@ case "$(uname -m)" in
     ARCH_SUFFIX="arm64"
     EXPECTED_SHA256="51784a262c725ef1595dd833f456190e913583dd81c24dd8fe587532bc91c0dc"
     EXPECTED_ARCH="arm64"
-    URL="https://web.archive.org/web/20260921152526if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb"
+    URL="https://web.archive.org/web/20260923032446if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb"
     ;;
   *)
     echo "Unknown architecture: $(uname -m)" >&2
@@ -43,7 +43,13 @@ fi
 echo "Downloading WeChat for ${ARCH_SUFFIX}..."
 tmp="${OUT}.partial"
 trap 'rm -f "$tmp"' EXIT
-curl --fail --location --retry 3 -o "$tmp" "$URL"
+# Wayback nearest-capture 302s are not the pinned package. Do not follow
+# Location; --fail alone still exits 0 on 302, so require HTTP 200 first.
+http_code="$(curl --retry 3 --max-redirs 0 -o "$tmp" -w '%{http_code}' "$URL")"
+if [ "$http_code" != "200" ]; then
+  echo "Pinned WeChat URL returned HTTP ${http_code}; refusing redirect or non-200 snapshot: $URL" >&2
+  exit 1
+fi
 verify_payload "$tmp"
 mv "$tmp" "$OUT"
 trap - EXIT

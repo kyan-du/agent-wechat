@@ -15,6 +15,7 @@ on:
       - 'docker/release-materials/frida_tools-14.10.4-py3-none-any.whl'
       - 'scripts/validate-release-inputs.mjs'
       - 'scripts/test-release-inputs.mjs'
+      - 'scripts/test-download-wechat.mjs'
       - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
       - '.github/workflows/docker-build-ref.yml'
@@ -31,6 +32,7 @@ on:
       - 'docker/release-materials/frida_tools-14.10.4-py3-none-any.whl'
       - 'scripts/validate-release-inputs.mjs'
       - 'scripts/test-release-inputs.mjs'
+      - 'scripts/test-download-wechat.mjs'
       - 'scripts/download-wechat.sh'
       - '.github/workflows/docker-rebuild.yml'
       - '.github/workflows/docker-build-ref.yml'
@@ -59,7 +61,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node scripts/validate-release-boundary.mjs
       - run: node scripts/validate-ref-image-workflow.mjs
-      - run: node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs
+      - run: node scripts/validate-release-inputs.mjs && node scripts/test-release-inputs.mjs && node scripts/test-download-wechat.mjs
 
   build:
     name: Build only (${{ matrix.arch }})

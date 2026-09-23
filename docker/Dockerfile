@@ -138,14 +138,15 @@ ARG TARGETARCH
 RUN WECHAT_VERSION=4.1.13.23 \
     && WECHAT_AMD64_URL=https://web.archive.org/web/20260921152423if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb \
     && WECHAT_AMD64_SHA256=b7d0f8d53e9f648bc2c77a6096a04100d008f2d9f0d3988a2a4859b5992aca0a \
-    && WECHAT_ARM64_URL=https://web.archive.org/web/20260921152526if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb \
+    && WECHAT_ARM64_URL=https://web.archive.org/web/20260923032446if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb \
     && WECHAT_ARM64_SHA256=51784a262c725ef1595dd833f456190e913583dd81c24dd8fe587532bc91c0dc \
     && case "$TARGETARCH" in \
       amd64) WECHAT_URL="$WECHAT_AMD64_URL"; WECHAT_SHA256="$WECHAT_AMD64_SHA256"; DEB_ARCH=amd64 ;; \
       arm64) WECHAT_URL="$WECHAT_ARM64_URL"; WECHAT_SHA256="$WECHAT_ARM64_SHA256"; DEB_ARCH=arm64 ;; \
       *) echo "Unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac \
-    && curl --fail --location --retry 3 -o /tmp/wechat.deb "$WECHAT_URL" \
+    && http_code=$(curl --retry 3 --max-redirs 0 -o /tmp/wechat.deb -w '%{http_code}' "$WECHAT_URL") \
+    && test "$http_code" = 200 \
     && echo "$WECHAT_SHA256  /tmp/wechat.deb" | sha256sum --check --strict \
     && test "$(dpkg-deb -f /tmp/wechat.deb Package)" = wechat \
     && test "$(dpkg-deb -f /tmp/wechat.deb Version)" = "$WECHAT_VERSION" \
