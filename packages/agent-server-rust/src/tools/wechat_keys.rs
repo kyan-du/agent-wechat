@@ -267,6 +267,15 @@ const REQUIRED_EXACT_DBS: &[&str] = &[
 ];
 const REQUIRED_SHARD_PREFIXES: &[&str] = &["message_", "media_"];
 
+fn is_required_shard(name: &str) -> bool {
+    // message_fts.db is unused search storage. message_resource.db is SQLCipher
+    // media metadata and must be keyed when the file is on disk.
+    if name == "message_fts.db" {
+        return false;
+    }
+    REQUIRED_SHARD_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// Check if credential setup is needed.
 ///
 /// 1. Check that all required DB keys exist in stored_keys
@@ -315,12 +324,12 @@ fn needs_key_extraction_for(
         return true;
     }
 
-    // Scan disk for sharded DBs (message_N.db, media_N.db) missing keys
+    // Scan disk for sharded DBs (message_N.db, media_N.db) and
+    // message_resource.db missing keys. A missing resource file does not retry.
     let missing_on_disk: Vec<_> = existing_dbs
         .iter()
         .filter(|name| {
-            REQUIRED_SHARD_PREFIXES.iter().any(|p| name.starts_with(p))
-                && !stored_keys.contains_key(name.as_str())
+            is_required_shard(name) && !stored_keys.contains_key(name.as_str())
         })
         .collect();
 
@@ -332,12 +341,21 @@ fn needs_key_extraction_for(
         return true;
     }
 
-    // Spot-check one key
-    let check_db = "session.db";
-    if let Some(check_key) = stored_keys.get(check_db) {
-        if !verify(check_db, check_key) {
-            tracing::info!("[wechat-keys] Spot-check failed for {check_db}, re-extraction needed");
-            return true;
+    // Spot-check session.db and, when present, message_resource.db.
+    // Media lookup treats a failed resource open as an empty result; a stale
+    // stored key must re-extract instead of looking like a cache miss.
+    let mut check_dbs = vec!["session.db"];
+    if existing_dbs.iter().any(|name| name == "message_resource.db")
+        && stored_keys.contains_key("message_resource.db")
+    {
+        check_dbs.push("message_resource.db");
+    }
+    for check_db in check_dbs {
+        if let Some(check_key) = stored_keys.get(check_db) {
+            if !verify(check_db, check_key) {
+                tracing::info!("[wechat-keys] Spot-check failed for {check_db}, re-extraction needed");
+                return true;
+            }
         }
     }
 
@@ -392,6 +410,53 @@ mod tests {
         let mut stored = required_db_keys();
         stored.insert("_image_aes".to_string(), "00".to_string());
         assert!(!needs_key_extraction_for(&stored, &[], |_, _| true));
+    }
+
+    #[test]
+    fn message_resource_on_disk_requires_working_key_fts_does_not() {
+        let mut stored = required_db_keys();
+        stored.insert("_image_aes".to_string(), "00".to_string());
+        stored.insert("message_0.db".to_string(), "00".to_string());
+
+        // No resource file: do not retry.
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string()],
+            |_, _| true,
+        ));
+
+        // File present without a stored key: extract.
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |_, _| true,
+        ));
+
+        stored.insert("message_resource.db".to_string(), "00".to_string());
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |_, _| true,
+        ));
+
+        // Stale stored resource key must re-extract.
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |db, _| db != "message_resource.db",
+        ));
+
+        stored.remove("message_resource.db");
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_fts.db".to_string()],
+            |_, _| true,
+        ));
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_1.db".to_string()],
+            |_, _| true,
+        ));
     }
 
     #[test]

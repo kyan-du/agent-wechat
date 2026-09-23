@@ -8,6 +8,12 @@ import shutil
 import struct
 import subprocess
 import sys
+from pathlib import Path
+
+_TOOLS = Path(__file__).resolve().parents[2] / "docker" / "tools"
+if str(_TOOLS) not in sys.path:
+    sys.path.insert(0, str(_TOOLS))
+from wechat_proc import find_wechat_pid  # noqa: E402
 
 FRIDA_PYTHON_BOOTSTRAP = (
     "import typing, typing_extensions; "
@@ -29,35 +35,6 @@ def emit_json(payload: dict, ok: bool | None = None) -> None:
     if ok is not None:
         out["ok"] = ok
     print(json.dumps(out, sort_keys=True), flush=True)
-
-
-def find_wechat_pid(explicit: int | None = None) -> int | None:
-    if explicit:
-        return explicit
-    seen = []
-    for cmd in (["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]):
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        except OSError:
-            continue
-        for tok in result.stdout.strip().split():
-            try:
-                pid = int(tok)
-            except ValueError:
-                continue
-            if pid in seen:
-                continue
-            seen.append(pid)
-    for pid in seen:
-        try:
-            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
-                status = fh.read()
-        except OSError:
-            continue
-        if "\nState:\tZ" in status or status.startswith("State:\tZ"):
-            continue
-        return pid
-    return seen[0] if seen else None
 
 
 def find_wechat_path(pid: int, fallback: str = "/opt/wechat/wechat") -> str | None:

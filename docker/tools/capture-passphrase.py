@@ -18,6 +18,7 @@ import struct
 import subprocess
 import sys
 import time
+from wechat_proc import find_wechat_pid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 JS_PATH = os.path.join(HERE, "capture-passphrase.js")
@@ -35,34 +36,6 @@ def emit_json(payload: dict, ok: bool | None = None) -> None:
         out["ok"] = ok
     print(json.dumps(out, sort_keys=True), flush=True)
 
-
-def find_wechat_pid(explicit: int | None = None) -> int | None:
-    if explicit:
-        return explicit
-    seen = []
-    for cmd in (["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]):
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        except OSError:
-            continue
-        for tok in result.stdout.strip().split():
-            try:
-                pid = int(tok)
-            except ValueError:
-                continue
-            if pid in seen:
-                continue
-            seen.append(pid)
-    for pid in seen:
-        try:
-            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
-                status = fh.read()
-        except OSError:
-            continue
-        if "\nState:\tZ" in status or status.startswith("State:\tZ"):
-            continue
-        return pid
-    return seen[0] if seen else None
 
 # Per-BuildID hook RVAs. AMD64 4.1.13.23 is a different ELF; locate the
 # same named functions there and pass --hooks instead of copying these.

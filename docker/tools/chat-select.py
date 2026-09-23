@@ -22,6 +22,7 @@ import json
 import os
 import re
 import select
+from wechat_proc import find_wechat_pid
 
 # ── Per-build constants ──────────────────────────────────────────────────────
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
@@ -187,27 +188,9 @@ def fail(code, message, **kwargs):
 
 
 def get_pid():
-    """Get WeChat PID, skipping zombies left after restarts."""
-    seen = []
-    for cmd in [["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]]:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-        except Exception:
-            continue
-        for tok in r.stdout.strip().split():
-            if tok in seen:
-                continue
-            seen.append(tok)
-    for pid in seen:
-        try:
-            with open(f"/proc/{pid}/status") as fh:
-                status = fh.read()
-        except OSError:
-            continue
-        if "\nState:\tZ" in status or status.startswith("State:\tZ"):
-            continue
-        return pid
-    return seen[0] if seen else None
+    """Get WeChat PID, skipping crashpad helpers and zombies."""
+    pid = find_wechat_pid()
+    return str(pid) if pid else None
 
 
 def wechat_binary_path(pid):

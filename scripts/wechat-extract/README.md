@@ -127,6 +127,7 @@ python3 scripts/wechat-extract/test_recover_image_mask.py
 python3 docker/tools/test_extract_keys.py
 python3 docker/tools/test_capture_passphrase.py
 python3 docker/tools/test_chat_select.py
+python3 docker/tools/test_wechat_proc.py
 bash scripts/test-entrypoint-xvfb-user.sh
 ```
 

@@ -19,6 +19,7 @@ import time
 import struct
 import hashlib
 import hmac as hmac_mod
+from wechat_proc import find_wechat_pid
 
 # ── DB access pattern ─────────────
 CIPHER_CTX_PATTERN = bytes([
@@ -27,33 +28,6 @@ CIPHER_CTX_PATTERN = bytes([
     0x10, 0x00, 0x00, 0x00,  # hmac_sz = 16
     0x00, 0x10, 0x00, 0x00,  # page_sz = 4096
 ])
-
-
-def find_wechat_pid():
-    seen = []
-    for cmd in [["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]]:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-        except Exception:
-            continue
-        for tok in r.stdout.strip().split():
-            try:
-                pid = int(tok)
-            except ValueError:
-                continue
-            if pid in seen:
-                continue
-            seen.append(pid)
-    for pid in seen:
-        try:
-            with open(f"/proc/{pid}/status") as fh:
-                status = fh.read()
-        except OSError:
-            continue
-        if "\nState:\tZ" in status or status.startswith("State:\tZ"):
-            continue
-        return pid
-    return seen[0] if seen else None
 
 
 def find_active_account(pid):

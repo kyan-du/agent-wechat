@@ -132,6 +132,8 @@ jobs:
         run: python3 docker/tools/test_capture_passphrase.py
       - name: chat-select unit tests
         run: python3 docker/tools/test_chat_select.py
+      - name: wechat process identity unit tests
+        run: python3 docker/tools/test_wechat_proc.py
 
   ts:
     needs: changes
