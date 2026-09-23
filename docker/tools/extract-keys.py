@@ -267,15 +267,23 @@ def verify_sqlcipher4_hmac(enc_key, page1):
 def keys_from_passphrase(passphrase, databases):
     """Return {basename: hex_key} for databases that open with this passphrase.
 
-    Stores the 32-byte passphrase hex, not the post-PBKDF raw key. Rust opens
-    with cipher_compatibility=4, so SQLCipher still runs PBKDF2 on this value.
+    SQLCipher `PRAGMA key = "x'...'"` treats the bytes as a raw key, not a
+    passphrase. Derive the per-database raw key from each file's salt and store
+    that raw key so Rust's existing `x'hex'` open path can read it.
     """
     results = {}
-    pass_hex = passphrase.hex()
     for db_path in databases:
         name = os.path.basename(db_path)
-        if test_key(db_path, pass_hex) is not None:
-            results[name] = pass_hex
+        try:
+            with open(db_path, "rb") as fh:
+                salt = fh.read(16)
+        except OSError:
+            continue
+        if len(salt) != 16:
+            continue
+        key_hex = derive_enc_key(passphrase, salt).hex()
+        if test_key(db_path, key_hex) is not None:
+            results[name] = key_hex
     return results
 
 

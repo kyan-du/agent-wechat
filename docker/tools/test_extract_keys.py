@@ -137,18 +137,58 @@ class KeySqlVariantsTest(unittest.TestCase):
         self.assertNotIn("HMAC_SHA1", sql)
         self.assertNotIn("cipher_compatibility = 3", sql)
 
-    def test_keys_from_passphrase_stores_passphrase_not_derived_raw_key(self):
+    def test_keys_from_passphrase_stores_per_db_derived_raw_key(self):
         passphrase = bytes(range(32))
-        with mock.patch.object(extract_keys, "test_key", return_value="3") as probe:
-            keys = extract_keys.keys_from_passphrase(
-                passphrase, ["/tmp/contact.db", "/tmp/session.db"]
-            )
+        salt_a = bytes(range(16))
+        salt_b = bytes(range(16, 32))
+        derived_a = extract_keys.derive_enc_key(passphrase, salt_a).hex()
+        derived_b = extract_keys.derive_enc_key(passphrase, salt_b).hex()
+        self.assertNotEqual(derived_a, derived_b)
+        with tempfile.TemporaryDirectory() as tmp:
+            contact = os.path.join(tmp, "contact.db")
+            session = os.path.join(tmp, "session.db")
+            with open(contact, "wb") as fh:
+                fh.write(salt_a)
+            with open(session, "wb") as fh:
+                fh.write(salt_b)
+            with mock.patch.object(extract_keys, "test_key", return_value="3") as probe:
+                keys = extract_keys.keys_from_passphrase(
+                    passphrase, [contact, session]
+                )
         self.assertEqual(keys, {
-            "contact.db": passphrase.hex(),
-            "session.db": passphrase.hex(),
+            "contact.db": derived_a,
+            "session.db": derived_b,
         })
         self.assertEqual(probe.call_count, 2)
-        self.assertTrue(all(call.args[1] == passphrase.hex() for call in probe.call_args_list))
+        self.assertEqual(probe.call_args_list[0].args[1], derived_a)
+        self.assertEqual(probe.call_args_list[1].args[1], derived_b)
+
+    def test_keys_from_passphrase_skips_when_test_key_returns_none(self):
+        passphrase = bytes(range(32))
+        salt = bytes(range(16))
+        derived = extract_keys.derive_enc_key(passphrase, salt).hex()
+        with tempfile.TemporaryDirectory() as tmp:
+            contact = os.path.join(tmp, "contact.db")
+            with open(contact, "wb") as fh:
+                fh.write(salt)
+            with mock.patch.object(extract_keys, "test_key", return_value=None) as probe:
+                keys = extract_keys.keys_from_passphrase(passphrase, [contact])
+        self.assertEqual(keys, {})
+        probe.assert_called_once_with(contact, derived)
+
+    def test_keys_from_passphrase_skips_missing_file_and_short_salt(self):
+        passphrase = bytes(range(32))
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "missing.db")
+            short = os.path.join(tmp, "short.db")
+            with open(short, "wb") as fh:
+                fh.write(b"\x00" * 8)
+            with mock.patch.object(extract_keys, "test_key") as probe:
+                keys = extract_keys.keys_from_passphrase(
+                    passphrase, [missing, short]
+                )
+        self.assertEqual(keys, {})
+        probe.assert_not_called()
 
 
 class PassphraseKdfTest(unittest.TestCase):
