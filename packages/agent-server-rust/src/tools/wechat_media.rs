@@ -281,6 +281,112 @@ fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path:
     unique_existing_file(found)
 }
 
+/// Nested 聊天记录 files on WeChat 4.1 land under `Rec/*/F/{n}/{name}`
+/// (e.g. `F/0/0.pages`), not the flat `Rec/*/File/{md5}` layout older builds
+/// used. Walk `F` / `File` / `Files` recursively and keep the unique path
+/// whose plaintext digest matches `md5`.
+fn find_rec_verified_file(
+    base: &Path,
+    md5: &str,
+    expected_size: Option<u64>,
+) -> Option<std::path::PathBuf> {
+    const KINDS: &[&str] = &["F", "File", "Files"];
+    const MAX_CANDIDATES: usize = 64;
+    let attach = base.join("msg/attach");
+    if !attach.is_dir() {
+        return None;
+    }
+    let Ok(chat_dirs) = fs::read_dir(&attach) else {
+        return None;
+    };
+    let mut chats: Vec<_> = chat_dirs
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    chats.sort();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for chat in chats {
+        let Ok(month_dirs) = fs::read_dir(&chat) else {
+            continue;
+        };
+        let mut months: Vec<_> = month_dirs
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        months.sort();
+        for month in months {
+            let rec_root = month.join("Rec");
+            let Ok(rec_dirs) = fs::read_dir(&rec_root) else {
+                continue;
+            };
+            let mut recs: Vec<_> = rec_dirs
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            recs.sort();
+            for rec in recs {
+                for kind in KINDS {
+                    let dir = rec.join(kind);
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    let mut stack = vec![dir];
+                    while let Some(cur) = stack.pop() {
+                        let Ok(entries) = fs::read_dir(&cur) else {
+                            continue;
+                        };
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                stack.push(path);
+                                continue;
+                            }
+                            if !path.is_file() {
+                                continue;
+                            }
+                            if let Some(expected) = expected_size {
+                                let Ok(meta) = fs::metadata(&path) else {
+                                    continue;
+                                };
+                                if meta.len() != expected {
+                                    continue;
+                                }
+                            }
+                            candidates.push(path);
+                            if candidates.len() >= MAX_CANDIDATES {
+                                break;
+                            }
+                        }
+                        if candidates.len() >= MAX_CANDIDATES {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    // Same digest ⇒ interchangeable copies across cards; pick the first
+    // sorted path for determinism rather than failing closed.
+    for path in candidates {
+        if read_verified_payload(&path, md5).is_some() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn nested_file_size(item: &str) -> Option<u64> {
+    extract_xml_tag(item, "filesize")
+        .or_else(|| extract_xml_tag(item, "size"))
+        .or_else(|| xml_attr(item, "filesize"))
+        .and_then(|value| value.parse().ok())
+}
+
 fn encode_media_bytes(
     media_type: &str,
     data: &[u8],
@@ -1562,12 +1668,16 @@ fn get_nested_file(
     let md5 = nested_payload_md5(item)?;
     let create_time = nested_item_time(item, fallback_time);
     let dt = chrono::DateTime::from_timestamp(create_time, 0)?;
+    let expected_size = nested_file_size(item);
     for base in account_base_paths(account_dir) {
+        let base_path = Path::new(&base);
         let candidates = [
-            find_rec_named_file(Path::new(&base), "File", &md5),
-            find_rec_named_file(Path::new(&base), "Files", &md5),
+            find_rec_named_file(base_path, "File", &md5),
+            find_rec_named_file(base_path, "Files", &md5),
+            find_rec_named_file(base_path, "F", &md5),
+            find_rec_verified_file(base_path, &md5, expected_size),
             Some(
-                Path::new(&base)
+                base_path
                     .join("msg/file")
                     .join(dt.format("%Y-%m").to_string())
                     .join(&filename),
@@ -1591,6 +1701,9 @@ fn get_nested_file(
             return media_with_data(result);
         }
     }
+    tracing::warn!(
+        "[media:nested-file] no verified path local_id={local_id} index={index} md5={md5}"
+    );
     None
 }
 
@@ -2307,6 +2420,55 @@ mod tests {
             result.items[0].data.as_deref(),
             Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data).as_str())
         );
+    }
+
+    #[test]
+    fn nested_file_resolves_rec_f_subdir_layout_by_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"%PDF-1.7 nested F/0 layout";
+        let md5 = format!("{:x}", Md5::digest(data));
+        // Live 4.1 layout: Rec/<card>/F/0/0.pages (not File/<md5>).
+        let rec = dir
+            .path()
+            .join("msg/attach/chat/2026-09/Rec/card/F/0");
+        fs::create_dir_all(&rec).unwrap();
+        fs::write(rec.join("0.pages"), data).unwrap();
+        let item = format!(
+            r#"<dataitem datatype="8"><datatitle>方寸之间见天地 .pages</datatitle><fullmd5>{md5}</fullmd5></dataitem>"#
+        );
+        let media = get_nested_file(dir.path().to_str().unwrap(), &item, 123, 0, 0)
+            .expect("F/0 nested file must resolve");
+        assert_eq!(media.media_type, "file");
+        assert_eq!(
+            media.filename,
+            "chat_history_123_0_方寸之间见天地 .pages"
+        );
+        assert_eq!(media.source.as_deref(), Some("local-verified"));
+        assert_eq!(
+            media.data.as_deref(),
+            Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data).as_str())
+        );
+    }
+
+    #[test]
+    fn nested_file_rec_f_scan_accepts_identical_copies_across_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"%PDF-1.7 dup";
+        let md5 = format!("{:x}", Md5::digest(data));
+        for card in ["card-a", "card-b"] {
+            let rec = dir
+                .path()
+                .join(format!("msg/attach/chat/2026-09/Rec/{card}/F/0"));
+            fs::create_dir_all(&rec).unwrap();
+            fs::write(rec.join("0.pages"), data).unwrap();
+        }
+        let item = format!(
+            r#"<dataitem datatype="8"><datatitle>dup.pages</datatitle><fullmd5>{md5}</fullmd5></dataitem>"#
+        );
+        let media = get_nested_file(dir.path().to_str().unwrap(), &item, 7, 0, 0)
+            .expect("identical digest copies are interchangeable");
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.source.as_deref(), Some("local-verified"));
     }
 
     #[test]
