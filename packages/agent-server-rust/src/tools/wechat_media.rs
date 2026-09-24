@@ -3,7 +3,7 @@ use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_message_type::normalize_local_type;
 use crate::tools::wechat_messages::{
     collect_forward_dataitems, decode_message_content, extract_xml_tag, find_message_db,
-    get_msg_table_name, is_merged_forward_xml, refermsg_referred_xml,
+    get_msg_table_name, is_merged_forward_xml, refermsg_referred_xml, refermsg_svrid,
 };
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -1564,6 +1564,75 @@ fn get_chat_history_media(
     result
 }
 
+/// Find `local_id` for a chat message by WeChat `server_id` (refermsg svrid).
+fn lookup_local_id_by_server_id(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    server_id: i64,
+) -> Option<i64> {
+    let table_name = get_msg_table_name(chat_id);
+    let (db_name, key) = find_message_db(account_dir, keys, chat_id)?;
+    let db_path = get_db_path(account_dir, &db_name);
+    let rows = query_wechat_db(
+        &db_path,
+        key,
+        &format!(
+            "SELECT local_id FROM \"{table_name}\"
+             WHERE server_id = {server_id}
+             LIMIT 1;"
+        ),
+    );
+    rows.first()?.get("local_id")?.as_i64()
+}
+
+fn quoted_image_pending_unavailable(media: &MediaResult) -> bool {
+    media.data.is_none()
+        && media.error_code.as_deref() == Some("IMAGE_RESOURCE_UNAVAILABLE")
+}
+
+/// When hardlink/md5 cannot materialize a quoted image snapshot, fall back to
+/// the original type-3 message still present in the same chat (refermsg svrid).
+fn resolve_quoted_image_via_svrid(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    quote_content: &str,
+    quote_local_id: i64,
+    image_keys_raw: Option<(String, Option<u8>)>,
+) -> Option<MediaResult> {
+    let server_id = refermsg_svrid(quote_content)?;
+    let original_local_id =
+        lookup_local_id_by_server_id(account_dir, keys, chat_id, server_id)?;
+    if original_local_id == quote_local_id {
+        return None;
+    }
+    tracing::info!(
+        "[media:quoted-svrid] quote local_id={quote_local_id} svrid={server_id} -> original local_id={original_local_id}"
+    );
+    let mut media = get_message_media(
+        account_dir,
+        keys,
+        chat_id,
+        original_local_id,
+        image_keys_raw,
+    );
+    if media.data.is_none() {
+        tracing::warn!(
+            "[media:quoted-svrid] original local_id={original_local_id} still unavailable code={:?}",
+            media.error_code
+        );
+        return None;
+    }
+    let ext = Path::new(&media.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jpg");
+    media.filename = format!("quoted_{quote_local_id}.{ext}");
+    media.source = Some("quoted-svrid".into());
+    Some(media)
+}
+
 fn quoted_media_from_xml(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -1689,7 +1758,34 @@ pub fn get_message_media(
                     create_time,
                     image_keys_raw.clone(),
                 ) {
+                    // Quoted images: hardlink/md5 often misses even when the
+                    // original type-3 message is still in this chat. Fall back
+                    // via <refermsg><svrid> before returning pending.
+                    if is_quoted_image_xml(&referred) && quoted_image_pending_unavailable(&media) {
+                        if let Some(resolved) = resolve_quoted_image_via_svrid(
+                            account_dir,
+                            keys,
+                            chat_id,
+                            &content,
+                            local_id,
+                            image_keys_raw.clone(),
+                        ) {
+                            return resolved;
+                        }
+                    }
                     return media;
+                }
+                if is_quoted_image_xml(&referred) {
+                    if let Some(resolved) = resolve_quoted_image_via_svrid(
+                        account_dir,
+                        keys,
+                        chat_id,
+                        &content,
+                        local_id,
+                        image_keys_raw.clone(),
+                    ) {
+                        return resolved;
+                    }
                 }
             }
             // Fall through to generic handlers below for other appmsg subtypes.
@@ -2217,6 +2313,20 @@ mod tests {
             found_video,
             video.join("dddddddddddddddddddddddddddddddd.mp4")
         );
+    }
+
+    #[test]
+    fn quoted_image_pending_unavailable_detects_resource_gap() {
+        let pending = pending_with(
+            "pending",
+            "jpeg",
+            "quoted_117.jpg",
+            "IMAGE_RESOURCE_UNAVAILABLE",
+        );
+        assert!(quoted_image_pending_unavailable(&pending));
+        let mut ok = pending_with("image", "jpeg", "quoted_117.jpg", "IMAGE_RESOURCE_UNAVAILABLE");
+        ok.data = Some("qq==".into());
+        assert!(!quoted_image_pending_unavailable(&ok));
     }
 
     #[test]

@@ -595,6 +595,20 @@ pub(crate) fn refermsg_referred_xml(content: &str) -> Option<String> {
     }
 }
 
+/// Original message `server_id` from `<refermsg><svrid>…</svrid></refermsg>`.
+/// Used to resolve quoted images via the original type-3 resource-db path when
+/// hardlink/md5 lookup for the embedded snapshot fails.
+pub(crate) fn refermsg_svrid(content: &str) -> Option<i64> {
+    if !content.contains("<refermsg>") {
+        return None;
+    }
+    let rm_start = content.find("<refermsg>")?;
+    let rm_end = content.find("</refermsg>")? + "</refermsg>".len();
+    let refermsg = &content[rm_start..rm_end];
+    let raw = extract_xml_tag(refermsg, "svrid")?;
+    raw.trim().parse::<i64>().ok()
+}
+
 /// True when XML looks like a merged-forward / 聊天记录 (appmsg type 19) card.
 pub(crate) fn is_merged_forward_xml(content: &str) -> bool {
     if content.contains("<recorditem") {
@@ -628,9 +642,12 @@ fn extract_reply_info(content: &str, msg_type: i32) -> Option<ReplyInfo> {
         None
     };
 
-    // Prefer chat-history summary; fall back to title or raw text.
+    // Prefer chat-history summary; quoted images become a short placeholder
+    // (media bytes arrive separately). Fall back to title or raw text.
     let clean = if is_merged_forward_xml(&unescaped) {
         clean_content(&unescaped, 49)
+    } else if unescaped.contains("<img") && !is_merged_forward_xml(&unescaped) {
+        "[Image]".to_string()
     } else if unescaped.contains("<msg>") {
         extract_xml_tag(&unescaped, "title").unwrap_or(unescaped)
     } else {
@@ -1053,7 +1070,14 @@ mod merged_forward_tests {
         let xml = r#"<msg><appmsg><refermsg><displayname>Alice</displayname><content>&lt;msg&gt;&lt;img md5=&quot;abcdef0123456789abcdef0123456789&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
         let reply = extract_reply_info(xml, 49).expect("reply");
         assert_eq!(reply.media_error_code, None);
-        assert!(!reply.content.is_empty());
+        assert_eq!(reply.content, "[Image]");
+    }
+
+    #[test]
+    fn refermsg_svrid_parses_original_server_id() {
+        let xml = r#"<msg><appmsg><type>57</type><refermsg><svrid>6952673595560417036</svrid><displayname>杜万</displayname><content>&lt;msg&gt;&lt;img md5=&quot;a1512bcb9d30baf542d4bb30efa9f989&quot;/&gt;&lt;/msg&gt;</content></refermsg></appmsg></msg>"#;
+        assert_eq!(refermsg_svrid(xml), Some(6952673595560417036));
+        assert_eq!(refermsg_svrid("<msg><appmsg><title>x</title></appmsg></msg>"), None);
     }
 
     #[test]
