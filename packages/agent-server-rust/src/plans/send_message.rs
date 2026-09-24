@@ -3,7 +3,6 @@ use crate::db::get_db;
 use crate::execution::actions::ActionExecutionResult;
 use crate::ia::actions;
 use crate::ia::helpers::{action_frame, find_edit_and_send_button, node_has_state};
-use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::sessions::manager::current_session;
 use crate::tools::chat_select::{confirm_target, open_chat, verify_active_chat, OpenChatResult};
@@ -167,6 +166,7 @@ fn is_unverifiable_chat_selection(code: &str) -> bool {
             | "TARGET_CONFIRMATION_FAILED"
             | "CHAT_CLICK_TIMEOUT"
             | "CHAT_CLICK_FAILED"
+            | "A11Y_CLICK_TARGET_UNAVAILABLE"
     )
 }
 
@@ -319,16 +319,10 @@ impl Plan for SendMessagePlan {
                         continue;
                     }
 
-                    let chat_list_item = query_selector(a11y, r#"list[name="Chats"] > list-item"#);
-                    let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds
-                            .as_ref()
-                            .map(|b| crate::ia::actions::jittered_point(b))
-                    });
-
-                    // Always select, then require chat-select's live session
-                    // rescan to prove the selected username equals the target.
-                    let result = open_chat(&params.chat_id, true, click_xy).await;
+                    // Let chat-select choose a live, non-selected row rather than
+                    // forcing the first row, which may not trigger selection.
+                    // Require its live rescan to prove the selected target.
+                    let result = open_chat(&params.chat_id, true, None).await;
                     if let Some(error) = target_confirmation_error(&result, &params.chat_id) {
                         tracing::warn!("[send] target confirmation failed code={error}");
                         fail_chat_selection(plan_state, error);
@@ -688,6 +682,7 @@ mod tests {
             "TARGET_CONFIRMATION_FAILED",
             "CHAT_CLICK_TIMEOUT",
             "CHAT_CLICK_FAILED",
+            "A11Y_CLICK_TARGET_UNAVAILABLE",
         ] {
             assert!(is_unverifiable_chat_selection(code), "{code}");
         }

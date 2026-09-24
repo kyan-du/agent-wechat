@@ -272,5 +272,59 @@ class ChatSelectDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("VEC_MAP_OFF", new_amd)
 
 
+
+class ChatSelectUiScanTests(unittest.TestCase):
+    def test_valid_bounds_rejects_empty(self):
+        self.assertFalse(chat_select._valid_bounds(None))
+        self.assertFalse(chat_select._valid_bounds({"x": 0, "y": 0, "width": 0, "height": 10}))
+        self.assertTrue(chat_select._valid_bounds({"x": 1, "y": 2, "width": 10, "height": 10}))
+
+    def test_find_chat_list_items_returns_all_rows_in_order(self):
+        tree = {
+            "role": "desktop-frame",
+            "children": [{
+                "role": "list",
+                "name": "Chats",
+                "children": [
+                    {"role": "list-item", "name": "A", "bounds": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                    {"role": "list-item", "name": "B", "bounds": {"x": 0, "y": 10, "width": 10, "height": 10}},
+                    {"role": "list-item", "name": "bad", "bounds": {"x": 0, "y": 20, "width": 0, "height": 10}},
+                ],
+            }],
+        }
+        items = []
+        chat_select._find_chat_list_items(tree, items, False)
+        self.assertEqual([i["name"] for i in items], ["A", "B"])
+
+    def test_activate_picks_largest_weixin_window(self):
+        geoms = {
+            "1": "Window 1\n  Position: 0,0\n  Geometry: 100x100\n",
+            "2": "Window 2\n  Position: 0,0\n  Geometry: 880x640\n",
+        }
+        calls = []
+        def fake_output(cmd, text=True, timeout=5, stderr=None):
+            if cmd[:2] == ["xdotool", "search"]:
+                return "1\n2\n"
+            if cmd[:2] == ["xdotool", "getwindowgeometry"]:
+                return geoms[cmd[2]]
+            raise AssertionError(cmd)
+        def fake_run(cmd, timeout=5, check=False, capture_output=True):
+            calls.append(cmd)
+            return mock.Mock(returncode=0)
+        with mock.patch.object(chat_select.subprocess, "check_output", side_effect=fake_output), \
+             mock.patch.object(chat_select.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(chat_select.time, "sleep"):
+            self.assertTrue(chat_select.activate_main_wechat_window())
+        self.assertEqual(calls[0][:3], ["xdotool", "windowactivate", "--sync"])
+        self.assertEqual(calls[0][3], "2")
+
+    def test_source_documents_ui_index_not_vector_index(self):
+        with open(MODULE_PATH, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("select_target_by_ui_scan", src)
+        self.assertIn("visible UI list", src)
+        self.assertIn("activate_main_wechat_window", src)
+
+
 if __name__ == "__main__":
     unittest.main()

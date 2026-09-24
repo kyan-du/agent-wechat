@@ -1,7 +1,6 @@
 use super::Plan;
 use crate::ia::actions;
 use crate::ia::helpers::{action_frame, find_edit_and_send_button};
-use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
 
@@ -102,19 +101,9 @@ impl Plan for ChatOpenPlan {
                         return None;
                     }
 
-                    // Find click target
-                    let chat_list_item = query_selector(a11y, r#"list[name="Chats"] > list-item"#);
-                    let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| {
-                            (
-                                (b.x + b.width / 2.0).round(),
-                                (b.y + b.height / 2.0).round(),
-                            )
-                        })
-                    });
-
+                    // Resolve a live non-selected click target inside chat-select.
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(&params.chat_id, force, None).await;
                     tracing::info!(
                         "[chat_open] chat-select completed ok={} verified={:?} skipped={:?} code={:?} duration_ms={:?} used_frida={:?} attach_count={:?}",
                         result.ok,

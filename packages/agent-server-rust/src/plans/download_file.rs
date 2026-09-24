@@ -109,19 +109,9 @@ impl Plan for DownloadFilePlan {
                         return None;
                     }
 
-                    let chat_list_item =
-                        crate::ia::selectors::query_selector(a11y, r#"list[name="Chats"] > list-item"#);
-                    let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| {
-                            (
-                                (b.x + b.width / 2.0).round(),
-                                (b.y + b.height / 2.0).round(),
-                            )
-                        })
-                    });
-
+                    // Resolve a live non-selected click target inside chat-select.
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(&params.chat_id, force, None).await;
                     tracing::info!(
                         "[download_file] chat-select completed ok={} verified={:?} skipped={:?} code={:?} duration_ms={:?}",
                         result.ok,
