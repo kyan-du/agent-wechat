@@ -1,5 +1,27 @@
 # @agent-wechat/agent-server
 
+## 0.15.1
+
+### Minor Changes
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Upgrade the runtime image to WeChat Linux v4.1.13.23. Capture the login passphrase automatically before QR/saved-account login, derive SQLCipher compatibility-4 keys without a hand-placed passphrase file, and pin both architectures to verified Wayback `if_` packages.
+
+### Patch Changes
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Fix WeChat Linux 4.1.13.23 chat open on ARM64: activate the main window before clicks, select by visible UI list order (not Frida vector index), and reject unverified openChat HTTP 200 responses in the OpenClaw plugin.
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Fix composer discovery on WeChat 4.1.x where the editable input and Send button are cousins in the a11y tree (not siblings), which previously caused COMPOSER_UNAVAILABLE / localized_composer_not_found after a successful chat open.
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Resolve nested 聊天记录 datatype=8 files from the WeChat 4.1 `Rec/*/F/{n}/{name}` layout by verifying plaintext md5 (not only flat `File/{md5}`).
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Resolve nested 聊天记录 datatype=5 link/article preview images via thumbfullmd5 (Rec `*_t` verified decrypt). Materialize also left-thumb-opens `[Link]` rows and closes stacked leftover detail frames so wheel/click focus sticks to the target card.
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Resolve 「回复」 quoted images via refermsg svrid when hardlink/md5 misses: look up the original type-3 message in the same chat and materialize it through the normal resource-db path. Reply context shows `[Image]` instead of raw img XML.
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Identify the live WeChat main process from `/proc` identity instead of `pgrep -f` path substrings, so crashpad helpers are not selected during login passphrase capture. When `message_resource.db` exists on disk, require a working stored key so a stale credential re-extracts; a missing file does not retry.
+
+- [#149](https://github.com/kyan-du/agent-wechat/pull/149) [`d9bfcfb`](https://github.com/kyan-du/agent-wechat/commit/d9bfcfb0551acb37d7f9ecdc95f1dd17b4af1884) Thanks [@vangie](https://github.com/vangie)! - Start Xvfb and x11vnc as the WeChat user so Linux 4.1.13+ can render a scannable login QR without extra container capabilities.
+
 ## 0.14.6
 
 ## 0.14.5
