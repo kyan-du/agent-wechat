@@ -108,8 +108,84 @@ fn find_ranked_composer(a11y: &A11yNode, main_frame_only: bool) -> Option<(&A11y
         .map(|(_, c)| (c.edit, c.send))
 }
 
+fn is_search_field(node: &A11yNode) -> bool {
+    let name = node.name.trim();
+    name.eq_ignore_ascii_case("Search") || name == "搜索"
+}
+
+fn is_composer_edit(node: &A11yNode) -> bool {
+    node.role == "text" && node_has_state(node, "EDITABLE") && !is_search_field(node)
+}
+
+fn descendant_composer_edits<'a>(node: &'a A11yNode) -> Vec<&'a A11yNode> {
+    let mut out = Vec::new();
+    fn walk<'a>(node: &'a A11yNode, out: &mut Vec<&'a A11yNode>) {
+        if is_composer_edit(node) {
+            out.push(node);
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                walk(child, out);
+            }
+        }
+    }
+    walk(node, &mut out);
+    out
+}
+
+fn descendant_send_buttons<'a>(node: &'a A11yNode) -> Vec<&'a A11yNode> {
+    let mut out = Vec::new();
+    fn walk<'a>(node: &'a A11yNode, out: &mut Vec<&'a A11yNode>) {
+        if node.role == "push-button" && is_send_button_name(&node.name) {
+            out.push(node);
+        }
+        if let Some(children) = &node.children {
+            for child in children {
+                walk(child, out);
+            }
+        }
+    }
+    walk(node, &mut out);
+    out
+}
+
+fn bounds_center(bounds: &Bounds) -> (f64, f64) {
+    (
+        bounds.x + bounds.width / 2.0,
+        bounds.y + bounds.height / 2.0,
+    )
+}
+
+fn distance_sq(a: &A11yNode, b: &A11yNode) -> f64 {
+    match (&a.bounds, &b.bounds) {
+        (Some(ab), Some(bb)) => {
+            let (ax, ay) = bounds_center(ab);
+            let (bx, by) = bounds_center(bb);
+            let dx = ax - bx;
+            let dy = ay - by;
+            dx * dx + dy * dy
+        }
+        _ => f64::MAX / 4.0,
+    }
+}
+
+fn nearest_send<'a>(edit: &'a A11yNode, sends: &[&'a A11yNode]) -> Option<&'a A11yNode> {
+    sends.iter().copied().min_by(|a, b| {
+        distance_sq(edit, a)
+            .partial_cmp(&distance_sq(edit, b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
 /// Recursively collect all edit+send composer pairs, tracking whether each
 /// pair is inside the main application frame.
+///
+/// WeChat 4.1.x often places the editable composer and the localized Send
+/// button under different cousin branches (edit under a filler, Send under a
+/// toolbar), so sibling-only matching misses the live composer. After the
+/// legacy sibling pass we also pair non-Search editable text with the nearest
+/// Send button under the same subtree when the pair has not already been
+/// recorded.
 fn collect_edit_send_pairs<'a>(
     node: &'a A11yNode,
     in_main_frame: bool,
@@ -124,7 +200,7 @@ fn collect_edit_send_pairs<'a>(
             .find(|c| c.role == "push-button" && is_send_button_name(&c.name));
         let edit_node = children
             .iter()
-            .find(|c| c.role == "text" && node_has_state(c, "EDITABLE"));
+            .find(|c| is_composer_edit(c));
 
         if let (Some(edit), Some(send)) = (edit_node, send_btn) {
             out.push(ComposerPair {
@@ -136,6 +212,24 @@ fn collect_edit_send_pairs<'a>(
 
         for child in children {
             collect_edit_send_pairs(child, in_main_frame, out);
+        }
+
+        // Cousin/proximity fallback for layouts where edit + Send are not siblings.
+        let edits = descendant_composer_edits(node);
+        let sends = descendant_send_buttons(node);
+        if !edits.is_empty() && !sends.is_empty() {
+            for edit in edits {
+                if out.iter().any(|pair| std::ptr::eq(pair.edit, edit)) {
+                    continue;
+                }
+                if let Some(send) = nearest_send(edit, &sends) {
+                    out.push(ComposerPair {
+                        edit,
+                        send,
+                        in_main_frame,
+                    });
+                }
+            }
         }
     }
 }
@@ -247,7 +341,84 @@ mod composer_tests {
         );
         assert!(find_edit_and_send_button(&tree).is_some());
     }
+    fn node_with_bounds(
+        role: &str,
+        name: &str,
+        states: &[&str],
+        bounds: (f64, f64, f64, f64),
+        children: Vec<A11yNode>,
+    ) -> A11yNode {
+        let mut n = node(role, name, states, children);
+        n.bounds = Some(Bounds {
+            x: bounds.0,
+            y: bounds.1,
+            width: bounds.2,
+            height: bounds.3,
+        });
+        n
+    }
+
     #[test]
+    fn cousin_edit_and_send_under_toolbar_layout_are_paired() {
+        // Mirrors WeChat 4.1.13: editable text and Send live under different fillers.
+        let tree = node(
+            "frame",
+            "Weixin",
+            &[],
+            vec![node(
+                "filler",
+                "",
+                &[],
+                vec![
+                    node(
+                        "filler",
+                        "edit-branch",
+                        &[],
+                        vec![node_with_bounds(
+                            "text",
+                            "File Transfer",
+                            &["EDITABLE", "FOCUSED"],
+                            (521.0, 588.0, 542.0, 79.0),
+                            vec![],
+                        )],
+                    ),
+                    node(
+                        "tool-bar",
+                        "",
+                        &[],
+                        vec![
+                            node_with_bounds(
+                                "push-button",
+                                "Send Voice",
+                                &[],
+                                (966.0, 675.0, 28.0, 28.0),
+                                vec![],
+                            ),
+                            node_with_bounds(
+                                "push-button",
+                                "Send",
+                                &["DISABLED"],
+                                (1004.0, 677.0, 55.0, 24.0),
+                                vec![],
+                            ),
+                        ],
+                    ),
+                    node_with_bounds(
+                        "text",
+                        "Search",
+                        &["EDITABLE"],
+                        (299.0, 126.0, 148.0, 22.0),
+                        vec![],
+                    ),
+                ],
+            )],
+        );
+        let (edit, send) = find_edit_and_send_button(&tree).expect("cousin composer");
+        assert_eq!(edit.name, "File Transfer");
+        assert_eq!(send.name, "Send");
+        assert!(find_main_edit_and_send_button(&tree).is_some());
+    }
+
     fn main_only_composer_rejects_detached_window_pair() {
         let tree = node(
             "desktop-frame",
