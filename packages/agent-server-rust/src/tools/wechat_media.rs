@@ -61,9 +61,12 @@ const MAX_NESTED_CHAT_HISTORY_MEDIA: usize = 16;
 const NESTED_IMAGE_TYPE: i32 = 2;
 const NESTED_VOICE_TYPE: i32 = 3;
 const NESTED_VIDEO_TYPE: i32 = 4;
+/// Nested 链接 / article share (a11y: `[Link]…`). Preview bytes use thumbfullmd5.
+const NESTED_LINK_TYPE: i32 = 5;
 const NESTED_FILE_TYPE: i32 = 8;
 const NESTED_VOICE_MSG_TYPE: i32 = 34;
 const NESTED_VIDEO_MSG_TYPE: i32 = 43;
+const MAX_VERIFIED_REC_SCAN_CANDIDATES: usize = 64;
 
 fn sanitize_md5(raw: &str) -> Option<String> {
     let value = raw.trim();
@@ -1305,6 +1308,115 @@ fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
     unique_existing_file(found).map(|path| path.to_string_lossy().to_string())
 }
 
+/// Decrypt a Rec/Img `.dat` (or bare `0` / `1_t`) and keep it only when the
+/// plaintext digest matches `expected_md5`. Used for nested link previews
+/// whose hardlink row is missing but `Rec/*/Img/{n}_t` already landed.
+fn decrypt_matches_md5(path: &Path, image_keys: &ImageKeys, expected_md5: &str) -> bool {
+    let Some(dat) = read_stable_file(path) else {
+        return false;
+    };
+    if dat.len() < 15 || dat[..6] != DAT_MAGIC {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    let Some(xor_byte) = resolve_xor_byte(&path_str, &dat, image_keys) else {
+        return false;
+    };
+    let Some(plain) = decrypt_dat(&dat, &image_keys.aes_key_hex, xor_byte) else {
+        return false;
+    };
+    format!("{:x}", Md5::digest(&plain)) == expected_md5
+}
+
+fn nested_thumb_size(item: &str) -> Option<u64> {
+    extract_xml_tag(item, "thumbsize")
+        .or_else(|| xml_attr(item, "thumbsize"))
+        .and_then(|value| value.parse().ok())
+}
+
+/// Walk `Rec/*/Img` and return the unique path whose decrypted digest is `md5`.
+/// When `prefer_thumbnail` is set (link previews), only `*_t` / `*_t.dat` names
+/// are considered on the first pass.
+fn find_dat_via_verified_rec_scan(
+    account_dir: &str,
+    md5: &str,
+    image_keys: &ImageKeys,
+    prefer_thumbnail: bool,
+    expected_size: Option<u64>,
+) -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for base in &account_base_paths(account_dir) {
+        let attach = Path::new(base).join("msg/attach");
+        if !attach.exists() {
+            continue;
+        }
+        let Ok(chat_dirs) = fs::read_dir(&attach) else {
+            continue;
+        };
+        for chat_entry in chat_dirs.flatten() {
+            let Ok(month_dirs) = fs::read_dir(chat_entry.path()) else {
+                continue;
+            };
+            for month_entry in month_dirs.flatten() {
+                let rec_root = month_entry.path().join("Rec");
+                let Ok(rec_dirs) = fs::read_dir(&rec_root) else {
+                    continue;
+                };
+                let mut dirs: Vec<_> = rec_dirs
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                dirs.sort();
+                for rec_dir in dirs {
+                    let img_dir = rec_dir.join("Img");
+                    let Ok(files) = fs::read_dir(&img_dir) else {
+                        continue;
+                    };
+                    for file in files.flatten() {
+                        let path = file.path();
+                        if !path.is_file() {
+                            continue;
+                        }
+                        let name = file.file_name().to_string_lossy().to_string();
+                        if prefer_thumbnail && !is_dat_thumbnail_name(&name) {
+                            continue;
+                        }
+                        if let Some(expected) = expected_size {
+                            if !rec_dat_size_matches(&path, expected) {
+                                continue;
+                            }
+                        }
+                        candidates.push(path);
+                        if candidates.len() >= MAX_VERIFIED_REC_SCAN_CANDIDATES {
+                            break;
+                        }
+                    }
+                    if candidates.len() >= MAX_VERIFIED_REC_SCAN_CANDIDATES {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    for path in candidates {
+        if decrypt_matches_md5(&path, image_keys, md5) {
+            found.push(path);
+            if found.len() > 1 {
+                tracing::warn!(
+                    "[media:nested-link] ambiguous verified Rec match md5={md5} count={}",
+                    found.len()
+                );
+                return None;
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.pop().expect("one match").to_string_lossy().to_string())
+}
+
 /// Nested 聊天记录 images resolve via local hardlink / md5 `.dat` only.
 /// HTTP CDN fallback was removed: nested fileids are opaque and aeskey is often
 /// absent, so CDN never worked in practice.
@@ -1363,6 +1475,78 @@ fn get_nested_image(
 
     None
 }
+
+/// Nested datatype=5 link / article shares only ship `thumbfullmd5` (no fullmd5).
+/// Resolve the preview image the same way as nested images once Rec/`*_t` lands.
+fn get_nested_link_preview(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    item: &str,
+    local_id: i64,
+    index: usize,
+    image_keys: Option<&ImageKeys>,
+) -> Option<MediaResult> {
+    let md5 = xml_attr(item, "thumbfullmd5")
+        .or_else(|| extract_xml_tag(item, "thumbfullmd5"))
+        .and_then(|value| sanitize_md5(&value))?;
+    let image_keys = image_keys?;
+    let expected_size = nested_thumb_size(item);
+    let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
+    let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
+        .or_else(|| find_dat_via_md5_filename(account_dir, &md5))
+        .or_else(|| {
+            find_dat_via_verified_rec_scan(
+                account_dir,
+                &md5,
+                image_keys,
+                true,
+                expected_size,
+            )
+        })
+        .or_else(|| {
+            // Rare: preview stored without `_t` suffix.
+            find_dat_via_verified_rec_scan(
+                account_dir,
+                &md5,
+                image_keys,
+                false,
+                expected_size,
+            )
+        });
+    let Some(dat_path) = dat_path else {
+        tracing::warn!(
+            "[media:nested-link] no dat path local_id={local_id} index={index} md5={md5}"
+        );
+        return None;
+    };
+    // Defence in depth: Rec scan already verified; hardlink/md5 paths may not.
+    if !decrypt_matches_md5(Path::new(&dat_path), image_keys, &md5) {
+        tracing::warn!(
+            "[media:nested-link] digest mismatch local_id={local_id} index={index} path={dat_path}"
+        );
+        return None;
+    }
+    let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+    if result.data.is_some() {
+        let ext = Path::new(&result.filename)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jpg")
+            .to_string();
+        result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+        result.source = Some("local-dat-link-thumb".into());
+        if let Some(media) = media_with_data(result) {
+            return Some(media);
+        }
+    } else {
+        tracing::warn!(
+            "[media:nested-link] decrypt failed local_id={local_id} index={index} path={dat_path} code={:?}",
+            result.error_code
+        );
+    }
+    None
+}
+
 
 fn get_nested_file(
     account_dir: &str,
@@ -1495,6 +1679,7 @@ fn is_nested_media_type(nested_type: i32) -> bool {
         NESTED_IMAGE_TYPE
             | NESTED_VOICE_TYPE
             | NESTED_VIDEO_TYPE
+            | NESTED_LINK_TYPE
             | NESTED_FILE_TYPE
             | NESTED_VOICE_MSG_TYPE
             | NESTED_VIDEO_MSG_TYPE
@@ -1525,6 +1710,14 @@ fn get_chat_history_media(
         }
         let resolved = match nested_type {
             NESTED_IMAGE_TYPE => get_nested_image(
+                account_dir,
+                keys,
+                &item,
+                local_id,
+                index,
+                image_keys.as_ref(),
+            ),
+            NESTED_LINK_TYPE => get_nested_link_preview(
                 account_dir,
                 keys,
                 &item,
@@ -2248,6 +2441,26 @@ mod tests {
         fs::create_dir_all(&other).unwrap();
         fs::write(other.join(format!("{md5}.dat")), b"other").unwrap();
         assert!(find_dat_via_md5_filename(dir.path().to_str().unwrap(), md5).is_none());
+    }
+
+    #[test]
+    fn nested_link_type_is_media_and_uses_thumbfullmd5() {
+        assert!(is_nested_media_type(NESTED_LINK_TYPE));
+        let item = r#"<dataitem datatype="5" thumbfullmd5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"><thumbsize>100</thumbsize></dataitem>"#;
+        assert_eq!(dataitem_type(item), NESTED_LINK_TYPE);
+        assert!(nested_payload_md5(item).is_none());
+        assert_eq!(nested_image_md5(item).as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert_eq!(nested_thumb_size(item), Some(100));
+        // No account / keys → unresolved, but must not panic.
+        assert!(get_nested_link_preview(
+            "/tmp/no-such-account",
+            &HashMap::new(),
+            item,
+            123,
+            1,
+            None
+        )
+        .is_none());
     }
 
     #[test]

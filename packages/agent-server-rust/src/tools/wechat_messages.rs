@@ -355,8 +355,9 @@ fn parse_forward_nodes(
             break;
         };
         let item = &xml[start..end];
-        let content =
-            extract_xml_tag(item, "datadesc").or_else(|| extract_xml_tag(item, "datatitle"));
+        let content = extract_xml_tag(item, "datadesc")
+            .or_else(|| extract_xml_tag(item, "datatitle"))
+            .or_else(|| extract_xml_tag(item, "title"));
         let nested = item.find("<recorditem").and_then(|nested_start| {
             let nested_end = find_named_element_end(item, nested_start, "recorditem")?;
             decode_recorditem_inner(item, nested_start, nested_end)
@@ -542,7 +543,18 @@ fn clean_content(content: &str, local_type: i64) -> String {
                                         .unwrap_or_default();
                                     let data_title = extract_xml_tag(item, "datatitle")
                                         .or_else(|| extract_xml_tag(item, "datadesc"))
+                                        .or_else(|| extract_xml_tag(item, "title"))
                                         .map(|value| value.replace("&amp;", "&"))
+                                        .map(|value| {
+                                            let dtype = extract_xml_attr(item, "datatype")
+                                                .and_then(|v| v.parse::<i32>().ok())
+                                                .unwrap_or(0);
+                                            if dtype == 5 && !value.starts_with("[Link]") {
+                                                format!("[Link] {value}")
+                                            } else {
+                                                value
+                                            }
+                                        })
                                         .unwrap_or_else(|| "[media]".to_string());
                                     if !sender_name.is_empty() {
                                         parts.push(format!("{sender_name}: {data_title}"));
@@ -1137,6 +1149,26 @@ mod merged_forward_tests {
         let tree = parse_forwarded_tree(&xml).expect("tree");
         assert!(tree.truncated);
         assert_eq!(tree.nodes.len(), FORWARD_MAX_NODES);
+    }
+
+    #[test]
+    fn chat_history_summary_uses_weburl_title_for_link_items() {
+        let xml = concat!(
+            r#"<msg><appmsg><title>群聊的聊天记录</title><type>19</type><recorditem><![CDATA["#,
+            r#"<recordinfo>"#,
+            r#"<dataitem datatype="8"><sourcename>彤彤</sourcename><datatitle>note.pages</datatitle></dataitem>"#,
+            r#"<dataitem datatype="5"><sourcename>姐姐狐</sourcename><weburlitem><title>第 3 课｜金老爷买钟</title></weburlitem><thumbfullmd5>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</thumbfullmd5></dataitem>"#,
+            r#"<dataitem datatype="1"><sourcename>春庭</sourcename><datadesc>hello</datadesc></dataitem>"#,
+            r#"</recordinfo>"#,
+            r#"]]></recorditem></appmsg></msg>"#,
+        );
+        let summary = clean_content(xml, 49);
+        assert!(
+            summary.contains("姐姐狐: [Link] 第 3 课｜金老爷买钟"),
+            "summary={summary}"
+        );
+        assert!(summary.contains("彤彤: note.pages"));
+        assert!(summary.contains("春庭: hello"));
     }
 
     #[test]
