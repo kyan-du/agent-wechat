@@ -126,6 +126,10 @@ pub fn is_chat_history_media_row_name(name: &str) -> bool {
         "Image",
         "Photo",
         "图片",
+        "Link",
+        "链接",
+        "Channels",
+        "视频号",
         "File",
         "文件",
         "Voice",
@@ -134,6 +138,8 @@ pub fn is_chat_history_media_row_name(name: &str) -> bool {
         "视频",
         "[Image]",
         "[Photo]",
+        "[Link]",
+        "[链接]",
         "[File]",
         "[Voice]",
         "[Video]",
@@ -156,6 +162,29 @@ pub fn chat_history_detail_frame<'a>(root: &'a A11yNode, title: &str) -> Option<
     let mut frames = Vec::new();
     collect_chat_history_detail_frames(root, title, &mut frames);
     (frames.len() == 1).then_some(frames[0])
+}
+
+/// Every open 聊天记录 / Chat History detail frame (any title).
+pub fn all_chat_history_detail_frames<'a>(root: &'a A11yNode) -> Vec<&'a A11yNode> {
+    let mut frames = Vec::new();
+    collect_any_chat_history_detail_frames(root, &mut frames);
+    frames
+}
+
+fn is_chat_history_detail_frame_name(name: &str) -> bool {
+    let name = name.trim();
+    name.contains("聊天记录") || name.contains("Chat History")
+}
+
+fn collect_any_chat_history_detail_frames<'a>(node: &'a A11yNode, out: &mut Vec<&'a A11yNode>) {
+    if node.role == "frame" && is_chat_history_detail_frame_name(&node.name) {
+        out.push(node);
+    }
+    if let Some(children) = &node.children {
+        for child in children {
+            collect_any_chat_history_detail_frames(child, out);
+        }
+    }
 }
 
 fn collect_chat_history_detail_frames<'a>(
@@ -954,6 +983,9 @@ mod tests {
     fn chat_history_media_row_names_cover_en_zh_and_file_voice_video() {
         assert!(is_chat_history_media_row_name("Image09-20 01:26 \n"));
         assert!(is_chat_history_media_row_name("图片 昨天"));
+        assert!(is_chat_history_media_row_name("[Link]第 3 课｜金老爷买钟"));
+        assert!(is_chat_history_media_row_name("Link https://example.com"));
+        assert!(is_chat_history_media_row_name("Channels董思玗晓菲姐家的小宝"));
         assert!(is_chat_history_media_row_name("File report.pdf"));
         assert!(is_chat_history_media_row_name("文件 说明.docx"));
         assert!(is_chat_history_media_row_name("Voice 0:12"));

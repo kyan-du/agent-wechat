@@ -126,7 +126,16 @@ fi
 # ============================================
 # Start Xvfb
 # ============================================
-Xvfb "$DISPLAY" -screen 0 1280x800x24 &
+# WeChat 4.1.13+ draws the login QR through MIT-SHM. When Xvfb runs as
+# root and WeChat runs as `wechat`, the SysV shm segment is not readable
+# by the client unless the container has IPC_OWNER. Launch Xvfb as the
+# same uid so QR generation works with the existing SYS_PTRACE/NET_ADMIN
+# capability set.
+if [ "$(id -u)" -eq 0 ]; then
+  su -s /bin/bash -c "DISPLAY=$DISPLAY Xvfb $DISPLAY -screen 0 1280x800x24" wechat &
+else
+  Xvfb "$DISPLAY" -screen 0 1280x800x24 &
+fi
 sleep 1
 
 # ============================================
@@ -167,7 +176,12 @@ fi
 if [ "${ENABLE_VNC:-1}" = "1" ]; then
   # -nopw: no VNC-level password (localhost only; auth enforced by agent-server proxy with full token)
   # -viewonly: no remote input
-  x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
+  # Same uid as Xvfb: root x11vnc cannot MIT-SHM attach to a wechat-owned display.
+  if [ "$(id -u)" -eq 0 ]; then
+    su -s /bin/bash -c "DISPLAY=$DISPLAY HOME=$WECHAT_HOME x11vnc -display $DISPLAY -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1" wechat &
+  else
+    x11vnc -display "$DISPLAY" -forever -nopw -shared -viewonly -xkb -rfbport 5900 -listen 127.0.0.1 &
+  fi
 fi
 
 # ============================================

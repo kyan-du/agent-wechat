@@ -362,7 +362,10 @@ pub async fn reset_auth() -> Json<serde_json::Value> {
         crate::db::queries::reset_session_auth_data(&mut db, &session.id)
     };
     match reset {
-        Ok(()) => Json(serde_json::json!({ "success": true })),
+        Ok(()) => {
+            crate::tools::wechat_keys::clear_passphrase_capture();
+            Json(serde_json::json!({ "success": true }))
+        }
         Err(code) => Json(
             serde_json::json!({ "success": false, "errorCode": code, "error": "authentication state reset failed" }),
         ),
@@ -603,7 +606,9 @@ fn subscription_event_to_login_event(event: SubscriptionEvent) -> LoginSubscript
 pub(crate) fn apply_logout_user_clear(result: &mut ExecutionResult, session_id: &str) {
     apply_logout_clear_result(result, || {
         let db = get_db();
-        crate::db::queries::update_session_logged_in_user(&db, session_id, None)
+        crate::db::queries::update_session_logged_in_user(&db, session_id, None)?;
+        crate::tools::wechat_keys::clear_passphrase_capture();
+        Ok(())
     });
 }
 

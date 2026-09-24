@@ -1,0 +1,3 @@
+#!/bin/bash
+# Wrapper to run capture-passphrase.py with the WeChat user HOME.
+exec env HOME=/home/wechat python3 /opt/tools/capture-passphrase.py "$@"

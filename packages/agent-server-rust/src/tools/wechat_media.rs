@@ -3,7 +3,7 @@ use crate::tools::wechat_db::{get_db_path, query_wechat_db};
 use crate::tools::wechat_message_type::normalize_local_type;
 use crate::tools::wechat_messages::{
     collect_forward_dataitems, decode_message_content, extract_xml_tag, find_message_db,
-    get_msg_table_name, is_merged_forward_xml, refermsg_referred_xml,
+    get_msg_table_name, is_merged_forward_xml, refermsg_referred_xml, refermsg_svrid,
 };
 use md5::{Digest, Md5};
 use std::collections::HashMap;
@@ -61,9 +61,12 @@ const MAX_NESTED_CHAT_HISTORY_MEDIA: usize = 16;
 const NESTED_IMAGE_TYPE: i32 = 2;
 const NESTED_VOICE_TYPE: i32 = 3;
 const NESTED_VIDEO_TYPE: i32 = 4;
+/// Nested 链接 / article share (a11y: `[Link]…`). Preview bytes use thumbfullmd5.
+const NESTED_LINK_TYPE: i32 = 5;
 const NESTED_FILE_TYPE: i32 = 8;
 const NESTED_VOICE_MSG_TYPE: i32 = 34;
 const NESTED_VIDEO_MSG_TYPE: i32 = 43;
+const MAX_VERIFIED_REC_SCAN_CANDIDATES: usize = 64;
 
 fn sanitize_md5(raw: &str) -> Option<String> {
     let value = raw.trim();
@@ -276,6 +279,112 @@ fn find_rec_named_file(base: &Path, kind: &str, stem: &str) -> Option<std::path:
         }
     }
     unique_existing_file(found)
+}
+
+/// Nested 聊天记录 files on WeChat 4.1 land under `Rec/*/F/{n}/{name}`
+/// (e.g. `F/0/0.pages`), not the flat `Rec/*/File/{md5}` layout older builds
+/// used. Walk `F` / `File` / `Files` recursively and keep the unique path
+/// whose plaintext digest matches `md5`.
+fn find_rec_verified_file(
+    base: &Path,
+    md5: &str,
+    expected_size: Option<u64>,
+) -> Option<std::path::PathBuf> {
+    const KINDS: &[&str] = &["F", "File", "Files"];
+    const MAX_CANDIDATES: usize = 64;
+    let attach = base.join("msg/attach");
+    if !attach.is_dir() {
+        return None;
+    }
+    let Ok(chat_dirs) = fs::read_dir(&attach) else {
+        return None;
+    };
+    let mut chats: Vec<_> = chat_dirs
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    chats.sort();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for chat in chats {
+        let Ok(month_dirs) = fs::read_dir(&chat) else {
+            continue;
+        };
+        let mut months: Vec<_> = month_dirs
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        months.sort();
+        for month in months {
+            let rec_root = month.join("Rec");
+            let Ok(rec_dirs) = fs::read_dir(&rec_root) else {
+                continue;
+            };
+            let mut recs: Vec<_> = rec_dirs
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            recs.sort();
+            for rec in recs {
+                for kind in KINDS {
+                    let dir = rec.join(kind);
+                    if !dir.is_dir() {
+                        continue;
+                    }
+                    let mut stack = vec![dir];
+                    while let Some(cur) = stack.pop() {
+                        let Ok(entries) = fs::read_dir(&cur) else {
+                            continue;
+                        };
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                stack.push(path);
+                                continue;
+                            }
+                            if !path.is_file() {
+                                continue;
+                            }
+                            if let Some(expected) = expected_size {
+                                let Ok(meta) = fs::metadata(&path) else {
+                                    continue;
+                                };
+                                if meta.len() != expected {
+                                    continue;
+                                }
+                            }
+                            candidates.push(path);
+                            if candidates.len() >= MAX_CANDIDATES {
+                                break;
+                            }
+                        }
+                        if candidates.len() >= MAX_CANDIDATES {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    // Same digest ⇒ interchangeable copies across cards; pick the first
+    // sorted path for determinism rather than failing closed.
+    for path in candidates {
+        if read_verified_payload(&path, md5).is_some() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn nested_file_size(item: &str) -> Option<u64> {
+    extract_xml_tag(item, "filesize")
+        .or_else(|| extract_xml_tag(item, "size"))
+        .or_else(|| xml_attr(item, "filesize"))
+        .and_then(|value| value.parse().ok())
 }
 
 fn encode_media_bytes(
@@ -1305,6 +1414,115 @@ fn find_dat_via_md5_filename(account_dir: &str, md5: &str) -> Option<String> {
     unique_existing_file(found).map(|path| path.to_string_lossy().to_string())
 }
 
+/// Decrypt a Rec/Img `.dat` (or bare `0` / `1_t`) and keep it only when the
+/// plaintext digest matches `expected_md5`. Used for nested link previews
+/// whose hardlink row is missing but `Rec/*/Img/{n}_t` already landed.
+fn decrypt_matches_md5(path: &Path, image_keys: &ImageKeys, expected_md5: &str) -> bool {
+    let Some(dat) = read_stable_file(path) else {
+        return false;
+    };
+    if dat.len() < 15 || dat[..6] != DAT_MAGIC {
+        return false;
+    }
+    let path_str = path.to_string_lossy();
+    let Some(xor_byte) = resolve_xor_byte(&path_str, &dat, image_keys) else {
+        return false;
+    };
+    let Some(plain) = decrypt_dat(&dat, &image_keys.aes_key_hex, xor_byte) else {
+        return false;
+    };
+    format!("{:x}", Md5::digest(&plain)) == expected_md5
+}
+
+fn nested_thumb_size(item: &str) -> Option<u64> {
+    extract_xml_tag(item, "thumbsize")
+        .or_else(|| xml_attr(item, "thumbsize"))
+        .and_then(|value| value.parse().ok())
+}
+
+/// Walk `Rec/*/Img` and return the unique path whose decrypted digest is `md5`.
+/// When `prefer_thumbnail` is set (link previews), only `*_t` / `*_t.dat` names
+/// are considered on the first pass.
+fn find_dat_via_verified_rec_scan(
+    account_dir: &str,
+    md5: &str,
+    image_keys: &ImageKeys,
+    prefer_thumbnail: bool,
+    expected_size: Option<u64>,
+) -> Option<String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    for base in &account_base_paths(account_dir) {
+        let attach = Path::new(base).join("msg/attach");
+        if !attach.exists() {
+            continue;
+        }
+        let Ok(chat_dirs) = fs::read_dir(&attach) else {
+            continue;
+        };
+        for chat_entry in chat_dirs.flatten() {
+            let Ok(month_dirs) = fs::read_dir(chat_entry.path()) else {
+                continue;
+            };
+            for month_entry in month_dirs.flatten() {
+                let rec_root = month_entry.path().join("Rec");
+                let Ok(rec_dirs) = fs::read_dir(&rec_root) else {
+                    continue;
+                };
+                let mut dirs: Vec<_> = rec_dirs
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                dirs.sort();
+                for rec_dir in dirs {
+                    let img_dir = rec_dir.join("Img");
+                    let Ok(files) = fs::read_dir(&img_dir) else {
+                        continue;
+                    };
+                    for file in files.flatten() {
+                        let path = file.path();
+                        if !path.is_file() {
+                            continue;
+                        }
+                        let name = file.file_name().to_string_lossy().to_string();
+                        if prefer_thumbnail && !is_dat_thumbnail_name(&name) {
+                            continue;
+                        }
+                        if let Some(expected) = expected_size {
+                            if !rec_dat_size_matches(&path, expected) {
+                                continue;
+                            }
+                        }
+                        candidates.push(path);
+                        if candidates.len() >= MAX_VERIFIED_REC_SCAN_CANDIDATES {
+                            break;
+                        }
+                    }
+                    if candidates.len() >= MAX_VERIFIED_REC_SCAN_CANDIDATES {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    for path in candidates {
+        if decrypt_matches_md5(&path, image_keys, md5) {
+            found.push(path);
+            if found.len() > 1 {
+                tracing::warn!(
+                    "[media:nested-link] ambiguous verified Rec match md5={md5} count={}",
+                    found.len()
+                );
+                return None;
+            }
+        }
+    }
+    (found.len() == 1).then(|| found.pop().expect("one match").to_string_lossy().to_string())
+}
+
 /// Nested 聊天记录 images resolve via local hardlink / md5 `.dat` only.
 /// HTTP CDN fallback was removed: nested fileids are opaque and aeskey is often
 /// absent, so CDN never worked in practice.
@@ -1364,6 +1582,78 @@ fn get_nested_image(
     None
 }
 
+/// Nested datatype=5 link / article shares only ship `thumbfullmd5` (no fullmd5).
+/// Resolve the preview image the same way as nested images once Rec/`*_t` lands.
+fn get_nested_link_preview(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    item: &str,
+    local_id: i64,
+    index: usize,
+    image_keys: Option<&ImageKeys>,
+) -> Option<MediaResult> {
+    let md5 = xml_attr(item, "thumbfullmd5")
+        .or_else(|| extract_xml_tag(item, "thumbfullmd5"))
+        .and_then(|value| sanitize_md5(&value))?;
+    let image_keys = image_keys?;
+    let expected_size = nested_thumb_size(item);
+    let lookup_xml = format!(r#"<img md5="{md5}"/>"#);
+    let dat_path = find_dat_via_hardlink(account_dir, keys, "", &lookup_xml)
+        .or_else(|| find_dat_via_md5_filename(account_dir, &md5))
+        .or_else(|| {
+            find_dat_via_verified_rec_scan(
+                account_dir,
+                &md5,
+                image_keys,
+                true,
+                expected_size,
+            )
+        })
+        .or_else(|| {
+            // Rare: preview stored without `_t` suffix.
+            find_dat_via_verified_rec_scan(
+                account_dir,
+                &md5,
+                image_keys,
+                false,
+                expected_size,
+            )
+        });
+    let Some(dat_path) = dat_path else {
+        tracing::warn!(
+            "[media:nested-link] no dat path local_id={local_id} index={index} md5={md5}"
+        );
+        return None;
+    };
+    // Defence in depth: Rec scan already verified; hardlink/md5 paths may not.
+    if !decrypt_matches_md5(Path::new(&dat_path), image_keys, &md5) {
+        tracing::warn!(
+            "[media:nested-link] digest mismatch local_id={local_id} index={index} path={dat_path}"
+        );
+        return None;
+    }
+    let mut result = decrypt_and_return(&dat_path, image_keys, local_id);
+    if result.data.is_some() {
+        let ext = Path::new(&result.filename)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("jpg")
+            .to_string();
+        result.filename = format!("chat_history_{local_id}_{index}.{ext}");
+        result.source = Some("local-dat-link-thumb".into());
+        if let Some(media) = media_with_data(result) {
+            return Some(media);
+        }
+    } else {
+        tracing::warn!(
+            "[media:nested-link] decrypt failed local_id={local_id} index={index} path={dat_path} code={:?}",
+            result.error_code
+        );
+    }
+    None
+}
+
+
 fn get_nested_file(
     account_dir: &str,
     item: &str,
@@ -1378,12 +1668,16 @@ fn get_nested_file(
     let md5 = nested_payload_md5(item)?;
     let create_time = nested_item_time(item, fallback_time);
     let dt = chrono::DateTime::from_timestamp(create_time, 0)?;
+    let expected_size = nested_file_size(item);
     for base in account_base_paths(account_dir) {
+        let base_path = Path::new(&base);
         let candidates = [
-            find_rec_named_file(Path::new(&base), "File", &md5),
-            find_rec_named_file(Path::new(&base), "Files", &md5),
+            find_rec_named_file(base_path, "File", &md5),
+            find_rec_named_file(base_path, "Files", &md5),
+            find_rec_named_file(base_path, "F", &md5),
+            find_rec_verified_file(base_path, &md5, expected_size),
             Some(
-                Path::new(&base)
+                base_path
                     .join("msg/file")
                     .join(dt.format("%Y-%m").to_string())
                     .join(&filename),
@@ -1407,6 +1701,9 @@ fn get_nested_file(
             return media_with_data(result);
         }
     }
+    tracing::warn!(
+        "[media:nested-file] no verified path local_id={local_id} index={index} md5={md5}"
+    );
     None
 }
 
@@ -1495,6 +1792,7 @@ fn is_nested_media_type(nested_type: i32) -> bool {
         NESTED_IMAGE_TYPE
             | NESTED_VOICE_TYPE
             | NESTED_VIDEO_TYPE
+            | NESTED_LINK_TYPE
             | NESTED_FILE_TYPE
             | NESTED_VOICE_MSG_TYPE
             | NESTED_VIDEO_MSG_TYPE
@@ -1532,6 +1830,14 @@ fn get_chat_history_media(
                 index,
                 image_keys.as_ref(),
             ),
+            NESTED_LINK_TYPE => get_nested_link_preview(
+                account_dir,
+                keys,
+                &item,
+                local_id,
+                index,
+                image_keys.as_ref(),
+            ),
             NESTED_VOICE_TYPE | NESTED_VOICE_MSG_TYPE => {
                 get_nested_voice(account_dir, &item, local_id, index)
             }
@@ -1562,6 +1868,75 @@ fn get_chat_history_media(
     let mut result = unsupported_without_error();
     result.items = items;
     result
+}
+
+/// Find `local_id` for a chat message by WeChat `server_id` (refermsg svrid).
+fn lookup_local_id_by_server_id(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    server_id: i64,
+) -> Option<i64> {
+    let table_name = get_msg_table_name(chat_id);
+    let (db_name, key) = find_message_db(account_dir, keys, chat_id)?;
+    let db_path = get_db_path(account_dir, &db_name);
+    let rows = query_wechat_db(
+        &db_path,
+        key,
+        &format!(
+            "SELECT local_id FROM \"{table_name}\"
+             WHERE server_id = {server_id}
+             LIMIT 1;"
+        ),
+    );
+    rows.first()?.get("local_id")?.as_i64()
+}
+
+fn quoted_image_pending_unavailable(media: &MediaResult) -> bool {
+    media.data.is_none()
+        && media.error_code.as_deref() == Some("IMAGE_RESOURCE_UNAVAILABLE")
+}
+
+/// When hardlink/md5 cannot materialize a quoted image snapshot, fall back to
+/// the original type-3 message still present in the same chat (refermsg svrid).
+fn resolve_quoted_image_via_svrid(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    quote_content: &str,
+    quote_local_id: i64,
+    image_keys_raw: Option<(String, Option<u8>)>,
+) -> Option<MediaResult> {
+    let server_id = refermsg_svrid(quote_content)?;
+    let original_local_id =
+        lookup_local_id_by_server_id(account_dir, keys, chat_id, server_id)?;
+    if original_local_id == quote_local_id {
+        return None;
+    }
+    tracing::info!(
+        "[media:quoted-svrid] quote local_id={quote_local_id} svrid={server_id} -> original local_id={original_local_id}"
+    );
+    let mut media = get_message_media(
+        account_dir,
+        keys,
+        chat_id,
+        original_local_id,
+        image_keys_raw,
+    );
+    if media.data.is_none() {
+        tracing::warn!(
+            "[media:quoted-svrid] original local_id={original_local_id} still unavailable code={:?}",
+            media.error_code
+        );
+        return None;
+    }
+    let ext = Path::new(&media.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jpg");
+    media.filename = format!("quoted_{quote_local_id}.{ext}");
+    media.source = Some("quoted-svrid".into());
+    Some(media)
 }
 
 fn quoted_media_from_xml(
@@ -1689,7 +2064,34 @@ pub fn get_message_media(
                     create_time,
                     image_keys_raw.clone(),
                 ) {
+                    // Quoted images: hardlink/md5 often misses even when the
+                    // original type-3 message is still in this chat. Fall back
+                    // via <refermsg><svrid> before returning pending.
+                    if is_quoted_image_xml(&referred) && quoted_image_pending_unavailable(&media) {
+                        if let Some(resolved) = resolve_quoted_image_via_svrid(
+                            account_dir,
+                            keys,
+                            chat_id,
+                            &content,
+                            local_id,
+                            image_keys_raw.clone(),
+                        ) {
+                            return resolved;
+                        }
+                    }
                     return media;
+                }
+                if is_quoted_image_xml(&referred) {
+                    if let Some(resolved) = resolve_quoted_image_via_svrid(
+                        account_dir,
+                        keys,
+                        chat_id,
+                        &content,
+                        local_id,
+                        image_keys_raw.clone(),
+                    ) {
+                        return resolved;
+                    }
                 }
             }
             // Fall through to generic handlers below for other appmsg subtypes.
@@ -2021,6 +2423,55 @@ mod tests {
     }
 
     #[test]
+    fn nested_file_resolves_rec_f_subdir_layout_by_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"%PDF-1.7 nested F/0 layout";
+        let md5 = format!("{:x}", Md5::digest(data));
+        // Live 4.1 layout: Rec/<card>/F/0/0.pages (not File/<md5>).
+        let rec = dir
+            .path()
+            .join("msg/attach/chat/2026-09/Rec/card/F/0");
+        fs::create_dir_all(&rec).unwrap();
+        fs::write(rec.join("0.pages"), data).unwrap();
+        let item = format!(
+            r#"<dataitem datatype="8"><datatitle>方寸之间见天地 .pages</datatitle><fullmd5>{md5}</fullmd5></dataitem>"#
+        );
+        let media = get_nested_file(dir.path().to_str().unwrap(), &item, 123, 0, 0)
+            .expect("F/0 nested file must resolve");
+        assert_eq!(media.media_type, "file");
+        assert_eq!(
+            media.filename,
+            "chat_history_123_0_方寸之间见天地 .pages"
+        );
+        assert_eq!(media.source.as_deref(), Some("local-verified"));
+        assert_eq!(
+            media.data.as_deref(),
+            Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data).as_str())
+        );
+    }
+
+    #[test]
+    fn nested_file_rec_f_scan_accepts_identical_copies_across_cards() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = b"%PDF-1.7 dup";
+        let md5 = format!("{:x}", Md5::digest(data));
+        for card in ["card-a", "card-b"] {
+            let rec = dir
+                .path()
+                .join(format!("msg/attach/chat/2026-09/Rec/{card}/F/0"));
+            fs::create_dir_all(&rec).unwrap();
+            fs::write(rec.join("0.pages"), data).unwrap();
+        }
+        let item = format!(
+            r#"<dataitem datatype="8"><datatitle>dup.pages</datatitle><fullmd5>{md5}</fullmd5></dataitem>"#
+        );
+        let media = get_nested_file(dir.path().to_str().unwrap(), &item, 7, 0, 0)
+            .expect("identical digest copies are interchangeable");
+        assert_eq!(media.media_type, "file");
+        assert_eq!(media.source.as_deref(), Some("local-verified"));
+    }
+
+    #[test]
     fn nested_file_requires_full_digest_not_basename_dataid_or_thumbnail() {
         let dir = tempfile::tempdir().unwrap();
         let files = dir.path().join("msg/file/1970-01");
@@ -2155,6 +2606,26 @@ mod tests {
     }
 
     #[test]
+    fn nested_link_type_is_media_and_uses_thumbfullmd5() {
+        assert!(is_nested_media_type(NESTED_LINK_TYPE));
+        let item = r#"<dataitem datatype="5" thumbfullmd5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"><thumbsize>100</thumbsize></dataitem>"#;
+        assert_eq!(dataitem_type(item), NESTED_LINK_TYPE);
+        assert!(nested_payload_md5(item).is_none());
+        assert_eq!(nested_image_md5(item).as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert_eq!(nested_thumb_size(item), Some(100));
+        // No account / keys → unresolved, but must not panic.
+        assert!(get_nested_link_preview(
+            "/tmp/no-such-account",
+            &HashMap::new(),
+            item,
+            123,
+            1,
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
     fn nested_image_requires_full_payload_hash_not_thumbnail() {
         let item = r#"<dataitem datatype="2" thumbfullmd5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" />"#;
         assert!(nested_payload_md5(item).is_none());
@@ -2217,6 +2688,20 @@ mod tests {
             found_video,
             video.join("dddddddddddddddddddddddddddddddd.mp4")
         );
+    }
+
+    #[test]
+    fn quoted_image_pending_unavailable_detects_resource_gap() {
+        let pending = pending_with(
+            "pending",
+            "jpeg",
+            "quoted_117.jpg",
+            "IMAGE_RESOURCE_UNAVAILABLE",
+        );
+        assert!(quoted_image_pending_unavailable(&pending));
+        let mut ok = pending_with("image", "jpeg", "quoted_117.jpg", "IMAGE_RESOURCE_UNAVAILABLE");
+        ok.data = Some("qq==".into());
+        assert!(!quoted_image_pending_unavailable(&ok));
     }
 
     #[test]

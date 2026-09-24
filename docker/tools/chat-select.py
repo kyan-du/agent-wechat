@@ -22,6 +22,7 @@ import json
 import os
 import re
 import select
+from wechat_proc import find_wechat_pid
 
 # ── Per-build constants ──────────────────────────────────────────────────────
 # Keyed by first 8 hex chars of ELF BuildID (same pattern as extract-keys.py).
@@ -78,6 +79,20 @@ BUILD_PROFILES = {
         "CUR_SESS_UNAME_OFF": 0x120,
         "VEC_KEY_OFF": 0x158,
     },
+    # WeChat Linux v4.1.13.23 aarch64 (BuildID: e9f1cd04...)
+    # Structure fields shifted +0x10 vs 4.1.1.8. SELECT_SESSION recovered from
+    # the same prologue/index-check body as 4.1.1.8 (sub sp; mov wN,w1; lsr #4).
+    "e9f1cd04": {
+        "ARCH": "aarch64",
+        "SELECT_SESSION": 0x48543d0,
+        "USERNAME_OFF": 0x130,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0x9fe8cc8,
+        "CTRL_OFF": 0xe8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x130,
+        "VEC_KEY_OFF": 0x168,
+    },
     # WeChat Linux 4.x x86_64 (BuildID: eba86b80...)
     "eba86b80": {
         "ARCH": "x86_64",
@@ -90,6 +105,20 @@ BUILD_PROFILES = {
         "CUR_SESS_UNAME_OFF": 0x98,
         "VEC_KEY_OFF": 0x168,
         "VEC_MAP_OFF": 0xe8,
+    },
+    # WeChat Linux v4.1.13.23 x86_64 (BuildID: ce28c347...)
+    # Flattened like aarch64: vector at ctrl+0/8, no unordered_map.
+    # SELECT_SESSION recovered from [rdi]/[rdi+8] sar-4 body plus mov r12,rsi.
+    "ce28c347": {
+        "ARCH": "x86_64",
+        "SELECT_SESSION": 0x85dafd0,
+        "USERNAME_OFF": 0x130,
+        "ELEM_SIZE": 16,
+        "MANAGER_VT_OFF": 0xa6a95c8,
+        "CTRL_OFF": 0xe8,
+        "CUR_SESS_OFF": 0x40,
+        "CUR_SESS_UNAME_OFF": 0x130,
+        "VEC_KEY_OFF": 0x168,
     },
 }
 
@@ -125,6 +154,22 @@ def is_official_account(username):
     return bool(_GH_RE.match(username))
 
 
+def filtered_session_index(raw_sessions):
+    """Map username -> selectSession index, skipping official accounts.
+
+    raw_sessions is [(raw_index, username), ...] in vector order. Official
+    accounts remain in the raw vector but are not passed to selectSession.
+    """
+    sessions = {}
+    filtered_idx = 0
+    for _, uname in raw_sessions:
+        if is_official_account(uname):
+            continue
+        sessions[uname] = filtered_idx
+        filtered_idx += 1
+    return sessions
+
+
 def result_json(ok, **kwargs):
     """Print a redacted, machine-readable result and exit."""
     out = {
@@ -143,29 +188,36 @@ def fail(code, message, **kwargs):
 
 
 def get_pid():
-    """Get WeChat PID."""
-    for cmd in [["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]]:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            pids = r.stdout.strip().split()
-            if pids:
-                return pids[0]
-        except Exception:
-            pass
+    """Get WeChat PID, skipping crashpad helpers and zombies."""
+    pid = find_wechat_pid()
+    return str(pid) if pid else None
+
+
+def wechat_binary_path(pid):
+    """Resolve the WeChat ELF for this PID, including sidecar /proc/<pid>/root."""
+    mapped = None
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            for line in f:
+                if "/wechat" in line and line.strip().endswith("/wechat"):
+                    mapped = line.split()[-1]
+                    break
+    except Exception:
+        mapped = None
+    candidates = []
+    if mapped:
+        candidates.append(f"/proc/{pid}/root{mapped}")
+        candidates.append(mapped)
+    candidates.append("/opt/wechat/wechat")
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
     return None
 
 
 def get_build_id(pid):
     """Read the WeChat binary's BuildID from /proc/pid/maps + readelf."""
-    wechat_path = None
-    try:
-        with open(f"/proc/{pid}/maps") as f:
-            for line in f:
-                if "/wechat" in line and line.strip().endswith("/wechat"):
-                    wechat_path = line.split()[-1]
-                    break
-    except Exception:
-        pass
+    wechat_path = wechat_binary_path(pid)
     if not wechat_path:
         return None
     try:
@@ -221,8 +273,85 @@ def frida_command(pid, script_path, quiet=False):
     return args
 
 
-def find_chat_item_from_a11y():
-    """Use a11y-dump to find a clickable chat list item. Returns (x, y) or None."""
+def _valid_bounds(bounds):
+    if not isinstance(bounds, dict):
+        return False
+    try:
+        return bounds["width"] > 0 and bounds["height"] > 0
+    except (KeyError, TypeError):
+        return False
+
+
+def _item_center(item):
+    b = item["bounds"]
+    return (b["x"] + b["width"] // 2, b["y"] + b["height"] // 2)
+
+
+def activate_main_wechat_window():
+    """Raise the largest Weixin/WeChat frame so X11 clicks reach the chat list.
+
+    On WeChat Linux 4.1.13+ a secondary top-level window can hold focus. Clicks
+    issued without activation do not change the chat selection and never call
+    selectSession(), which previously surfaced as FRIDA_HOOK_FAILED.
+    """
+    try:
+        out = subprocess.check_output(
+            ["xdotool", "search", "--name", "Weixin"],
+            text=True,
+            timeout=5,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        try:
+            out = subprocess.check_output(
+                ["xdotool", "search", "--name", "WeChat"],
+                text=True,
+                timeout=5,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            log("[chat-select] Window activation unavailable")
+            return False
+
+    best_wid = None
+    best_area = -1
+    for wid in out.split():
+        try:
+            geom = subprocess.check_output(
+                ["xdotool", "getwindowgeometry", wid],
+                text=True,
+                timeout=5,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        m = re.search(r"Geometry:\s*(\d+)x(\d+)", geom)
+        if not m:
+            continue
+        area = int(m.group(1)) * int(m.group(2))
+        if area > best_area:
+            best_area = area
+            best_wid = wid
+    if not best_wid:
+        log("[chat-select] No WeChat window found for activation")
+        return False
+    try:
+        subprocess.run(
+            ["xdotool", "windowactivate", "--sync", best_wid],
+            timeout=5,
+            check=False,
+            capture_output=True,
+        )
+        time.sleep(0.2)
+        log("[chat-select] Activated main WeChat window")
+        return True
+    except (OSError, subprocess.SubprocessError):
+        log("[chat-select] Window activation failed")
+        return False
+
+
+def list_chat_items_from_a11y():
+    """Return all Chats list-items with valid bounds (UI order)."""
     try:
         log("[chat-select] Getting a11y tree...")
         r = subprocess.run(
@@ -232,49 +361,93 @@ def find_chat_item_from_a11y():
         )
         if r.returncode != 0:
             log(f"[chat-select] a11y-dump failed exit_code={r.returncode}")
-            return None
+            return []
 
         tree = json.loads(r.stdout)
-        # Walk tree to find: list[name="Chats"] > list-item with bounds
         items = []
         _find_chat_list_items(tree, items, in_chat_list=False)
         if not items:
-            log("[chat-select] No list-item found in Chats list")
-            return None
-
-        # Return center of the first item with valid bounds
-        item = items[0]
-        b = item["bounds"]
-        cx = b["x"] + b["width"] // 2
-        cy = b["y"] + b["height"] // 2
-        log(f"[chat-select] Found live chat-list click target bounds={b}")
-        return (cx, cy)
+            log("[chat-select] No list-item with valid bounds found in Chats list")
+        return items
     except Exception:
         log("[chat-select] a11y inspection failed")
+        return []
+
+
+def find_chat_item_from_a11y():
+    """Return center (x, y) of the first Chats list-item, or None."""
+    items = list_chat_items_from_a11y()
+    if not items:
         return None
+    cx, cy = _item_center(items[0])
+    log(f"[chat-select] Found live chat-list click target bounds={items[0]['bounds']}")
+    return (cx, cy)
+
+
+def click_screen_xy(xy):
+    cx, cy = xy
+    log("[chat-select] Clicking verified chat-list target")
+    try:
+        click_result = subprocess.run(
+            ["/opt/tools/click", str(cx), str(cy)],
+            timeout=5,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FridaError("CHAT_CLICK_TIMEOUT", "Chat-list click timed out") from exc
+    except OSError as exc:
+        raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed") from exc
+    if click_result.returncode != 0:
+        raise FridaError("CHAT_CLICK_FAILED", "Chat-list click failed")
+    log("[chat-select] Click completed")
 
 
 def _find_chat_list_items(node, items, in_chat_list):
-    """Recursively find list-item nodes inside the Chats list."""
+    """Recursively find list-item nodes inside the Chats list (UI order)."""
     if not node or not isinstance(node, dict):
         return
 
     role = node.get("role", "")
     name = node.get("name", "")
 
-    # Detect if we're inside the chat list
     if role == "list" and name == "Chats":
         in_chat_list = True
 
-    if in_chat_list and role == "list-item" and node.get("bounds"):
+    if in_chat_list and role == "list-item" and _valid_bounds(node.get("bounds")):
         items.append(node)
-        if len(items) >= 1:
-            return  # Only need one
 
     for child in node.get("children", []):
         _find_chat_list_items(child, items, in_chat_list)
-        if len(items) >= 1:
-            return
+
+
+def select_target_by_ui_scan(pid, profile, target):
+    """Activate the main window and click Chats rows until current_sel == target.
+
+    Live 4.1.13.23 evidence: selectSession()'s index argument is the *visible*
+    Chats-list UI index (0..n-1 in a11y order), not the Frida session-vector
+    index. Rewriting the vector index via Frida therefore opens the wrong chat.
+    Clicking each visible row and confirming via the current-session pointer is
+    the reliable path. Returns the UI index that matched, or None.
+    """
+    activate_main_wechat_window()
+    items = list_chat_items_from_a11y()
+    if not items:
+        return None
+
+    for ui_index, item in enumerate(items):
+        activate_main_wechat_window()
+        click_screen_xy(_item_center(item))
+        time.sleep(0.35)
+        try:
+            _, _, _, sel = enumerate_sessions(pid, profile)
+        except FridaError:
+            raise
+        if sel == target:
+            log(f"[chat-select] UI scan matched target at list index={ui_index}")
+            return ui_index
+    log("[chat-select] UI scan exhausted without matching target")
+    return None
 
 
 def write_js(path, content):
@@ -547,13 +720,25 @@ if (!manager) {{
             }} catch(e) {{}}
         }}
 
-        // Step 4: Read current selection
+        // Step 4: Read current selection.
+        // 4.1.13.23 aarch64: a normal chat is a pointer at CUR_SESS_OFF. The
+        // built-in filehelper session leaves that pointer NULL and stores a
+        // filtered index nearby (observed at +0x30). Prefer the pointer.
         var curSelName = "NONE";
         try {{
             var curPtr = ctrl.add(CUR_SESS_OFF).readPointer();
             if (!curPtr.isNull() && curPtr.compare(ptr(0x10000)) >= 0) {{
                 var s = readStdString(curPtr.add(CUR_SESS_UNAME));
                 if (s) curSelName = s;
+            }} else {{
+                var idxWord = Number(ctrl.add(0x30).readU64());
+                if (idxWord === idxWord && idxWord >= 0 && idxWord < count) {{
+                    var ep = vectorBegin.add(idxWord * ELEM_SZ).readPointer();
+                    if (ep && !ep.isNull()) {{
+                        var s2 = readStdString(ep.add(UNAME_OFF));
+                        if (s2) curSelName = s2;
+                    }}
+                }}
             }}
         }} catch(e) {{}}
         console.log("CURRENT_SEL " + curSelName);
@@ -597,13 +782,7 @@ if (!manager) {{
 
             # Build filtered index: skip official accounts, re-number from 0
             # selectSession() uses indices that exclude official accounts
-            sessions = {}
-            filtered_idx = 0
-            for _, uname in raw_sessions:
-                if is_official_account(uname):
-                    continue
-                sessions[uname] = filtered_idx
-                filtered_idx += 1
+            sessions = filtered_session_index(raw_sessions)
 
             if current_sel:
                 log("[chat-select] Current selection identity available=true")
@@ -615,7 +794,11 @@ if (!manager) {{
 
 
 def select_by_index(pid, profile, target_index, click_coords, vector_base, vector_count):
-    """Hook selectSession, click, hook replaces index. Returns True on success."""
+    """Hook selectSession, click, hook replaces index. Returns True on redirect.
+
+    WARNING: target_index must be the *visible UI list* index (a11y order),
+    not the Frida session-vector index. Prefer select_target_by_ui_scan().
+    """
     select_session = profile["SELECT_SESSION"]
     username_off = profile["USERNAME_OFF"]
     elem_size = profile["ELEM_SIZE"]
@@ -668,20 +851,22 @@ function readFilteredUsername(filteredIdx) {{
 
 console.log("READY");
 
+// Keep the interceptor alive across incidental selectSession calls (list
+// refresh, hover). 4.1.13 copies w1 into w23 a few instructions after entry,
+// so rewrite both the ABI register and x23. Detach on a timer so the
+// prologue is restored while no thread is inside the function.
 var hook = Interceptor.attach(addr, {{
     onEnter: function(args) {{
-        var orig = args[1].toInt32();
         console.log("REDIRECT");
         args[1] = ptr(TARGET);
         this.context.{reg} = TARGET;
-    }},
-    onLeave: function(retval) {{
-        // Detach after selectSession returns so the prologue is restored
-        // while no thread is inside the function.
-        hook.detach();
-        console.log("DETACHED");
+        try {{ this.context.x23 = TARGET; }} catch (e) {{}}
     }}
 }});
+setTimeout(function() {{
+    try {{ hook.detach(); }} catch (e) {{}}
+    console.log("DETACHED");
+}}, 2500);
 """)
 
     proc = run_frida_bg(pid, "/tmp/_cs_select.js")
@@ -806,26 +991,35 @@ def main():
         log("[chat-select] Exact target already selected")
         result_json(True, username=target, index=target_index, skipped=True, verified=True)
 
-    # Find click coordinates: use --click-xy if provided, else fall back to a11y
-    click_coords = click_xy
-    if not click_coords:
-        click_coords = find_chat_item_from_a11y()
-    if not click_coords:
-        fail("A11Y_CLICK_TARGET_UNAVAILABLE", "No live chat-list click target is available")
+    # Open by activating the main WeChat window and clicking visible Chats rows
+    # until the live current-session pointer equals the target username.
+    # selectSession() indexes the *UI list*, not the Frida session vector; the
+    # old vector-index Frida rewrite therefore confirmed the wrong chat.
+    activate_main_wechat_window()
 
-    # Hook and click
-    if not vector_base:
-        fail("FRIDA_SESSION_VECTOR_UNAVAILABLE", "Live session vector is unavailable")
+    # Optional caller coordinates: try once, then fall back to a full UI scan.
+    if click_xy:
+        try:
+            click_screen_xy(click_xy)
+            time.sleep(0.35)
+            _, _, _, confirmed_sel = enumerate_sessions(pid, profile)
+            if confirmed_sel == target:
+                result_json(True, username=target, index=target_index, skipped=False, verified=True)
+            log("[chat-select] Caller click_xy did not land on target; scanning UI list")
+        except FridaError as exc:
+            fail(exc.code, str(exc))
+
     try:
-        ok = select_by_index(pid, profile, target_index, click_coords, vector_base, vector_count)
+        matched_ui = select_target_by_ui_scan(pid, profile, target)
     except FridaError as exc:
         fail(exc.code, str(exc))
-    if not ok:
-        fail("FRIDA_HOOK_FAILED", "Frida selection hook did not complete")
+    if matched_ui is None:
+        # Distinguish "no rows to click" from "rows clicked but none matched".
+        if not list_chat_items_from_a11y():
+            fail("A11Y_CLICK_TARGET_UNAVAILABLE", "No live chat-list click target is available")
+        fail("TARGET_CONFIRMATION_FAILED", "Target conversation could not be confirmed", verified=False)
 
-    # The hook firing only proves that WeChat handled a selection call. Re-read
-    # the live current-session pointer and require an exact target match before
-    # allowing callers to type or send anything.
+    # Final confirmation from a fresh session read.
     try:
         _, _, _, confirmed_sel = enumerate_sessions(pid, profile)
     except FridaError as exc:

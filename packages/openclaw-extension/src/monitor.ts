@@ -1,4 +1,5 @@
 import { unlink } from "node:fs/promises";
+import { requireVerifiedChatOpen } from "./monitor-open-chat.js";
 import { WeChatClient } from "@kyan-du/agent-wechat-shared";
 import type { Chat, Message, MediaResult, AuthStatus } from "@kyan-du/agent-wechat-shared";
 import { createChannelMessageReplyPipeline as createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-outbound";
@@ -1113,17 +1114,19 @@ async function processUnreadChat(
     surface: OPENCLAW_CHANNEL_ID,
   });
   let opened = false;
-  const openChatIfNeeded = async () => {
-    if (skipOpen || opened) return;
-    opened = true;
+  const openChatIfNeeded = async (): Promise<boolean> => {
+    if (skipOpen || opened) return true;
     log?.info?.(`[wechat:${liveAccount.accountId}] Opening chat ${chatId}...`);
     try {
-      await client.openChat(chatId, true);
+      requireVerifiedChatOpen(await client.openChat(chatId, true), chatId);
+      opened = true;
       log?.info?.(`[wechat:${liveAccount.accountId}] Opened chat ${chatId}`);
+      return true;
     } catch (err) {
       log?.error?.(
         `[wechat:${liveAccount.accountId}] Failed to open chat ${chatId}: ${err}`,
       );
+      return false;
     }
   };
 

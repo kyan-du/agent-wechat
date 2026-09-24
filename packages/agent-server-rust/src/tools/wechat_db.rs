@@ -1,7 +1,6 @@
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn sqlite_failure_code(error: &rusqlite::Error) -> String {
     match error {
@@ -27,6 +26,10 @@ pub fn query_wechat_db_checked(
     hex_key: &str,
     sql: &str,
 ) -> Result<Vec<Value>, String> {
+    if !Path::new(db_path).is_file() {
+        tracing::warn!("[wechat-db] open failed code=SQLITE_CANTOPEN");
+        return Err("SQLITE_CANTOPEN".to_string());
+    }
     let uri = format!("file:{}?immutable=1", db_path);
     let conn = Connection::open_with_flags(
         &uri,
@@ -72,35 +75,168 @@ pub fn query_wechat_db_checked(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-/// Find the WeChat process PID.
-pub fn find_wechat_pid() -> Option<i64> {
-    let output = Command::new("pgrep")
-        .args(["-f", "/usr/bin/wechat"])
-        .output()
-        .ok()?;
+const WECHAT_COMM: &str = "wechat";
+const CRASHPAD_TOKEN: &str = "crashpad";
+const OPT_WECHAT: &str = "/opt/wechat/wechat";
+const USR_WECHAT: &str = "/usr/bin/wechat";
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids: Vec<i64> = stdout
-        .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+#[derive(Debug, Clone)]
+struct WeChatProcessView {
+    pid: i64,
+    comm: String,
+    exe: Option<String>,
+    argv0: Option<String>,
+    state: Option<char>,
+    has_db_storage: bool,
+}
 
-    // Return the PID with the most open file descriptors
-    let mut best_pid: Option<i64> = None;
-    let mut best_fd_count = 0;
+fn path_basename(path: Option<&str>) -> String {
+    path.unwrap_or("")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
 
-    for pid in pids {
-        let fd_dir = format!("/proc/{pid}/fd");
-        if let Ok(entries) = std::fs::read_dir(&fd_dir) {
-            let count = entries.count();
-            if count > best_fd_count {
-                best_fd_count = count;
-                best_pid = Some(pid);
+fn inspect_wechat_process(pid: i64, proc_root: &Path) -> Option<WeChatProcessView> {
+    if pid <= 0 {
+        return None;
+    }
+    let base = proc_root.join(pid.to_string());
+    let comm_raw = std::fs::read(base.join("comm")).ok()?;
+    let comm = String::from_utf8_lossy(&comm_raw)
+        .split('\0')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if comm.is_empty() {
+        return None;
+    }
+
+    let mut state = None;
+    if let Ok(status_raw) = std::fs::read(base.join("status")) {
+        let status = String::from_utf8_lossy(&status_raw);
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("State:") {
+                state = rest.trim().chars().next();
+                break;
             }
         }
     }
 
-    best_pid
+    let exe = std::fs::read_link(base.join("exe"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    let argv0 = std::fs::read(base.join("cmdline")).ok().and_then(|raw| {
+        let first = raw.split(|b| *b == 0).next().unwrap_or(&[]);
+        if first.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(first).into_owned())
+        }
+    });
+
+    let mut has_db_storage = false;
+    if let Ok(entries) = std::fs::read_dir(base.join("fd")) {
+        for entry in entries.flatten() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                let target = target.to_string_lossy();
+                if target.contains("db_storage") && target.ends_with(".db") {
+                    has_db_storage = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    Some(WeChatProcessView {
+        pid,
+        comm,
+        exe,
+        argv0,
+        state,
+        has_db_storage,
+    })
+}
+
+fn is_wechat_main_process(view: Option<&WeChatProcessView>) -> bool {
+    let Some(view) = view else {
+        return false;
+    };
+    if view.state == Some('Z') {
+        return false;
+    }
+    let identity = format!(
+        "{}\n{}\n{}",
+        view.comm,
+        view.exe.as_deref().unwrap_or(""),
+        view.argv0.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    if identity.contains(CRASHPAD_TOKEN) {
+        return false;
+    }
+    if view.comm != WECHAT_COMM {
+        return false;
+    }
+    path_basename(view.exe.as_deref()) == WECHAT_COMM
+        || path_basename(view.argv0.as_deref()) == WECHAT_COMM
+}
+
+fn path_rank(exe: Option<&str>) -> u8 {
+    match exe {
+        Some(OPT_WECHAT) => 0,
+        Some(USR_WECHAT) => 1,
+        Some(path) if path_basename(Some(path)) == WECHAT_COMM => 2,
+        _ => 3,
+    }
+}
+
+fn select_wechat_pid(views: &[WeChatProcessView]) -> Option<i64> {
+    let mut mains: Vec<&WeChatProcessView> = views
+        .iter()
+        .filter(|view| is_wechat_main_process(Some(view)))
+        .collect();
+    if mains.is_empty() {
+        return None;
+    }
+    mains.sort_by_key(|view| (!view.has_db_storage, path_rank(view.exe.as_deref()), view.pid));
+    Some(mains[0].pid)
+}
+
+fn iter_proc_pids(proc_root: &Path) -> Vec<i64> {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if let Ok(pid) = name.parse::<i64>() {
+            if pid > 0 {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
+}
+
+fn find_wechat_pid_in(proc_root: impl AsRef<Path>) -> Option<i64> {
+    let proc_root = proc_root.as_ref();
+    let views: Vec<WeChatProcessView> = iter_proc_pids(proc_root)
+        .into_iter()
+        .filter_map(|pid| inspect_wechat_process(pid, proc_root))
+        .collect();
+    select_wechat_pid(&views)
+}
+
+/// Find the WeChat main process PID from /proc identity, never cmdline substrings.
+pub fn find_wechat_pid() -> Option<i64> {
+    find_wechat_pid_in("/proc")
 }
 
 /// Detect the WeChat account directory by scanning /proc/<pid>/fd.
@@ -249,10 +385,147 @@ pub fn get_db_path_checked(account_dir: &str, db_name: &str) -> Result<String, S
 
 #[cfg(test)]
 mod tests {
-    use super::{database_capability, query_wechat_db_checked, DatabaseCapability};
+    use super::{
+        database_capability, find_wechat_pid_in, inspect_wechat_process, is_wechat_main_process,
+        query_wechat_db_checked, select_wechat_pid, DatabaseCapability, WeChatProcessView,
+    };
     use rusqlite::{Connection, OpenFlags};
+    use std::os::unix::fs::symlink;
     use std::sync::{Arc, Barrier};
     use std::time::{Duration, Instant};
+
+    fn view(
+        pid: i64,
+        comm: &str,
+        exe: &str,
+        argv0: &str,
+        state: Option<char>,
+        has_db_storage: bool,
+    ) -> WeChatProcessView {
+        WeChatProcessView {
+            pid,
+            comm: comm.to_string(),
+            exe: Some(exe.to_string()),
+            argv0: Some(argv0.to_string()),
+            state,
+            has_db_storage,
+        }
+    }
+
+    fn write_proc(
+        root: &std::path::Path,
+        pid: i64,
+        comm: &str,
+        exe: Option<&str>,
+        argv0: Option<&str>,
+        state: &str,
+        db_storage: bool,
+    ) {
+        let base = root.join(pid.to_string());
+        std::fs::create_dir_all(base.join("fd")).unwrap();
+        std::fs::write(base.join("comm"), format!("{comm}\n")).unwrap();
+        std::fs::write(base.join("status"), format!("Name:\t{comm}\nState:\t{state} (sleeping)\n")).unwrap();
+        if let Some(argv0) = argv0 {
+            let mut cmdline = argv0.as_bytes().to_vec();
+            cmdline.push(0);
+            cmdline.extend_from_slice(b"--annotation=/opt/wechat/wechat");
+            cmdline.push(0);
+            std::fs::write(base.join("cmdline"), cmdline).unwrap();
+        }
+        if let Some(exe) = exe {
+            symlink(exe, base.join("exe")).unwrap();
+        }
+        if db_storage {
+            symlink(
+                "/home/wechat/xwechat_files/wxid/db_storage/session/session.db",
+                base.join("fd").join("3"),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn crashpad_with_wechat_path_annotation_is_not_main() {
+        let crashpad = view(
+            10,
+            "chrome_crashpad_handler",
+            "/opt/wechat/chrome_crashpad_handler",
+            "/opt/wechat/wechat --annotation=/opt/wechat/wechat",
+            Some('S'),
+            true,
+        );
+        assert!(!is_wechat_main_process(Some(&crashpad)));
+        let main = view(20, "wechat", "/opt/wechat/wechat", "/opt/wechat/wechat", Some('S'), false);
+        assert_eq!(select_wechat_pid(&[crashpad, main]), Some(20));
+    }
+
+    #[test]
+    fn select_wechat_pid_prefers_db_storage_then_known_path() {
+        let views = vec![
+            view(30, "wechat", "/tmp/wechat", "/tmp/wechat", Some('S'), true),
+            view(20, "wechat", "/opt/wechat/wechat", "/opt/wechat/wechat", Some('S'), false),
+            view(10, "wechat", "/usr/bin/wechat", "/usr/bin/wechat", Some('S'), false),
+        ];
+        assert_eq!(select_wechat_pid(&views), Some(30));
+        let views = vec![
+            view(30, "wechat", "/tmp/wechat", "/tmp/wechat", Some('S'), false),
+            view(20, "wechat", "/opt/wechat/wechat", "/opt/wechat/wechat", Some('S'), false),
+            view(10, "wechat", "/usr/bin/wechat", "/usr/bin/wechat", Some('S'), false),
+        ];
+        assert_eq!(select_wechat_pid(&views), Some(20));
+    }
+
+    #[test]
+    fn select_wechat_pid_returns_none_without_live_main() {
+        let views = vec![
+            view(10, "wechat", "/opt/wechat/wechat", "/opt/wechat/wechat", Some('Z'), true),
+            view(
+                11,
+                "chrome_crashpad_handler",
+                "/opt/wechat/wechat",
+                "/opt/wechat/wechat",
+                Some('S'),
+                true,
+            ),
+        ];
+        assert_eq!(select_wechat_pid(&views), None);
+    }
+
+    #[test]
+    fn find_wechat_pid_scans_proc_fixture_not_pgrep_order() {
+        let dir = tempfile::tempdir().unwrap();
+        write_proc(
+            dir.path(),
+            10,
+            "chrome_crashpad_handler",
+            Some("/opt/wechat/chrome_crashpad_handler"),
+            Some("/opt/wechat/wechat"),
+            "S",
+            true,
+        );
+        write_proc(
+            dir.path(),
+            20,
+            "wechat",
+            Some("/opt/wechat/wechat"),
+            Some("/opt/wechat/wechat"),
+            "S",
+            false,
+        );
+        write_proc(
+            dir.path(),
+            30,
+            "wechat",
+            Some("/usr/bin/wechat"),
+            Some("/usr/bin/wechat"),
+            "S",
+            true,
+        );
+        assert_eq!(find_wechat_pid_in(dir.path()), Some(30));
+        let inspected = inspect_wechat_process(10, dir.path()).unwrap();
+        assert!(!is_wechat_main_process(Some(&inspected)));
+        assert!(inspected.has_db_storage);
+    }
 
     #[test]
     fn database_capability_classifies_known_storage_roles() {
@@ -271,7 +544,42 @@ mod tests {
 
     #[test]
     fn checked_queries_distinguish_unavailable_databases_from_empty_results() {
-        assert!(query_wechat_db_checked("/definitely/missing/contact.db", "00", "SELECT 1").is_err());
+        let err = query_wechat_db_checked("/definitely/missing/contact.db", "00", "SELECT 1").unwrap_err();
+        assert_eq!(err, "SQLITE_CANTOPEN");
+    }
+
+    #[test]
+    fn checked_queries_classify_not_a_database_without_leaking_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("message_resource.db");
+        std::fs::write(&path, b"not-a-sqlite-header").unwrap();
+        let path_s = path.to_str().unwrap();
+        // SELECT 1 does not read the file header. Probe schema/tables like media lookup.
+        let err = query_wechat_db_checked(path_s, "00", "SELECT count(*) FROM sqlite_master")
+            .err()
+            .or_else(|| {
+                query_wechat_db_checked(
+                    path_s,
+                    "00",
+                    "SELECT rowid FROM ChatName2Id LIMIT 1",
+                )
+                .err()
+            })
+            .expect("garbage resource DB must fail a schema or table probe");
+        assert!(
+            err.contains("NotADatabase")
+                || err.contains("NOTADB")
+                || err.contains("CANTOPEN")
+                || err.starts_with("SQLITE_"),
+            "{err}"
+        );
+        assert!(!err.contains(path_s));
+        assert!(crate::tools::wechat_db::query_wechat_db(
+            path_s,
+            "00",
+            "SELECT rowid FROM ChatName2Id LIMIT 1"
+        )
+        .is_empty());
     }
 
     /// Create a temp DB that simulates WeChat's encrypted DB pattern.

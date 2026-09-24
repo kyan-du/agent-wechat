@@ -2,23 +2,136 @@ use super::exec::{exec_command, ExecOptions};
 use super::wechat_db::{get_db_path, list_account_dbs};
 use rusqlite::{params, Connection, OpenFlags};
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
+
+pub const PASSPHRASE_PATH: &str = "/tmp/wechat-passphrase.bin";
+pub const PASSPHRASE_READY_PATH: &str = "/tmp/wechat-passphrase.bin.ready";
+const PASSPHRASE_CAPTURE_TIMEOUT_MS: u64 = 1_800_000;
+const PASSPHRASE_HOOK_WAIT_MS: u64 = 8_000;
+
+static CAPTURE_PID: AtomicI64 = AtomicI64::new(0);
+static CAPTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn capture_lock() -> &'static Mutex<()> {
+    CAPTURE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Attach Frida passphrase hooks before QR / saved-account login applies the key.
+/// Capture must happen during login; heap scans after Chat is shown are too late.
+pub async fn ensure_passphrase_capture(wechat_pid: i64) {
+    if wechat_pid <= 0 {
+        return;
+    }
+    if passphrase_file_ready() {
+        return;
+    }
+    let spawned = {
+        let _guard = capture_lock().lock().await;
+        if passphrase_file_ready() {
+            return;
+        }
+        let previous = CAPTURE_PID.load(Ordering::SeqCst);
+        if previous == wechat_pid {
+            false
+        } else {
+            CAPTURE_PID.store(wechat_pid, Ordering::SeqCst);
+            let _ = std::fs::remove_file(PASSPHRASE_READY_PATH);
+            tracing::info!("[wechat-keys] starting login passphrase capture pid={wechat_pid}");
+            tokio::spawn(async move {
+                let result = exec_command(
+                    "env",
+                    &[
+                        "HOME=/home/wechat",
+                        "python3",
+                        "/opt/tools/capture-passphrase.py",
+                        "--pid",
+                        &wechat_pid.to_string(),
+                        "--output",
+                        PASSPHRASE_PATH,
+                    ],
+                    &ExecOptions {
+                        timeout_ms: PASSPHRASE_CAPTURE_TIMEOUT_MS,
+                        ..Default::default()
+                    },
+                )
+                .await;
+                if passphrase_file_ready() {
+                    tracing::info!("[wechat-keys] login passphrase captured pid={wechat_pid}");
+                } else {
+                    tracing::warn!(
+                        "[wechat-keys] login passphrase capture unfinished pid={wechat_pid} code={}",
+                        result.exit_code
+                    );
+                    CAPTURE_PID
+                        .compare_exchange(wechat_pid, 0, Ordering::SeqCst, Ordering::SeqCst)
+                        .ok();
+                }
+            });
+            true
+        }
+    };
+    if !spawned || passphrase_file_ready() || passphrase_hooks_ready() {
+        return;
+    }
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(PASSPHRASE_HOOK_WAIT_MS);
+    while tokio::time::Instant::now() < deadline {
+        if passphrase_file_ready() || passphrase_hooks_ready() {
+            return;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    tracing::warn!("[wechat-keys] passphrase hooks not ready within {PASSPHRASE_HOOK_WAIT_MS}ms pid={wechat_pid}");
+}
+
+pub fn passphrase_file_ready() -> bool {
+    passphrase_path_ready(PASSPHRASE_PATH)
+}
+
+fn passphrase_path_ready(path: &str) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    meta.len() == 32 && meta.permissions().mode() & 0o077 == 0
+}
+
+pub fn passphrase_hooks_ready() -> bool {
+    std::fs::metadata(PASSPHRASE_READY_PATH).is_ok()
+}
+
+/// Drop a captured passphrase after logout, auth reset, or WeChat restart.
+/// Do not call this after a new account is already detected; the file belongs
+/// to the login that just completed.
+pub fn clear_passphrase_capture() {
+    CAPTURE_PID.store(0, Ordering::SeqCst);
+    let _ = std::fs::remove_file(PASSPHRASE_PATH);
+    let _ = std::fs::remove_file(PASSPHRASE_READY_PATH);
+}
 
 /// Extract all WeChat DB credentials (async, non-blocking).
 /// Calls the Python extract-keys script.
 pub async fn extract_keys_async(wechat_pid: i64) -> HashMap<String, String> {
     let out_path = format!("/tmp/wechat_keys_{wechat_pid}.json");
 
+    let mut args = vec![
+        "HOME=/home/wechat".to_string(),
+        "python3".to_string(),
+        "/opt/tools/extract-keys.py".to_string(),
+        "--pid".to_string(),
+        wechat_pid.to_string(),
+        "--output".to_string(),
+        out_path.clone(),
+    ];
+    if passphrase_file_ready() {
+        args.push("--passphrase-file".to_string());
+        args.push(PASSPHRASE_PATH.to_string());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let _ = exec_command(
         "env",
-        &[
-            "HOME=/home/wechat",
-            "python3",
-            "/opt/tools/extract-keys.py",
-            "--pid",
-            &wechat_pid.to_string(),
-            "--output",
-            &out_path,
-        ],
+        &arg_refs,
         &ExecOptions {
             timeout_ms: 120_000,
             ..Default::default()
@@ -154,6 +267,15 @@ const REQUIRED_EXACT_DBS: &[&str] = &[
 ];
 const REQUIRED_SHARD_PREFIXES: &[&str] = &["message_", "media_"];
 
+fn is_required_shard(name: &str) -> bool {
+    // message_fts.db is unused search storage. message_resource.db is SQLCipher
+    // media metadata and must be keyed when the file is on disk.
+    if name == "message_fts.db" {
+        return false;
+    }
+    REQUIRED_SHARD_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// Check if credential setup is needed.
 ///
 /// 1. Check that all required DB keys exist in stored_keys
@@ -202,12 +324,12 @@ fn needs_key_extraction_for(
         return true;
     }
 
-    // Scan disk for sharded DBs (message_N.db, media_N.db) missing keys
+    // Scan disk for sharded DBs (message_N.db, media_N.db) and
+    // message_resource.db missing keys. A missing resource file does not retry.
     let missing_on_disk: Vec<_> = existing_dbs
         .iter()
         .filter(|name| {
-            REQUIRED_SHARD_PREFIXES.iter().any(|p| name.starts_with(p))
-                && !stored_keys.contains_key(name.as_str())
+            is_required_shard(name) && !stored_keys.contains_key(name.as_str())
         })
         .collect();
 
@@ -219,12 +341,21 @@ fn needs_key_extraction_for(
         return true;
     }
 
-    // Spot-check one key
-    let check_db = "session.db";
-    if let Some(check_key) = stored_keys.get(check_db) {
-        if !verify(check_db, check_key) {
-            tracing::info!("[wechat-keys] Spot-check failed for {check_db}, re-extraction needed");
-            return true;
+    // Spot-check session.db and, when present, message_resource.db.
+    // Media lookup treats a failed resource open as an empty result; a stale
+    // stored key must re-extract instead of looking like a cache miss.
+    let mut check_dbs = vec!["session.db"];
+    if existing_dbs.iter().any(|name| name == "message_resource.db")
+        && stored_keys.contains_key("message_resource.db")
+    {
+        check_dbs.push("message_resource.db");
+    }
+    for check_db in check_dbs {
+        if let Some(check_key) = stored_keys.get(check_db) {
+            if !verify(check_db, check_key) {
+                tracing::info!("[wechat-keys] Spot-check failed for {check_db}, re-extraction needed");
+                return true;
+            }
         }
     }
 
@@ -279,6 +410,118 @@ mod tests {
         let mut stored = required_db_keys();
         stored.insert("_image_aes".to_string(), "00".to_string());
         assert!(!needs_key_extraction_for(&stored, &[], |_, _| true));
+    }
+
+    #[test]
+    fn message_resource_on_disk_requires_working_key_fts_does_not() {
+        let mut stored = required_db_keys();
+        stored.insert("_image_aes".to_string(), "00".to_string());
+        stored.insert("message_0.db".to_string(), "00".to_string());
+
+        // No resource file: do not retry.
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string()],
+            |_, _| true,
+        ));
+
+        // File present without a stored key: extract.
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |_, _| true,
+        ));
+
+        stored.insert("message_resource.db".to_string(), "00".to_string());
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |_, _| true,
+        ));
+
+        // Stale stored resource key must re-extract.
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_resource.db".to_string()],
+            |db, _| db != "message_resource.db",
+        ));
+
+        stored.remove("message_resource.db");
+        assert!(!needs_key_extraction_for(
+            &stored,
+            &["message_0.db".to_string(), "message_fts.db".to_string()],
+            |_, _| true,
+        ));
+        assert!(needs_key_extraction_for(
+            &stored,
+            &["message_1.db".to_string()],
+            |_, _| true,
+        ));
+    }
+
+    #[test]
+    fn rust_verify_pragma_matches_python_compat4_probe() {
+        let python_probe = include_str!("../../../../docker/tools/extract-keys.py");
+        assert!(python_probe.contains(
+            "PRAGMA key = \"x\\'{key}\\'\"; PRAGMA cipher_compatibility = 4; SELECT count(*) FROM sqlite_master;"
+        ));
+        let rust_src = include_str!("wechat_keys.rs");
+        let db_src = include_str!("wechat_db.rs");
+        assert!(rust_src.contains("PRAGMA cipher_compatibility = 4;"));
+        assert!(db_src.contains("PRAGMA cipher_compatibility = 4;"));
+        let forbidden_compat = format!("cipher_compatibility = {}", 3);
+        assert!(!python_probe.contains(&forbidden_compat));
+        assert!(!rust_src.contains(&forbidden_compat));
+        assert!(!db_src.contains(&forbidden_compat));
+    }
+
+    #[test]
+    fn passphrase_file_ready_requires_mode_0600_and_32_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wechat-passphrase.bin");
+        let path_s = path.to_str().unwrap();
+        assert!(!passphrase_path_ready(path_s));
+        std::fs::write(&path, [0u8; 31]).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&path, perms.clone()).unwrap();
+        assert!(!passphrase_path_ready(path_s));
+        std::fs::write(&path, [0u8; 32]).unwrap();
+        std::fs::set_permissions(&path, perms).unwrap();
+        assert!(passphrase_path_ready(path_s));
+        let mut world = std::fs::metadata(&path).unwrap().permissions();
+        world.set_mode(0o644);
+        std::fs::set_permissions(&path, world).unwrap();
+        assert!(!passphrase_path_ready(path_s));
+    }
+
+    #[test]
+    fn verify_key_opens_sqlcipher4_database_created_by_rusqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contact.db");
+        let path_s = path.to_str().unwrap();
+        let hex_key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA key = \"x'{hex_key}'\"; PRAGMA cipher_compatibility = 4;"
+            ))
+            .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE probe (id INTEGER PRIMARY KEY); INSERT INTO probe VALUES (1);",
+            )
+            .unwrap();
+        }
+        assert!(verify_key(path_s, hex_key));
+        let wrong_key = "00".repeat(32);
+        assert!(!verify_key(path_s, &wrong_key));
+        let rows = crate::tools::wechat_db::query_wechat_db_checked(
+            path_s,
+            hex_key,
+            "SELECT count(*) AS n FROM sqlite_master",
+        )
+        .expect("compat4 query must succeed");
+        assert!(!rows.is_empty());
     }
 
     #[test]

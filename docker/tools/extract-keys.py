@@ -17,6 +17,9 @@ import glob
 import argparse
 import time
 import struct
+import hashlib
+import hmac as hmac_mod
+from wechat_proc import find_wechat_pid
 
 # ── DB access pattern ─────────────
 CIPHER_CTX_PATTERN = bytes([
@@ -25,18 +28,6 @@ CIPHER_CTX_PATTERN = bytes([
     0x10, 0x00, 0x00, 0x00,  # hmac_sz = 16
     0x00, 0x10, 0x00, 0x00,  # page_sz = 4096
 ])
-
-
-def find_wechat_pid():
-    for cmd in [["pgrep", "-x", "wechat"], ["pgrep", "-f", "/opt/wechat/wechat"]]:
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True)
-            pids = r.stdout.strip().split()
-            if pids:
-                return int(pids[0])
-        except Exception:
-            pass
-    return None
 
 
 def find_active_account(pid):
@@ -188,19 +179,130 @@ def filter_candidates(keys, level=1):
     return list(dict.fromkeys(filtered))
 
 
-def test_key(db_path, key):
+# Production consumers (Rust rusqlite bundled SQLCipher) open with
+# PRAGMA cipher_compatibility = 4. Keep the probe identical so a Python
+# "verified" key is also readable by wechat_db.rs / wechat_keys.rs.
+_KEY_SQL_VARIANTS = (
+    'PRAGMA key = "x\'{key}\'"; PRAGMA cipher_compatibility = 4; SELECT count(*) FROM sqlite_master;',
+)
+
+# WeChat 4.1+ no longer caches the post-PBKDF raw key. A 32-byte passphrase is
+# captured at login and each database salt is derived with PBKDF2-HMAC-SHA512.
+_PASSPHRASE_KDF_ITERS = 256000
+_SQLCIPHER_PAGE = 4096
+_SQLCIPHER4_RESERVE = 80
+_SQLCIPHER4_HMAC = 64
+
+
+def load_passphrase(path=None):
+    """Load a 32-byte login passphrase. Never log the bytes."""
+    candidates = []
+    if path:
+        candidates.append(path)
+    env = os.environ.get("WECHAT_PASSPHRASE_FILE")
+    if env:
+        candidates.append(env)
+    candidates.append("/tmp/wechat-passphrase.bin")
+    for candidate in candidates:
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        st = os.stat(candidate)
+        if st.st_mode & 0o077:
+            continue
+        with open(candidate, "rb") as fh:
+            raw = fh.read()
+        if len(raw) == 32:
+            # Community x86 tools store *(rsi+8) when size at +16 is 32. A
+            # leftover Data object header is sparse; a live passphrase is not.
+            size = struct.unpack_from("<Q", raw, 16)[0]
+            ptr = struct.unpack_from("<Q", raw, 8)[0]
+            if (size == 32 and raw.count(0) >= 8
+                    and 0x10000 <= ptr <= 0x0000FFFFFFFFFFFF):
+                deref = _deref_passphrase(ptr)
+                if deref is not None:
+                    return deref
+            return raw
+        if len(raw) == 64 and all(c in b"0123456789abcdefABCDEF" for c in raw):
+            return bytes.fromhex(raw.decode("ascii"))
+    return None
+
+
+def _deref_passphrase(ptr):
+    """Read 32 bytes from a live process address. None if unreadable."""
+    pid = find_wechat_pid()
+    if not pid:
+        return None
     try:
-        sql = f"PRAGMA key = \"x'{key}'\";\nPRAGMA cipher_compatibility = 4;\nSELECT count(*) FROM sqlite_master;"
-        r = subprocess.run(
-            ["sqlcipher", db_path],
-            input=sql, capture_output=True, text=True, timeout=5
-        )
-        if r.returncode == 0:
-            lines = [l.strip() for l in r.stdout.strip().split('\n')
-                     if l.strip() and l.strip() != 'ok']
-            return lines[-1] if lines else "0"
-    except subprocess.TimeoutExpired:
-        pass
+        with open(f"/proc/{pid}/mem", "rb") as mem:
+            mem.seek(ptr)
+            blob = mem.read(32)
+    except (OSError, OverflowError, ValueError):
+        return None
+    if len(blob) != 32:
+        return None
+    if sum(1 for b in blob if b) < 16 or len(set(blob)) < 8:
+        return None
+    return blob
+
+
+def derive_enc_key(passphrase, salt, iterations=_PASSPHRASE_KDF_ITERS):
+    """PBKDF2-HMAC-SHA512 as used by WeChat 4.1+ / SQLCipher 4."""
+    return hashlib.pbkdf2_hmac("sha512", passphrase, salt, iterations, dklen=32)
+
+
+def verify_sqlcipher4_hmac(enc_key, page1):
+    """Return True when page-1 HMAC-SHA512 matches SQLCipher 4 defaults."""
+    if len(page1) < _SQLCIPHER_PAGE or len(enc_key) != 32:
+        return False
+    salt = page1[:16]
+    mac_salt = bytes(b ^ 0x3A for b in salt)
+    mac_key = hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=32)
+    hmac_data = page1[16: _SQLCIPHER_PAGE - _SQLCIPHER4_RESERVE + 16]
+    stored = page1[_SQLCIPHER_PAGE - _SQLCIPHER4_HMAC: _SQLCIPHER_PAGE]
+    digest = hmac_mod.new(mac_key, hmac_data, hashlib.sha512)
+    digest.update(struct.pack("<I", 1))
+    return digest.digest() == stored
+
+
+def keys_from_passphrase(passphrase, databases):
+    """Return {basename: hex_key} for databases that open with this passphrase.
+
+    SQLCipher `PRAGMA key = "x'...'"` treats the bytes as a raw key, not a
+    passphrase. Derive the per-database raw key from each file's salt and store
+    that raw key so Rust's existing `x'hex'` open path can read it.
+    """
+    results = {}
+    for db_path in databases:
+        name = os.path.basename(db_path)
+        try:
+            with open(db_path, "rb") as fh:
+                salt = fh.read(16)
+        except OSError:
+            continue
+        if len(salt) != 16:
+            continue
+        key_hex = derive_enc_key(passphrase, salt).hex()
+        if test_key(db_path, key_hex) is not None:
+            results[name] = key_hex
+    return results
+
+
+def test_key(db_path, key):
+    for sql in _KEY_SQL_VARIANTS:
+        try:
+            r = subprocess.run(
+                ["sqlcipher", db_path],
+                input=sql.format(key=key),
+                capture_output=True, text=True, timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        if r.returncode != 0:
+            continue
+        lines = [l.strip() for l in r.stdout.strip().split('\n')
+                 if l.strip() and l.strip() != 'ok']
+        if lines and lines[-1].isdigit():
+            return lines[-1]
     return None
 
 
@@ -244,7 +346,44 @@ BUILD_PROFILES = {
             "90960760d4ca64182802d4137ac52e3e"
         ),
     },
+    # WeChat Linux v4.1.13.23 x86_64 (BuildID: ce28c347...)
+    # Stored as four 64-bit immediates, not contiguous 16-byte ELF constants.
+    "ce28c347": {
+        "image_xor_mask": bytes.fromhex(
+            "4e9379223c6eeed2ae11ed50510d0e15"
+            "3929e23541a7288ac021a10e6d4b4655"
+        ),
+    },
+    # WeChat Linux v4.1.13.23 aarch64 (BuildID: e9f1cd04...)
+    "e9f1cd04": {
+        "image_xor_mask": bytes.fromhex(
+            "ed5cfabf2d917d8126870f3102b9207d"
+            "77227ac7a8127092bdbed6bc40823e77"
+        ),
+    },
 }
+
+
+def wechat_binary_path(pid):
+    """Resolve the WeChat ELF for this PID, including sidecar /proc/<pid>/root."""
+    mapped = None
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            for line in f:
+                if "/wechat" in line and line.strip().endswith("/wechat"):
+                    mapped = line.split()[-1]
+                    break
+    except Exception:
+        mapped = None
+    candidates = []
+    if mapped:
+        candidates.append(f"/proc/{pid}/root{mapped}")
+        candidates.append(mapped)
+    candidates.append("/opt/wechat/wechat")
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
 
 
 def get_build_id(pid):
@@ -252,13 +391,10 @@ def get_build_id(pid):
 
     Uses /proc/pid/maps to find the actual binary path, since /proc/pid/exe
     may point to a translator (e.g. Rosetta) instead of the real binary.
+    A Frida sidecar shares the PID namespace but not the root filesystem, so
+    prefer /proc/<pid>/root before falling back to this container's ELF.
     """
-    wechat_path = None
-    with open(f"/proc/{pid}/maps") as f:
-        for line in f:
-            if "/wechat" in line and line.strip().endswith("/wechat"):
-                wechat_path = line.split()[-1]
-                break
+    wechat_path = wechat_binary_path(pid)
     if not wechat_path:
         return None
     r = subprocess.run(["readelf", "-n", wechat_path], capture_output=True, text=True)
@@ -386,6 +522,8 @@ def main():
                         help="Output JSON path (default: db_keys.json next to databases)")
     parser.add_argument("--pid", type=int, default=None,
                         help="WeChat PID (auto-detected if not specified)")
+    parser.add_argument("--passphrase-file", default=None,
+                        help="32-byte login passphrase captured at QR login (mode 0600)")
     args = parser.parse_args()
 
     pid = args.pid or find_wechat_pid()
@@ -409,25 +547,45 @@ def main():
 
     profile = get_build_profile(pid)
 
-    print("Extracting key candidates from memory...")
-    ctx_count, raw_keys = extract_candidates(pid)
-    print(f"  Structures found: {ctx_count}")
-    print(f"  Candidates: {len(raw_keys)}")
-
     results = {}
     tests = 0
     remaining_dbs = list(databases)
+
+    passphrase = load_passphrase(args.passphrase_file)
+    if passphrase:
+        print("Deriving DB keys from login passphrase...")
+        derived = keys_from_passphrase(passphrase, remaining_dbs)
+        for db_path in list(remaining_dbs):
+            db_name = os.path.basename(db_path)
+            hex_key = derived.get(db_name)
+            if not hex_key:
+                continue
+            count = test_key(db_path, hex_key)
+            tests += 1
+            results[db_name] = {
+                "key": hex_key,
+                "tables": count if count is not None else "hmac",
+                "path": db_path,
+            }
+            print(f"  {db_name}: derived ({results[db_name]['tables']} tables)")
+            remaining_dbs.remove(db_path)
+
+    raw_keys = []
+    if remaining_dbs:
+        print("Extracting key candidates from memory...")
+        ctx_count, raw_keys = extract_candidates(pid)
+        print(f"  Structures found: {ctx_count}")
+        print(f"  Candidates: {len(raw_keys)}")
+
     prev_candidates = set()
 
     for level in range(len(FILTER_LEVELS)):
+        if not remaining_dbs:
+            break
         candidates = filter_candidates(raw_keys, level=level)
         # Only try candidates not already tested in a previous pass
         new_candidates = [k for k in candidates if k not in prev_candidates]
         prev_candidates.update(candidates)
-
-        if not new_candidates and level == 0:
-            print("ERROR: No candidates found. Is WeChat logged in?")
-            sys.exit(1)
 
         if not new_candidates:
             continue
@@ -444,7 +602,7 @@ def main():
                 count = test_key(db_path, key)
                 if count is not None:
                     results[db_name] = {"key": key, "tables": count, "path": db_path}
-                    print(f"  {db_name}: {key[:16]}... ({count} tables)")
+                    print(f"  {db_name}: resolved ({count} tables)")
                     found = True
                     break
             if not found:

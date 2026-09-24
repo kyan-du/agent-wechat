@@ -4,7 +4,10 @@ use crate::ia::actions;
 use crate::ia::helpers::action_frame;
 use crate::ia::types::*;
 use crate::tools::wechat_db::{find_account_dir, find_wechat_pid};
-use crate::tools::wechat_keys::{extract_keys_async, needs_key_extraction, store_keys};
+use crate::tools::wechat_keys::{
+    clear_passphrase_capture, ensure_passphrase_capture, extract_keys_async,
+    needs_key_extraction, store_keys,
+};
 use rusqlite::params;
 
 pub struct LoginPlan;
@@ -87,9 +90,14 @@ impl Plan for LoginPlan {
 
         match plan_state.phase.clone() {
             LoginPhase::Initializing => {
+                if params.new_account {
+                    clear_passphrase_capture();
+                }
+                spawn_login_passphrase_capture().await;
                 handle_initializing(state, params, plan_state, &frame)
             }
             LoginPhase::Authenticating => {
+                spawn_login_passphrase_capture().await;
                 handle_authenticating(state, params, plan_state, &frame)
             }
             LoginPhase::Maximizing => {
@@ -112,6 +120,12 @@ impl Plan for LoginPlan {
 // ============================================
 // Phase handlers
 // ============================================
+
+async fn spawn_login_passphrase_capture() {
+    if let Some(pid) = find_wechat_pid() {
+        ensure_passphrase_capture(pid).await;
+    }
+}
 
 fn handle_initializing(
     state: &AppState,
@@ -390,6 +404,18 @@ async fn handle_extracting_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_and_extract_attach_passphrase_capture_before_qr() {
+        let src = include_str!("login.rs");
+        assert!(src.contains("spawn_login_passphrase_capture"));
+        assert!(src.contains("ensure_passphrase_capture"));
+        assert!(src.contains("clear_passphrase_capture"));
+        let keys = include_str!("../tools/wechat_keys.rs");
+        assert!(keys.contains("/opt/tools/capture-passphrase.py"));
+        assert!(keys.contains("--passphrase-file"));
+        assert!(keys.contains("PASSPHRASE_PATH"));
+    }
 
     #[tokio::test]
     async fn update_popup_without_main_window_selects_disable() {

@@ -2,8 +2,9 @@ use super::Plan;
 use crate::ia::actions;
 use crate::ia::helpers::{action_frame, frame_hint_from_node};
 use crate::ia::selectors::{
-    chat_history_detail_close_button, chat_history_detail_frame, chat_history_detail_list,
-    chat_history_media_rows, messages_list, unique_chat_history_bubble, FileBubbleSelectError,
+    all_chat_history_detail_frames, chat_history_detail_close_button, chat_history_detail_frame,
+    chat_history_detail_list, chat_history_media_rows, messages_list, unique_chat_history_bubble,
+    FileBubbleSelectError,
 };
 use crate::ia::types::*;
 use crate::tools::chat_select::{confirm_target, open_chat, OpenChatResult};
@@ -87,6 +88,13 @@ fn page_messages(messages: &A11yNode, direction: ScrollDirection) -> Option<Acti
     ]))
 }
 
+
+fn frame_matches_title(frame_name: &str, title: &str) -> bool {
+    let frame_name = frame_name.trim();
+    let title = title.trim();
+    !title.is_empty() && (frame_name == title || frame_name.contains(title))
+}
+
 #[async_trait::async_trait]
 impl Plan for MaterializeChatHistoryPlan {
     type PlanState = MaterializeChatHistoryPlanState;
@@ -162,21 +170,9 @@ impl Plan for MaterializeChatHistoryPlan {
                         return None;
                     }
 
-                    let chat_list_item = crate::ia::selectors::query_selector(
-                        a11y,
-                        r#"list[name="Chats"] > list-item"#,
-                    );
-                    let click_xy = chat_list_item.and_then(|item| {
-                        item.bounds.as_ref().map(|b| {
-                            (
-                                (b.x + b.width / 2.0).round(),
-                                (b.y + b.height / 2.0).round(),
-                            )
-                        })
-                    });
-
+                    // Resolve a live non-selected click target inside chat-select.
                     let force = main_state_id == Some("chat");
-                    let result = open_chat(&params.chat_id, force, click_xy).await;
+                    let result = open_chat(&params.chat_id, force, None).await;
                     tracing::info!(
                         "[materialize_chat_history] chat-select completed ok={} verified={:?} skipped={:?} code={:?} local_id={:?} title={:?} duration_ms={:?}",
                         result.ok,
@@ -323,6 +319,29 @@ impl Plan for MaterializeChatHistoryPlan {
                         });
                     };
 
+                    // Stacked leftover 聊天记录 windows share the same bounds and
+                    // steal wheel/click focus from the card we just opened.
+                    for other in all_chat_history_detail_frames(a11y) {
+                        if frame_matches_title(&other.name, title) {
+                            continue;
+                        }
+                        if let Some(close) = chat_history_detail_close_button(other) {
+                            if let Some(bounds) = close.bounds.as_ref() {
+                                tracing::info!(
+                                    "[materialize_chat_history] closing stray detail frame name={}",
+                                    other.name
+                                );
+                                return Some(SelectedAction {
+                                    action: actions::sequence(vec![
+                                        actions::click_bounds(bounds),
+                                        actions::wait(150),
+                                    ]),
+                                    frame: frame_hint_from_node(other),
+                                });
+                            }
+                        }
+                    }
+
                     let Some(frame) = chat_history_detail_frame(a11y, title) else {
                         plan_state.nested_wait_attempts =
                             plan_state.nested_wait_attempts.saturating_add(1);
@@ -386,12 +405,18 @@ impl Plan for MaterializeChatHistoryPlan {
                             continue;
                         };
                         let trimmed = row.name.trim_start();
+                        // Images + link/article preview thumbs need left-band
+                        // double-click so Rec/*/Img (and `_t`) materialize.
                         let image_like = trimmed.starts_with("Image")
                             || trimmed.starts_with("Photo")
                             || trimmed.starts_with("图片")
+                            || trimmed.starts_with("Link")
+                            || trimmed.starts_with("链接")
                             || trimmed.starts_with("[Image]")
                             || trimmed.starts_with("[Photo]")
-                            || trimmed.starts_with("[图片]");
+                            || trimmed.starts_with("[图片]")
+                            || trimmed.starts_with("[Link]")
+                            || trimmed.starts_with("[链接]");
                         // Names often collide; include y.
                         let key = format!("{}@{:.0}", row.name, bounds.y);
                         if plan_state.nested_clicked_keys.contains(&key) {

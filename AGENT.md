@@ -404,10 +404,11 @@ Image `.dat` files use a two-layer encoding: AES-128-ECB for the header and sing
 
 ### Gotchas
 
-- `pgrep -f /usr/bin/wechat` returns multiple PIDs (wrapper + real process) — pick the one with most open fds
+- Crashpad helpers advertise `/opt/wechat/wechat` in argv0/annotations; identify the live `wechat` main process from `/proc` comm/exe/argv0 and skip crashpad, do not use `pgrep -f` substring matching or open-fd counts
 - Stored `wechatPid` goes stale after container rebuild — always fall back to `find_wechat_pid()`
 - Python extract-keys script exits non-zero if any DB key not found — catch error, read JSON output file anyway (partial success)
 - hardlink.db has indexing delay — use `message_resource.db` as primary lookup for image files
+- `message_resource.db` is SQLCipher like session/message shards; when the file exists, a missing or stale stored key must re-extract. A missing file is not a retry loop
 - hardlink.db `dir2id` stores md5(chatId) not raw chatId
 - WeChat DBs are read with `immutable=1` (skips WAL); a background task checkpoints every 3s (PASSIVE mode) to flush WAL → main DB so reads see fresh data
 

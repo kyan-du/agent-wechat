@@ -1,0 +1,29 @@
+{
+  "version": "4.1.13.23",
+  "purpose": "Research provenance plus verified immutable Wayback sources used by docker/release-inputs.json",
+  "architectures": {
+    "amd64": {
+      "buildId": "ce28c3471d532eeb1f136482eeb4d0bdfd59c06e",
+      "debBytes": 231359624,
+      "debSha256": "b7d0f8d53e9f648bc2c77a6096a04100d008f2d9f0d3988a2a4859b5992aca0a",
+      "waybackUrl": "https://web.archive.org/web/20260921152423if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb",
+      "elfBytes": 181178912,
+      "elfSha256": "2ca28ea56b1a400543d0128ebaf0b93f88172dd66dc0426d3d74fdb971eab959",
+      "maskConstruction": "four little-endian movabs imm64 stores at adjacent stack slots",
+      "recoveryStartVA": "0x619574e",
+      "recoverySize": 59,
+      "imageMask": "4e9379223c6eeed2ae11ed50510d0e153929e23541a7288ac021a10e6d4b4655"
+    },
+    "arm64": {
+      "buildId": "e9f1cd045de714536a9e739aafa6d8362f317cd0",
+      "debBytes": 211550900,
+      "debSha256": "51784a262c725ef1595dd833f456190e913583dd81c24dd8fe587532bc91c0dc",
+      "waybackUrl": "https://web.archive.org/web/20260923032446if_/https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_arm64.deb",
+      "elfBytes": 174286008,
+      "elfSha256": "d0dd519ce5d778ec20f7bee2e143fe88b78ce4820d3af6fb9a623394f8b3b8c8",
+      "maskConstruction": "two aligned 16-byte ELF constants",
+      "imageMask": "ed5cfabf2d917d8126870f3102b9207d77227ac7a8127092bdbed6bc40823e77"
+    }
+  },
+  "releaseStatus": "Immutable Wayback sources verified; candidate-image functional acceptance still required before next publish"
+}

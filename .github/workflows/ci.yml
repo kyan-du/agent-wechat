@@ -19,6 +19,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       docs: ${{ steps.filter.outputs.docs }}
       entrypoint: ${{ steps.filter.outputs.entrypoint }}
+      python: ${{ steps.filter.outputs.python }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
@@ -83,7 +84,13 @@ jobs:
               - 'scripts/test-entrypoint-identity.sh'
               - 'scripts/test-entrypoint-supervise.sh'
               - 'scripts/test-entrypoint-owned-pid1.sh'
+              - 'scripts/test-entrypoint-xvfb-user.sh'
               - 'scripts/test-auth-reset-identity.sh'
+              - '.github/workflows/ci.yml'
+            python:
+              - 'docker/tools/**'
+              - 'scripts/wechat-extract/**'
+              - 'scripts/test-entrypoint-xvfb-user.sh'
               - '.github/workflows/ci.yml'
 
   entrypoint:
@@ -100,8 +107,33 @@ jobs:
         run: bash scripts/test-entrypoint-supervise.sh
       - name: Ownership guard as PID 1
         run: bash scripts/test-entrypoint-owned-pid1.sh
+      - name: Xvfb starts as WeChat user
+        run: bash scripts/test-entrypoint-xvfb-user.sh
       - name: Auth reset identity scope
         run: bash scripts/test-auth-reset-identity.sh
+
+  python:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install maintenance test dependencies
+        run: python3 -m pip install numpy==2.2.6 capstone==5.0.7
+      - name: WeChat extract kit
+        run: python3 scripts/wechat-extract/test_wechat_extract.py
+      - name: AMD64 image mask reconstruction
+        run: python3 scripts/wechat-extract/test_recover_image_mask.py
+      - name: extract-keys unit tests
+        run: python3 docker/tools/test_extract_keys.py
+      - name: capture-passphrase unit tests
+        run: python3 docker/tools/test_capture_passphrase.py
+      - name: chat-select unit tests
+        run: python3 docker/tools/test_chat_select.py
+      - name: wechat process identity unit tests
+        run: python3 docker/tools/test_wechat_proc.py
 
   ts:
     needs: changes
