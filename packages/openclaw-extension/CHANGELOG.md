@@ -1,5 +1,84 @@
 # @agent-wechat/wechat
 
+## 0.15.2
+
+### Patch Changes
+
+- [#199](https://github.com/thisnick/agent-wechat/pull/199) [`b5ee9ac`](https://github.com/thisnick/agent-wechat/commit/b5ee9ac123d6fb2a3de6e3e54a2a7a5b233ba81d) Thanks [@thisnick](https://github.com/thisnick)! - Report explicitly expired, uncached media without retrying native downloads. Preserve cached attachments and show expiry in matching CLI and OpenClaw attachment feedback.
+
+## 0.15.1
+
+### Patch Changes
+
+- [#195](https://github.com/thisnick/agent-wechat/pull/195) [`a71cf8b`](https://github.com/thisnick/agent-wechat/commit/a71cf8b66f99978b6c53bb43a7398f42692a9284) Thanks [@thisnick](https://github.com/thisnick)! - Accept valid phone images with recoverable metadata warnings and use best-available image retrieval by default in the HTTP API, CLI, and OpenClaw. The reported quality distinguishes original, standard, and thumbnail copies; callers can request strict full resolution with `quality=full` or `wx messages media --full`.
+
+## 0.15.0
+
+### Minor Changes
+
+- [#193](https://github.com/thisnick/agent-wechat/pull/193) [`b288698`](https://github.com/thisnick/agent-wechat/commit/b2886984f0576e84d014a094620416165b91d852) Thanks [@thisnick](https://github.com/thisnick)! - Add queued voice-note sending with 50-second audio splitting, job status and cancellation, CLI support, and OpenClaw voice reply delivery.
+
+## 0.14.0
+
+### Minor Changes
+
+- [#190](https://github.com/thisnick/agent-wechat/pull/190) [`1f3c5eb`](https://github.com/thisnick/agent-wechat/commit/1f3c5eb549d2b18c25f4916f1bf939c05a22245d) Thanks [@thisnick](https://github.com/thisnick)! - Trigger missing video downloads through WeChat's native queue, return only complete message-matching MP4 data for full-quality requests, keep raw video metadata out of OpenClaw pending messages, and allow base64-wrapped uploads up to the explicit 128 MiB media limit.
+
+## 0.13.0
+
+### Minor Changes
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`93cdb04`](https://github.com/thisnick/agent-wechat/commit/93cdb0482629b90f48ade6aa7dc111586f8117c8) Thanks [@thisnick](https://github.com/thisnick)! - Return the requested image quality without silently substituting a thumbnail. The CLI requests full resolution by default; use --thumbnail for the cached preview. HTTP clients that omit quality retain the legacy thumbnail-first behavior.
+
+  Validate cached file attachments against their message's size and content hash before returning them, and reject titles containing filesystem paths.
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`641367c`](https://github.com/thisnick/agent-wechat/commit/641367c3e586ea7529d7d9d23f3698a673bcfdef) Thanks [@thisnick](https://github.com/thisnick)! - Request missing files and full images through WeChat's native queue from the media endpoint on supported AMD64 and ARM64 builds, preserving sender identity for groups, self-sent messages, and File Transfer. Reuse a process-scoped helper, suppress duplicate submissions, and return data only after cache validation. Preserve legacy image selection for clients that omit quality; OpenClaw requests full images explicitly. Voice and video retain cached retrieval without native triggering.
+
+- [#187](https://github.com/thisnick/agent-wechat/pull/187) [`dbf508d`](https://github.com/thisnick/agent-wechat/commit/dbf508de6426be2635722aa464e661a3a921b96e) Thanks [@thisnick](https://github.com/thisnick)! - Persist inbound WeChat attachments in OpenClaw-managed local storage with a configurable per-file size limit. Include every file path in agent-visible context, retry unavailable catch-up attachments, retain only the latest image in the single visual-media slot, paginate chat/message polling, and preserve group catch-up cursors across gateway restarts.
+
+## 0.12.2
+
+### Patch Changes
+
+- [#185](https://github.com/thisnick/agent-wechat/pull/185) [`d583f94`](https://github.com/thisnick/agent-wechat/commit/d583f9490e65264faf08244cf916cb98ed6818fd) Thanks [@thisnick](https://github.com/thisnick)! - Fix frozen container rendering by running Xvfb and x11vnc as the WeChat user, while preserving read-only VNC. Store proxy configuration in a private runtime directory so proxied containers can restart reliably.
+
+  Verify that chat selection opens the requested chat before reporting success, resolve reordered chats at click time, and keep repeated ARM chat selection from closing the active chat.
+
+  Support both Send and Send(S) buttons and the nested message composer layout in newer WeChat builds.
+
+## 0.12.1
+
+### Patch Changes
+
+- [#183](https://github.com/thisnick/agent-wechat/pull/183) [`1eafaf8`](https://github.com/thisnick/agent-wechat/commit/1eafaf8c830034f9047de3c910dd0fa370a16591) Thanks [@thisnick](https://github.com/thisnick)! - Support database and image access plus chat selection on WeChat Linux 4.1.13.23 for x86_64 (build ce28c347) and ARM64 (build e9f1cd04), including masked database credentials and the ARM build's ordered session-map layout.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#162](https://github.com/thisnick/agent-wechat/pull/162) [`ee25d8f`](https://github.com/thisnick/agent-wechat/commit/ee25d8ff5b22272956c14dc0ab7169fae919aab1) Thanks [@thisnick](https://github.com/thisnick)! - Update for openclaw 2026.5+ compatibility:
+
+  - Add `channelConfigs` metadata to `openclaw.plugin.json` so the gateway can validate config and load setup surfaces before the plugin runtime imports (silences the "channel plugin manifest declares wechat without channelConfigs metadata" warning).
+  - Replace deprecated `runtime.config.loadConfig()` calls with `runtime.config.current()`.
+  - Add a `message` adapter via `createChannelMessageAdapterFromOutbound` from `openclaw/plugin-sdk/channel-message`. The legacy `outbound` adapter is kept for older openclaw versions.
+  - Bump the `openclaw` peer dependency floor to `^2026.5.12`.
+
+  The deprecated `outbound` adapter and `dispatchReplyWithBufferedBlockDispatcher` ingest flow continue to work via openclaw's compat shims; a follow-up release will migrate the monitor's dispatch path to `core.channel.turn.runPrepared(...)`.
+
+- [#174](https://github.com/thisnick/agent-wechat/pull/174) [`2cdd77b`](https://github.com/thisnick/agent-wechat/commit/2cdd77b6ec040b4745c647c3dab1c6d8079309cc) Thanks [@thisnick](https://github.com/thisnick)! - Rename the OpenClaw plugin/channel id from `wechat` to `agent-wechat` and restore compatibility with OpenClaw 2026.8.x.
+
+  OpenClaw's bundled official plugin catalog now reserves `wechat` (and `weixin`) as aliases of Tencent's `@tencent-weixin/openclaw-weixin` plugin, and the catalog is compiled into the openclaw JS bundle — so the id `wechat` gets hijacked: `plugins install` writes `plugins.entries.openclaw-weixin`, and `channels add --channel wechat` tries to install the Tencent plugin instead of this one. Patching `dist/channel-catalog.json` no longer helps.
+
+  Changes:
+
+  - Plugin id and channel id are now `agent-wechat`; config lives under `channels.agent-wechat`.
+  - Dropped the `weixin` alias (catalog-reserved).
+  - Imports moved from the removed bare `openclaw/plugin-sdk` export to `openclaw/plugin-sdk/core` (works on hosts >=2026.5.12, required on 2026.8.x).
+  - `channelConfigs` metadata added to `package.json#openclaw` so 2026.8.x setup surfaces get the config schema.
+  - `wechat:`-prefixed targets and allowlist entries are still accepted.
+
+  Migration: rename the `channels.wechat` key to `channels.agent-wechat` and `plugins.entries.wechat` (or a stray `plugins.entries.openclaw-weixin`) to `plugins.entries.agent-wechat` in `openclaw.json`, then restart the gateway. Session/routing keys change with the channel id, so active conversation sessions reset.
+
 ## 0.11.15
 
 ### Patch Changes

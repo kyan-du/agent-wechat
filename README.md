@@ -10,14 +10,14 @@ A programmable WeChat interface. Controls a WeChat client running in a Docker co
 |---------|-----|-------------|
 | [`@agent-wechat/cli`](./packages/cli) | [![npm](https://img.shields.io/npm/v/@agent-wechat/cli)](https://www.npmjs.com/package/@agent-wechat/cli) | CLI for managing the Docker container and interacting with WeChat |
 | [`@agent-wechat/wechaty-puppet`](./packages/wechaty-puppet) | [![npm](https://img.shields.io/npm/v/@agent-wechat/wechaty-puppet)](https://www.npmjs.com/package/@agent-wechat/wechaty-puppet) | [Wechaty](https://wechaty.js.org) puppet for agent-wechat |
-| [`@agent-wechat/wechat`](./packages/openclaw-extension) | [![npm](https://img.shields.io/npm/v/@agent-wechat/wechat)](https://www.npmjs.com/package/@agent-wechat/wechat) | [OpenClaw](https://openclaw.ai) extension for AI agent integration |
+| [`@agent-wechat/agent-wechat`](./packages/openclaw-extension) | [![npm](https://img.shields.io/npm/v/@agent-wechat/agent-wechat)](https://www.npmjs.com/package/@agent-wechat/agent-wechat) | [OpenClaw](https://openclaw.ai) extension for AI agent integration |
 
 ## What It Does
 
 - **Read** chats, messages, and media (images, voice, files) via REST API
-- **Send** text messages, images, and files
+- **Send** text messages, images, files, and voice notes
 - **Login** via QR code displayed in your terminal
-- **Monitor** for new messages in real-time
+- **Monitor** for new messages through client polling
 
 ## Requirements
 
@@ -44,6 +44,9 @@ wx chats list
 # Send a message
 wx messages send <chatId> --text "Hello"
 
+# Record audio as a WeChat voice note
+wx messages send <chatId> --voice ./reply.mp3
+
 # Read messages
 wx messages list <chatId>
 
@@ -60,12 +63,26 @@ wx down
 | `wx logs` | Stream container logs |
 | `wx status` | Show server and login status |
 | `wx auth login` | Login flow (shows QR code) |
+| `wx auth status` | Show login status |
+| `wx auth logout` | Log out of WeChat |
 | `wx chats list` | List chats |
+| `wx chats get <id>` | Show one chat |
+| `wx chats open <id>` | Select a chat in WeChat |
 | `wx find <name>` | Find chat by name |
+| `wx contacts list` / `wx contacts find <name>` | List or find contacts |
 | `wx messages list <id>` | List messages in a chat |
 | `wx messages send <id> --text <msg>` | Send text message |
 | `wx messages send <id> --image <file>` | Send image |
-| `wx messages media <id> <localId>` | Download media attachment |
+| `wx messages send <id> --file <file>` | Send a file attachment |
+| `wx messages send <id> --voice <audio>` | Send audio as one or more voice notes and wait for verification |
+| `wx messages send <id> --voice <audio> --detach` | Start a voice job and return its ID immediately |
+| `wx messages voice status <jobId>` | Check voice-job progress and sent message IDs |
+| `wx messages voice cancel <jobId>` | Request cancellation of a voice job |
+| `wx messages media <id> <localId> [-o <path>] [--full\|--thumbnail]` | Save an attachment, including supported stickers with animation preserved; images use the best available copy by default |
+
+Run `wx --help` or `wx <command> --help` for all commands and options.
+
+Supported type-47 stickers use the same media command: the server retrieves and validates the original CDN bytes, preserves animation, and keeps its own persistent cache. This does not open a chat, modify WeChat's cache, or enable automatic OpenClaw sticker ingestion. Encrypted-only or unverified sticker sources return an unavailable result.
 
 ## Architecture
 
@@ -85,7 +102,7 @@ wx down
 ```
 
 - **UI automation**: Login, open chats, send messages — all via deterministic FSM (no LLM needed)
-- **API**: REST endpoints for all operations, WebSocket for login flow and events
+- **API**: REST endpoints for supported operations and a WebSocket login flow
 
 ## Docker Setup
 
@@ -138,7 +155,7 @@ pnpm build:image:arm64       # Build Docker image (Apple Silicon)
 pnpm build:image:amd64       # Build Docker image (Intel)
 ```
 
-See [CLAUDE.md](./CLAUDE.md) for full technical documentation.
+See [AGENTS.md](./AGENTS.md) for contributor guidance and implementation pointers.
 
 ## Ports
 

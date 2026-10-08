@@ -1,9 +1,31 @@
+import { createHash } from "node:crypto";
 import { WeChatClient } from "@agent-wechat/shared";
-import type { Chat, Message, MediaResult, AuthStatus } from "@agent-wechat/shared";
+import type { Chat, Message, AuthStatus } from "@agent-wechat/shared";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import type { ResolvedWeChatAccount } from "./types.js";
 import { getWeChatRuntime } from "./runtime.js";
 import { resolveWeChatAccount } from "./types.js";
+import {
+  applyCatchupAttachmentPolicy,
+  applyLiveAttachment,
+  attachmentFallbackFilename,
+  attachmentKindForMessageType,
+  attachmentKindForResult,
+  attachmentSourceBody,
+  buildMediaSegments,
+  mediaMime,
+  mediaRequestQuality,
+  type WeChatAttachment,
+} from "./media-delivery.js";
+import {
+  AttachmentTooLargeError,
+  attachmentPathExists,
+  saveManagedAttachment,
+} from "./attachment-store.js";
+import { MonitorStateStore } from "./monitor-state.js";
+import { listAllChats, listMessageWindow } from "./polling.js";
+import { sendWeChatMedia } from "./outbound-media.js";
+import { pollMedia } from "./media-poll.js";
 import {
   normalizeWeChatCommandBody,
   resolveWeChatCommandAuthorization,
@@ -13,12 +35,10 @@ import {
   type WeChatPolicyContext,
 } from "./access-control.js";
 
-// Message types that may have downloadable media
-const MEDIA_TYPES = new Set([3, 34, 43]); // image, voice, video
-
 // History context markers (match openclaw's built-in markers)
 const HISTORY_CONTEXT_MARKER = "[Chat messages since your last reply - for context]";
 const CURRENT_MESSAGE_MARKER = "[Current message - respond to this]";
+const voiceTranscriptCache = new Map<string, string>();
 
 export interface WeChatMonitorOptions {
   account: ResolvedWeChatAccount;
@@ -41,7 +61,20 @@ type ProcessedMessage = {
   timestamp: number;
   hasMedia: boolean;
   isMentioned: boolean;
+  attachment?: WeChatAttachment;
+  /** Body before generated attachment status/path annotations. */
+  sourceBody: string;
 };
+
+function isProcessedMessage(value: unknown): value is ProcessedMessage {
+  if (!value || typeof value !== "object") return false;
+  const message = value as Partial<ProcessedMessage>;
+  return !!message.msg && typeof message.rawBody === "string" &&
+    typeof message.commandBody === "string" && typeof message.senderName === "string" &&
+    typeof message.senderId === "string" && typeof message.isGroup === "boolean" &&
+    typeof message.timestamp === "number" && typeof message.hasMedia === "boolean" &&
+    typeof message.isMentioned === "boolean" && typeof message.sourceBody === "string";
+}
 
 /** Official/service accounts have IDs starting with gh_ */
 function isOfficialAccount(chatId: string): boolean {
@@ -58,34 +91,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/**
- * Poll for media data, retrying until data is available or max attempts reached.
- */
-async function pollMedia(
-  client: WeChatClient,
-  chatId: string,
-  localId: number,
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
-  maxAttempts = 15,
-  intervalMs = 1000,
-): Promise<MediaResult | null> {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const result = await client.getMedia(chatId, localId);
-    if (result.type === "unsupported") {
-      // Server knows this message type has no media — no point retrying
-      return null;
-    }
-    if (result.data) {
-      return result;
-    }
-    if (attempt < maxAttempts) {
-      log?.info?.(`[media] Attempt ${attempt}/${maxAttempts} for ${chatId}:${localId} returned no data, retrying...`);
-      await new Promise(r => setTimeout(r, intervalMs));
-    }
-  }
-  return null;
-}
-
 function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
   try {
     const core = getWeChatRuntime();
@@ -98,18 +103,87 @@ function enqueueWeChatSystemEvent(text: string, contextKey: string): void {
   }
 }
 
+async function retrieveAttachment(
+  client: WeChatClient,
+  chatId: string,
+  msg: Message,
+  liveAccount: ResolvedWeChatAccount,
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
+  maxAttempts = 15,
+): Promise<WeChatAttachment | undefined> {
+  const baseType = msg.type & 0x7fffffff;
+  const expectedKind = attachmentKindForMessageType(baseType);
+  if (!expectedKind) return undefined;
+  const fallbackFilename = attachmentFallbackFilename(expectedKind, msg.localId, msg.content);
+  try {
+    const result = await pollMedia(client, chatId, msg.localId, mediaRequestQuality(baseType), log, maxAttempts);
+    if (!result) {
+      return { kind: expectedKind, status: "unavailable", filename: fallbackFilename };
+    }
+    if (result.type === "expired") {
+      return { kind: expectedKind, status: "expired", filename: result.filename || fallbackFilename,
+        expiresAt: result.expiresAt };
+    }
+    if (result.type === "unsupported") {
+      // Type 49 also represents links/cards; unsupported means it was not a file.
+      if (baseType === 49) return undefined;
+      return { kind: expectedKind, status: "unsupported", filename: fallbackFilename };
+    }
+    const kind = attachmentKindForResult(result, expectedKind);
+    const filename = result.filename || fallbackFilename;
+    if (!result.data) {
+      return { kind, status: result.type === "pending" ? "pending" : "unavailable", filename };
+    }
+    const mime = mediaMime(result.format, kind);
+    const saved = await saveManagedAttachment({
+      data: result.data,
+      mime,
+      filename,
+      maxBytes: liveAccount.mediaMaxMb * 1024 * 1024,
+      saveMediaBuffer: getWeChatRuntime().channel.media.saveMediaBuffer,
+    });
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] Saved ${kind} attachment for msg ${msg.localId} (${saved.size} bytes${result.quality ? `, ${result.quality} quality` : ""})`,
+    );
+    return { kind, status: "ready", filename: saved.filename, mime, path: saved.path, quality: result.quality };
+  } catch (error) {
+    const status = error instanceof AttachmentTooLargeError ? "too_large" : "error";
+    log?.error?.(
+      `[wechat:${liveAccount.accountId}] Attachment retrieval failed for msg ${msg.localId} (${status})`,
+    );
+    return {
+      kind: expectedKind,
+      status,
+      filename: fallbackFilename,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export async function startWeChatMonitor(
   opts: WeChatMonitorOptions,
 ): Promise<void> {
   const { account, abortSignal, setStatus, log } = opts;
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
-
-  // Track last-seen message ID per chat
-  const lastSeenId = new Map<string, number>();
-
-  // Buffer non-mentioned group messages for catch-up context
-  const groupHistory = new Map<string, ProcessedMessage[]>();
+  const runtimeStateDir = getWeChatRuntime().state.resolveStateDir(process.env);
+  const stateStore = new MonitorStateStore<ProcessedMessage>(runtimeStateDir, account.accountId);
+  let savedState: Awaited<ReturnType<typeof stateStore.load>>;
+  try {
+    savedState = await stateStore.load(isProcessedMessage);
+  } catch (error) {
+    log?.error?.(`[wechat:${account.accountId}] Ignoring unreadable monitor state: ${String(error)}`);
+    savedState = { version: 1, lastSeen: {}, groupHistory: {} };
+  }
+  const lastSeenId = new Map<string, number>(Object.entries(savedState.lastSeen));
+  const groupHistory = new Map<string, ProcessedMessage[]>(Object.entries(savedState.groupHistory));
   const GROUP_HISTORY_LIMIT = 50;
+  const persistState = async () => {
+    try {
+      await stateStore.save(lastSeenId, groupHistory);
+    } catch (error) {
+      log?.error?.(`[wechat:${account.accountId}] Failed to persist monitor state: ${String(error)}`);
+    }
+  };
   let lastAuthCheck = 0;
   let prevStatus: AuthStatus["status"] | undefined = undefined;
 
@@ -123,8 +197,8 @@ export async function startWeChatMonitor(
 
   while (!abortSignal.aborted) {
     try {
-      // Reload config each iteration so hot-reloads take effect
-      const cfg = getWeChatRuntime().config.loadConfig();
+      // Read the runtime config snapshot each iteration; the host updates it on hot-reload.
+      const cfg = getWeChatRuntime().config.current();
 
       // ---- Auth polling (every authPollIntervalMs) ----
       const now = Date.now();
@@ -186,7 +260,7 @@ export async function startWeChatMonitor(
       // ---- Message polling ----
       let chats: Chat[];
       try {
-        chats = await client.listChats(50);
+        chats = await listAllChats(client);
       } catch (err) {
         log?.error?.(
           `[wechat:${account.accountId}] Failed to list chats: ${err}`,
@@ -218,6 +292,7 @@ export async function startWeChatMonitor(
             undefined,
             groupHistory,
             GROUP_HISTORY_LIMIT,
+            persistState,
           );
         }
       }
@@ -235,7 +310,7 @@ export async function startWeChatMonitor(
         log?.info?.(
           `[wechat:${account.accountId}] Catch-up: ${chatId} lastMsgLocalId=${chat.lastMsgLocalId} > lastSeenId=${prevSeen}`,
         );
-        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT);
+        await processUnreadChat(client, chat, lastSeenId, account, cfg, log, true, groupHistory, GROUP_HISTORY_LIMIT, persistState);
       }
     } catch (err) {
       log?.error?.(
@@ -265,8 +340,6 @@ async function prepareMessage(
   policy: WeChatPolicyContext,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
 ): Promise<ProcessedMessage | null> {
-  const core = getWeChatRuntime();
-
   // Skip self-sent messages
   if (msg.isSelf) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Skipping self-sent msg ${msg.localId}`);
@@ -290,76 +363,16 @@ async function prepareMessage(
     return null;
   }
 
-  // Attempt media download for supported types
-  let mediaPath: string | undefined;
-  let mediaMime: string | undefined;
-  let hasMedia = false;
-
   const baseType = msg.type & 0x7fffffff;
-  // Type 49 (appmsg) may contain file attachments — the server resolves subtypes
-  // and returns type="file" for subtype 6. Try fetching media for type 49 as well.
-  const mayHaveMedia = MEDIA_TYPES.has(baseType) || baseType === 49;
-
-  if (mayHaveMedia) {
+  const messageAttachmentKind = attachmentKindForMessageType(baseType);
+  let attachment: WeChatAttachment | undefined;
+  if (messageAttachmentKind) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Checking media for msg ${msg.localId} (type ${baseType})`);
-    try {
-      const result = await pollMedia(client, chatId, msg.localId, log);
-      if (result && result.data && result.type !== "unsupported") {
-        hasMedia = true;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Media result: type=${result.type}, format=${result.format}, hasData=${!!result.data}, filename=${result.filename}`);
-        const mimeMap: Record<string, string> = {
-          jpeg: "image/jpeg",
-          jpg: "image/jpeg",
-          png: "image/png",
-          gif: "image/gif",
-          mp3: "audio/mpeg",
-          pdf: "application/pdf",
-          doc: "application/msword",
-          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          xls: "application/vnd.ms-excel",
-          xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          ppt: "application/vnd.ms-powerpoint",
-          pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          zip: "application/zip",
-          txt: "text/plain",
-        };
-        mediaMime = mimeMap[result.format] ?? `application/${result.format || "octet-stream"}`;
-        const buf = Buffer.from(result.data!, "base64");
-        const saved = await core.channel.media.saveMediaBuffer(
-          buf,
-          mediaMime,
-          "inbound",
-          undefined,
-          result.filename,
-        );
-        mediaPath = saved?.path;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Saved media to ${mediaPath}`);
-      } else if (MEDIA_TYPES.has(baseType)) {
-        // Image/voice expected media but got nothing
-        hasMedia = true;
-        log?.info?.(`[wechat:${liveAccount.accountId}] Media not available after retries for msg ${msg.localId}`);
-      }
-    } catch (err) {
-      log?.error?.(`[wechat:${liveAccount.accountId}] Media download failed: ${err}`);
-    }
+    attachment = await retrieveAttachment(client, chatId, msg, liveAccount, log);
   }
 
   const timestamp = new Date(msg.timestamp).getTime();
-  let rawBody = msg.content || "";
-  if (mediaPath && mediaMime) {
-    if (!rawBody) {
-      if (mediaMime.startsWith("audio/")) {
-        rawBody = "<media:audio>";
-      } else if (mediaMime.startsWith("image/")) {
-        rawBody = "<media:image>";
-      } else {
-        rawBody = "<media:file>";
-      }
-    } else if (!mediaMime.startsWith("image/") && !mediaMime.startsWith("audio/")) {
-      // For file attachments, content is the filename — annotate it
-      rawBody = `[File: ${rawBody}]`;
-    }
-  }
+  let sourceBody = attachmentSourceBody(msg.content || "", messageAttachmentKind);
 
   // Append reply context for quote/reply messages
   if (msg.reply) {
@@ -368,53 +381,67 @@ async function prepareMessage(
       ? msg.reply.content.slice(0, 50) + "..."
       : msg.reply.content;
     const replyBlock = `[Replying to ${replySender}]\n${quotedBody}\n[/Replying]`;
-    rawBody = rawBody ? `${rawBody}\n\n${replyBlock}` : replyBlock;
+    sourceBody = sourceBody ? `${sourceBody}\n\n${replyBlock}` : replyBlock;
   }
-
-  return {
+  const prepared = applyLiveAttachment<ProcessedMessage>({
     msg,
-    rawBody,
-    commandBody: normalizeWeChatCommandBody(rawBody, {
-      isGroup,
-      wasMentioned,
-    }),
-    mediaPath,
-    mediaMime,
+    rawBody: sourceBody,
+    sourceBody,
+    commandBody: "",
     senderName,
     senderId,
     isGroup,
     timestamp,
-    hasMedia,
+    hasMedia: false,
     isMentioned: wasMentioned,
-  };
+  }, sourceBody, attachment);
+  prepared.commandBody = normalizeWeChatCommandBody(prepared.rawBody, {
+    isGroup,
+    wasMentioned,
+  });
+  return prepared;
 }
 
-/**
- * Split processed messages into batches where each batch has at most one media message.
- * When a second media is encountered, flush the current batch and start a new one.
- */
-function buildSegments(processed: ProcessedMessage[]): ProcessedMessage[][] {
-  const segments: ProcessedMessage[][] = [];
-  let currentBatch: ProcessedMessage[] = [];
-  let mediaCount = 0;
+async function refreshAttachment(
+  message: ProcessedMessage,
+  client: WeChatClient,
+  chatId: string,
+  liveAccount: ResolvedWeChatAccount,
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
+): Promise<ProcessedMessage> {
+  if (!message.attachment) return message;
+  // A bounded catch-up retry cannot recover a confirmed expired CDN copy.
+  if (message.attachment.status === "expired") return message;
+  if (message.attachment.status === "ready" && await attachmentPathExists(message.attachment.path)) {
+    return message;
+  }
+  log?.info?.(`[wechat:${liveAccount.accountId}] Retrying attachment for msg ${message.msg.localId}`);
+  const attachment = await retrieveAttachment(client, chatId, message.msg, liveAccount, log, 3);
+  const refreshed = applyLiveAttachment(message, message.sourceBody, attachment);
+  refreshed.commandBody = normalizeWeChatCommandBody(refreshed.rawBody, {
+    isGroup: refreshed.isGroup,
+    wasMentioned: refreshed.isMentioned,
+  });
+  return refreshed;
+}
 
-  for (const pm of processed) {
-    if (pm.hasMedia && mediaCount >= 1) {
-      // Second media in this batch — flush and start new batch
-      segments.push(currentBatch);
-      currentBatch = [pm];
-      mediaCount = 1;
-    } else {
-      if (pm.hasMedia) mediaCount++;
-      currentBatch.push(pm);
+async function refreshAttachments(
+  messages: ProcessedMessage[],
+  client: WeChatClient,
+  chatId: string,
+  liveAccount: ResolvedWeChatAccount,
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
+): Promise<ProcessedMessage[]> {
+  const output = [...messages];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < messages.length) {
+      const index = cursor++;
+      output[index] = await refreshAttachment(messages[index], client, chatId, liveAccount, log);
     }
-  }
-
-  if (currentBatch.length > 0) {
-    segments.push(currentBatch);
-  }
-
-  return segments;
+  };
+  await Promise.all(Array.from({ length: Math.min(3, messages.length) }, worker));
+  return output;
 }
 
 /**
@@ -432,7 +459,7 @@ async function dispatchSegment(
   cfg: any,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   remainingSegments?: number,
-): Promise<boolean> {
+): Promise<"delivered" | "ignored" | "failed"> {
   const core = getWeChatRuntime();
   const lastMsg = segment[segment.length - 1];
   const { isGroup, senderId, senderName, timestamp, rawBody, commandBody, msg } = lastMsg;
@@ -441,10 +468,21 @@ async function dispatchSegment(
   const mediaMsg = segment.find((pm) => pm.mediaPath);
   const mediaPath = mediaMsg?.mediaPath;
   const mediaMime = mediaMsg?.mediaMime;
+  const attachmentPaths = segment.flatMap((pm) =>
+    pm.attachment?.status === "ready" && pm.attachment.path
+      ? [{
+          path: pm.attachment.path,
+          filename: pm.attachment.filename,
+          kind: pm.attachment.kind,
+          messageId: pm.msg.localId,
+          sender: pm.senderName,
+        }]
+      : [],
+  );
 
   log?.info?.(
     `[wechat:${liveAccount.accountId}] Dispatching segment: ${segment.length} msg(s), last=${msg.localId}` +
-    `${mediaPath ? ` media=${mediaPath}` : ""}`,
+    `${mediaPath ? " with model media" : ""} attachments=${attachmentPaths.length}`,
   );
 
   const hasControlCommand =
@@ -468,7 +506,7 @@ async function dispatchSegment(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Dropping unauthorized group control command from ${senderId} in ${chatId}`,
     );
-    return false;
+    return "ignored";
   }
 
   const mentionGate = resolveWeChatMentionGate({
@@ -484,14 +522,46 @@ async function dispatchSegment(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Skipping group segment (mention required) in ${chatId}`,
     );
-    return false;
+    return "ignored";
   }
 
   try {
+    // Catch-up history keeps its audio file path in text. Resolve speech through
+    // OpenClaw's configured media understanding runtime after mention gating.
+    for (const item of segment) {
+      const attachment = item.attachment;
+      if (item.mediaPath || attachment?.kind !== "audio" || attachment.status !== "ready" || !attachment.path) continue;
+      const cacheKey = `${liveAccount.accountId}:${chatId}:${item.msg.localId}:${attachment.path}`;
+      let transcript = voiceTranscriptCache.get(cacheKey);
+      if (!transcript) {
+        try {
+          const result = await core.mediaUnderstanding.transcribeAudioFile({
+            filePath: attachment.path,
+            cfg,
+            mime: attachment.mime,
+          });
+          transcript = result.text?.trim();
+          if (transcript) {
+            if (voiceTranscriptCache.size >= 500) voiceTranscriptCache.clear();
+            voiceTranscriptCache.set(cacheKey, transcript);
+          }
+        } catch (error) {
+          log?.error?.(`[wechat:${liveAccount.accountId}] Voice transcription failed for ${item.msg.localId}: ${String(error)}`);
+        }
+      }
+      if (transcript) {
+        item.rawBody += `\n[Voice transcript: ${transcript.slice(0, 10000)}]`;
+        item.commandBody = normalizeWeChatCommandBody(item.rawBody, {
+          isGroup: item.isGroup,
+          wasMentioned: item.isMentioned,
+        });
+      }
+    }
+
     // Resolve routing using the last (triggering) message
     const route = core.channel.routing.resolveAgentRoute({
       cfg,
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
       peer: {
         kind: isGroup ? "group" : "direct",
@@ -527,7 +597,7 @@ async function dispatchSegment(
         timestamp,
         previousTimestamp,
         envelope: envelopeOptions,
-        body: isGroup ? `${senderName}: ${rawBody}` : rawBody,
+        body: isGroup ? `${senderName}: ${lastMsg.rawBody}` : lastMsg.rawBody,
       });
     } else {
       // Multi-message batch: earlier messages become history context
@@ -552,7 +622,7 @@ async function dispatchSegment(
         timestamp,
         previousTimestamp,
         envelope: envelopeOptions,
-        body: isGroup ? `${senderName}: ${rawBody}` : rawBody,
+        body: isGroup ? `${senderName}: ${lastMsg.rawBody}` : lastMsg.rawBody,
       });
 
       // Combine with history context markers
@@ -580,8 +650,8 @@ async function dispatchSegment(
     // Build inbound context
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
-      BodyForAgent: rawBody,
-      RawBody: rawBody,
+      BodyForAgent: lastMsg.rawBody,
+      RawBody: lastMsg.rawBody,
       CommandBody: commandBody,
       InboundHistory: inboundHistory,
       From: isGroup ? `wechat:group:${chatId}` : `wechat:${senderId}`,
@@ -592,13 +662,14 @@ async function dispatchSegment(
       ConversationLabel: fromLabel,
       SenderName: senderName || undefined,
       SenderId: senderId,
-      Provider: "wechat",
-      Surface: "wechat",
+      Provider: "agent-wechat",
+      Surface: "agent-wechat",
       MessageSid: `wechat:${chatId}:${msg.localId}`,
       WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
-      OriginatingChannel: "wechat",
+      OriginatingChannel: "agent-wechat",
       OriginatingTo: `wechat:${chatId}`,
+      Attachments: attachmentPaths,
       ...(mediaPath ? { MediaPath: mediaPath, MediaUrl: mediaPath, MediaType: mediaMime } : {}),
       ...(msg.reply ? {
         ReplyToBody: msg.reply.content.length > 50 ? msg.reply.content.slice(0, 50) + "..." : msg.reply.content,
@@ -622,16 +693,19 @@ async function dispatchSegment(
     const { onModelSelected, ...prefixOptions } = createChannelReplyPipeline({
       cfg,
       agentId: route.agentId,
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
     });
 
+    let replyFailed = false;
+    let deliverySequence = 0;
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
         ...prefixOptions,
         deliver: async (payload: any) => {
+          const deliveryIndex = deliverySequence++;
           const mediaList: string[] = payload.mediaUrls?.length
             ? payload.mediaUrls
             : payload.mediaUrl
@@ -640,7 +714,7 @@ async function dispatchSegment(
 
           const tableMode = core.channel.text.resolveMarkdownTableMode({
             cfg,
-            channel: "wechat",
+            channel: "agent-wechat",
             accountId: liveAccount.accountId,
           });
           const text = core.channel.text.convertMarkdownTables(
@@ -649,52 +723,23 @@ async function dispatchSegment(
           );
 
           if (mediaList.length > 0) {
-            for (const mediaUrl of mediaList) {
-              try {
-                const fsmod = await import("fs/promises");
-                const pathmod = await import("path");
-
-                let base64: string;
-                let mimeType: string;
-                let filename: string;
-                if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-                  const res = await fetch(mediaUrl);
-                  const buffer = await res.arrayBuffer();
-                  base64 = Buffer.from(buffer).toString("base64");
-                  mimeType = res.headers.get("content-type") ?? "application/octet-stream";
-                  const urlPath = new URL(mediaUrl).pathname;
-                  filename = pathmod.basename(urlPath) || "file";
-                } else {
-                  const buf = await fsmod.readFile(mediaUrl);
-                  base64 = buf.toString("base64");
-                  filename = pathmod.basename(mediaUrl);
-                  const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
-                  const extMime: Record<string, string> = {
-                    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-                    gif: "image/gif", webp: "image/webp",
-                  };
-                  mimeType = extMime[ext] ?? "application/octet-stream";
-                }
-
-                const isImage = mimeType.startsWith("image/");
-                if (isImage) {
-                  await client.sendMessage({ chatId, image: { data: base64, mimeType } });
-                } else {
-                  await client.sendMessage({ chatId, file: { data: base64, filename } });
-                }
-              } catch (err) {
-                log?.error?.(`[wechat:${liveAccount.accountId}] Failed to send media: ${err}`);
-              }
+            for (let index = 0; index < mediaList.length; index++) {
+              const retryKey = createHash("sha256")
+                .update(`${liveAccount.accountId}\0${chatId}\0${msg.localId}\0${deliveryIndex}\0${index}`)
+                .digest("hex");
+              await sendWeChatMedia(cfg, chatId, "", mediaList[index], payload.audioAsVoice === true, retryKey);
             }
-            // Send text caption separately if present
             if (text) {
-              await client.sendMessage({ chatId, text });
+              const result = await client.sendMessage({ chatId, text });
+              if (!result.success) throw new Error(result.error ?? "Text send failed");
             }
           } else if (text) {
-            await client.sendMessage({ chatId, text });
+            const result = await client.sendMessage({ chatId, text });
+            if (!result.success) throw new Error(result.error ?? "Text send failed");
           }
         },
         onError: (err: unknown, info: any) => {
+          replyFailed = true;
           log?.error?.(
             `[wechat:${liveAccount.accountId}] ${info.kind} reply failed: ${String(err)}`,
           );
@@ -704,21 +749,22 @@ async function dispatchSegment(
         onModelSelected,
       },
     });
+    if (replyFailed) return "failed";
 
     // Record activity
     core.channel.activity?.record?.({
-      channel: "wechat",
+      channel: "agent-wechat",
       accountId: liveAccount.accountId,
       direction: "inbound",
       at: timestamp,
     });
 
-    return true;
+    return "delivered";
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to dispatch segment (last msg ${msg.localId}): ${err}`,
     );
-    return false;
+    return "failed";
   }
 }
 
@@ -753,6 +799,7 @@ async function processUnreadChat(
   skipOpen?: boolean,
   groupHistory?: Map<string, ProcessedMessage[]>,
   groupHistoryLimit?: number,
+  persistState?: () => Promise<void>,
 ): Promise<void> {
   const core = getWeChatRuntime();
   // Re-resolve account from hot-reloaded config so policy changes take effect
@@ -761,7 +808,7 @@ async function processUnreadChat(
     account;
   const chatId = chat.username ?? chat.id;
   const storeAllowFrom = await core.channel.pairing
-    .readAllowFromStore({ channel: "wechat", accountId: liveAccount.accountId, env: process.env })
+    .readAllowFromStore({ channel: "agent-wechat", accountId: liveAccount.accountId, env: process.env })
     .catch(() => [] as string[]);
   const policy = resolveWeChatPolicyContext({
     account: liveAccount,
@@ -771,15 +818,19 @@ async function processUnreadChat(
   });
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
-    surface: "wechat",
+    surface: "agent-wechat",
   });
 
   // Open the chat (triggers media downloads + clear unreads)
   if (!skipOpen) {
     log?.info?.(`[wechat:${liveAccount.accountId}] Opening chat ${chatId}...`);
     try {
-      await client.openChat(chatId, true);
-      log?.info?.(`[wechat:${liveAccount.accountId}] Opened chat ${chatId}`);
+      const opened = await client.openChat(chatId, true);
+      if (opened.ok) {
+        log?.info?.(`[wechat:${liveAccount.accountId}] Opened chat ${chatId}`);
+      } else {
+        log?.error?.(`[wechat:${liveAccount.accountId}] Chat selection did not complete for ${chatId}: ${opened.error ?? "unknown error"}`);
+      }
     } catch (err) {
       log?.error?.(
         `[wechat:${liveAccount.accountId}] Failed to open chat ${chatId}: ${err}`,
@@ -790,11 +841,9 @@ async function processUnreadChat(
   // Determine how many messages to fetch
   const firstPoll = !lastSeenId.has(chatId);
   const prevLastSeen = lastSeenId.get(chatId) ?? 0;
-  const fetchLimit = Math.max(chat.unreadCount, 20);
-
   let messages: Message[];
   try {
-    messages = await client.listMessages(chatId, fetchLimit);
+    messages = await listMessageWindow(client, chatId, prevLastSeen, firstPoll, chat.unreadCount ?? 0);
   } catch (err) {
     log?.error?.(
       `[wechat:${liveAccount.accountId}] Failed to list messages for ${chatId}: ${err}`,
@@ -818,6 +867,7 @@ async function processUnreadChat(
       newMessages = messages.slice(-unread);
       const seenMax = messages[messages.length - unread - 1].localId;
       lastSeenId.set(chatId, seenMax);
+      await persistState?.();
     } else if (unread >= messages.length) {
       // All fetched messages are unread
       newMessages = messages;
@@ -825,6 +875,7 @@ async function processUnreadChat(
       // No unreads — just seed lastSeenId, don't process anything
       const maxId = messages[messages.length - 1].localId;
       lastSeenId.set(chatId, maxId);
+      await persistState?.();
       return;
     }
   } else {
@@ -846,7 +897,7 @@ async function processUnreadChat(
   const processed: ProcessedMessage[] = [];
   for (const msg of newMessages) {
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
+      `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}`,
     );
     const pm = await prepareMessage(client, msg, chatId, chat, liveAccount, policy, log);
     if (pm) {
@@ -872,6 +923,7 @@ async function processUnreadChat(
         log?.info?.(`[wechat:${liveAccount.accountId}] Buffered ${processed.length} msg(s) for group history in ${chatId}`);
         const maxId = Math.max(...newMessages.map((m) => m.localId));
         lastSeenId.set(chatId, maxId);
+        await persistState?.();
         return;
       }
 
@@ -881,33 +933,17 @@ async function processUnreadChat(
         const buffered = groupHistory.get(chatId) ?? [];
         if (buffered.length > 0) {
           // Mark buffered messages as mentioned so they remain historical context.
-          for (const pm of buffered) {
-            pm.isMentioned = true;
-          }
-          processed.unshift(...buffered);
+          processed.unshift(...buffered.map((pm) => ({ ...pm, isMentioned: true })));
           log?.info?.(
             `[wechat:${liveAccount.accountId}] Injected ${buffered.length} buffered msg(s) as history in ${chatId}`,
           );
         }
 
-        // Strip media from all but the latest message that has it (across entire combined list)
-        let latestMediaIdx = -1;
-        for (let i = processed.length - 1; i >= 0; i--) {
-          if (processed[i].mediaPath) {
-            latestMediaIdx = i;
-            break;
-          }
-        }
-        for (let i = 0; i < processed.length; i++) {
-          if (processed[i].mediaPath && i !== latestMediaIdx) {
-            processed[i] = {
-              ...processed[i],
-              mediaPath: undefined,
-              mediaMime: undefined,
-              hasMedia: false,
-            };
-          }
-        }
+        // Buffered media may have been pending or removed by retention. Retry it
+        // before assembling catch-up, then retain every file path and select only
+        // the latest image for OpenClaw's single media slot.
+        processed.splice(0, processed.length, ...await refreshAttachments(processed, client, chatId, liveAccount, log));
+        processed.splice(0, processed.length, ...applyCatchupAttachmentPolicy(processed));
       }
     } else {
       // Mention is disabled for this group; clear stale buffered entries once we reply.
@@ -919,14 +955,15 @@ async function processUnreadChat(
   if (processed.length > 0) {
     const segments = hasControlCommandInWindow
       ? processed.map((pm) => [pm])
-      : buildSegments(processed);
+      : buildMediaSegments(processed);
     log?.info?.(
       `[wechat:${liveAccount.accountId}] ${chatId}: ${processed.length} dispatchable msg(s) in ${segments.length} segment(s)`,
     );
     let allDispatched = true;
+    let allHandled = true;
     for (let i = 0; i < segments.length; i++) {
       const remaining = segments.length - i - 1;
-      const dispatched = await dispatchSegment(
+      const outcome = await dispatchSegment(
         segments[i],
         client,
         chatId,
@@ -939,16 +976,25 @@ async function processUnreadChat(
         log,
         hasControlCommandInWindow ? undefined : remaining,
       );
-      if (!dispatched) {
+      if (outcome !== "delivered") {
         allDispatched = false;
       }
+      if (outcome === "failed") allHandled = false;
     }
     if (clearBufferedHistory && allDispatched && groupHistory) {
       groupHistory.set(chatId, []);
+    }
+    if (!allHandled) {
+      // Keep the delivery cursor and buffered history unchanged so the next
+      // poll retries this window. A crash after model acceptance remains
+      // at-least-once rather than silently dropping the message.
+      await persistState?.();
+      return;
     }
   }
 
   // Update lastSeenId (track all messages including self-sent/filtered)
   const maxId = Math.max(...newMessages.map((m) => m.localId));
   lastSeenId.set(chatId, maxId);
+  await persistState?.();
 }

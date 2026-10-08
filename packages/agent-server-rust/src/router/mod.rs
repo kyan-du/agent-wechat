@@ -7,6 +7,9 @@ mod messages;
 mod sessions;
 mod status;
 mod vnc;
+mod voice;
+
+pub use voice::recover_interrupted_jobs;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -15,6 +18,11 @@ use axum::{
     Json, Router,
 };
 use tower_http::cors::{Any, CorsLayer};
+
+const MIB: usize = 1024 * 1024;
+pub(super) const MAX_UPLOAD_BYTES: usize = 128 * MIB;
+pub(super) const MAX_UPLOAD_BASE64_BYTES: usize = MAX_UPLOAD_BYTES.div_ceil(3) * 4;
+const HTTP_BODY_LIMIT_BYTES: usize = MAX_UPLOAD_BASE64_BYTES + MIB;
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({"status": "ok"}))
@@ -50,6 +58,9 @@ pub fn build_router() -> Router {
             get(messages::get_media),
         )
         .route("/api/messages/send", post(messages::send_message))
+        .route("/api/messages/voice", post(voice::create_job))
+        .route("/api/messages/voice/{job_id}", get(voice::get_job))
+        .route("/api/messages/voice/{job_id}/cancel", post(voice::cancel_job))
         // Debug
         .route("/api/debug/screenshot", get(debug::screenshot))
         .route("/api/debug/a11y", get(debug::a11y))
@@ -68,6 +79,20 @@ pub fn build_router() -> Router {
         .route("/vnc/", get(vnc::vnc_static))
         // Middleware: auth → body limit → CORS (applied bottom-up)
         .layer(axum::middleware::from_fn(auth::auth_middleware))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50 MB for media uploads
+        // Send requests carry media as base64 JSON. Reserve expansion plus
+        // bounded JSON overhead for the decoded upload limit above.
+        .layer(DefaultBodyLimit::max(HTTP_BODY_LIMIT_BYTES))
         .layer(cors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_limit_accounts_for_base64_expansion() {
+        let encoded_100_mib = (100 * MIB).div_ceil(3) * 4;
+        assert!(HTTP_BODY_LIMIT_BYTES > encoded_100_mib + MIB / 2);
+        assert_eq!(MAX_UPLOAD_BYTES, 128 * MIB);
+    }
 }

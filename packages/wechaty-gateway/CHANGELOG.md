@@ -1,5 +1,64 @@
 # @agent-wechat/wechaty-gateway
 
+## 0.15.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.15.2
+
+## 0.15.1
+
+### Patch Changes
+
+- Updated dependencies [[`a71cf8b`](https://github.com/thisnick/agent-wechat/commit/a71cf8b66f99978b6c53bb43a7398f42692a9284)]:
+  - @agent-wechat/shared@0.3.1
+  - @agent-wechat/wechaty-puppet@0.15.1
+
+## 0.15.0
+
+### Patch Changes
+
+- Updated dependencies [[`b288698`](https://github.com/thisnick/agent-wechat/commit/b2886984f0576e84d014a094620416165b91d852)]:
+  - @agent-wechat/shared@0.3.0
+  - @agent-wechat/wechaty-puppet@0.15.0
+
+## 0.14.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.14.0
+
+## 0.13.0
+
+### Patch Changes
+
+- Updated dependencies [[`93cdb04`](https://github.com/thisnick/agent-wechat/commit/93cdb0482629b90f48ade6aa7dc111586f8117c8)]:
+  - @agent-wechat/shared@0.2.0
+  - @agent-wechat/wechaty-puppet@0.13.0
+
+## 0.12.2
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.12.2
+
+## 0.12.1
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.12.1
+
+## 0.12.0
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @agent-wechat/wechaty-puppet@0.12.0
+
 ## 0.11.15
 
 ### Patch Changes

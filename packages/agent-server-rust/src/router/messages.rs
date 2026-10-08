@@ -12,8 +12,11 @@ use crate::ia::types::{MediaResult, Message, SendResult, SubscriptionEvent};
 use crate::plans::send_message::{SendMessageParams, SendMessagePlan};
 use crate::tools::wechat_db::{find_wechat_pid, list_account_dbs};
 use crate::tools::wechat_keys::{extract_keys_async, get_stored_keys, get_image_keys, store_keys};
-use crate::tools::wechat_media::get_message_media;
+use crate::tools::wechat_media::{best_image_target, get_message_media, download_metadata, pending, ImageQuality};
+use crate::tools::media_download::{ensure_queued, current_process};
+use crate::tools::media_expiry::{expiry_timestamp, finish_expired};
 use crate::tools::wechat_messages;
+use crate::tools::wechat_media;
 use crate::sessions::manager::get_session;
 
 #[derive(Deserialize)]
@@ -79,7 +82,53 @@ pub async fn list_messages(
     ))
 }
 
-pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<MediaResult> {
+#[derive(Deserialize, Default)]
+pub struct MediaParams {
+    #[serde(default)]
+    quality: ImageQuality,
+}
+
+fn image_quality_rank(quality: Option<&str>) -> u8 {
+    match quality {
+        Some("full") => 3,
+        Some("standard") => 2,
+        Some("thumbnail") => 1,
+        _ => 0,
+    }
+}
+
+fn needs_native_transfer(quality: ImageQuality, local_type: i64, advertised: &str) -> bool {
+    local_type != 3
+        || (quality != ImageQuality::Standard
+            && (quality != ImageQuality::Best || advertised == "full"))
+}
+
+#[cfg(test)]
+mod image_quality_tests {
+    use super::{image_quality_rank, needs_native_transfer};
+    use crate::tools::wechat_media::ImageQuality;
+
+    #[test]
+    fn best_available_quality_orders_full_standard_thumbnail() {
+        assert!(image_quality_rank(Some("full")) > image_quality_rank(Some("standard")));
+        assert!(image_quality_rank(Some("standard")) > image_quality_rank(Some("thumbnail")));
+        assert_eq!(image_quality_rank(None), 0);
+    }
+
+    #[test]
+    fn standard_images_use_cache_not_full_image_transfer() {
+        assert!(!needs_native_transfer(ImageQuality::Best, 3, "standard"));
+        assert!(!needs_native_transfer(ImageQuality::Best, 3, "thumbnail"));
+        assert!(!needs_native_transfer(ImageQuality::Standard, 3, "full"));
+        assert!(needs_native_transfer(ImageQuality::Best, 3, "full"));
+        assert!(needs_native_transfer(ImageQuality::Best, 43, "standard"));
+    }
+}
+
+pub async fn get_media(
+    Path((chat_id, local_id)): Path<(String, i64)>,
+    Query(params): Query<MediaParams>,
+) -> Json<MediaResult> {
     let session = match get_session("default") {
         Some(s) => s,
         None => {
@@ -89,6 +138,8 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                quality: None,
+                ..Default::default()
             })
         }
     };
@@ -101,6 +152,8 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
                 url: None,
                 format: String::new(),
                 filename: String::new(),
+                quality: None,
+                ..Default::default()
             })
         }
     };
@@ -109,6 +162,21 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         let db = get_db();
         get_stored_keys(&db, &session.id, &logged_in_user)
     };
+
+    // Stickers need only message metadata: return before image-key handling or
+    // lazy extraction of unrelated media database keys from the WeChat process.
+    let a = logged_in_user.clone();
+    let k = keys.clone();
+    let c = chat_id.clone();
+    let sticker = tokio::task::spawn_blocking(move || {
+        wechat_media::sticker_metadata(&a, &k, &c, local_id)
+    }).await.ok().flatten();
+    if let Some(metadata) = sticker {
+        return Json(match metadata {
+            Ok(sticker) => crate::tools::sticker_media::retrieve(&logged_in_user, sticker).await,
+            Err(error) => error.result(),
+        });
+    }
 
     // Lazy key extraction: if media_*.db files exist on disk without stored keys, extract them
     let on_disk = list_account_dbs(&logged_in_user);
@@ -131,13 +199,106 @@ pub async fn get_media(Path((chat_id, local_id)): Path<(String, i64)>) -> Json<M
         get_image_keys(&db, &session.id, &logged_in_user)
     };
 
-    Json(get_message_media(
-        &logged_in_user,
-        &keys,
-        &chat_id,
-        local_id,
-        image_keys,
-    ))
+    // All cache checks and native metadata reads happen outside the async runtime.
+    let account = logged_in_user.clone();
+    let request_keys = keys.clone();
+    let request_chat = chat_id.clone();
+    let request_image_keys = image_keys.clone();
+    let mut result = tokio::task::spawn_blocking(move || {
+        get_message_media(
+            &logged_in_user,
+            &keys,
+            &chat_id,
+            local_id,
+            image_keys,
+            params.quality,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| MediaResult {
+        media_type: "pending".into(),
+        data: None,
+        url: None,
+        format: String::new(),
+        filename: String::new(),
+        quality: None,
+        ..Default::default()
+    });
+    if result.media_type == "emoji" {
+        return Json(crate::tools::sticker_media::Failure::terminal("sticker_metadata_unavailable")
+            .result());
+    }
+    if result.media_type == "unsupported"
+        || (result.data.is_some()
+            && (params.quality != ImageQuality::Best || result.media_type != "image"
+                || result.quality.as_deref() == Some("full")))
+    {
+        return Json(result);
+    }
+    let metadata_account = account.clone();
+    let metadata_keys = request_keys.clone();
+    let metadata_chat = request_chat.clone();
+    let metadata = tokio::task::spawn_blocking(move ||
+        download_metadata(&metadata_account, &metadata_keys, &metadata_chat, local_id)
+    ).await.ok().flatten();
+    let Some(metadata) = metadata else { return Json(result); };
+    let expires_at = metadata["create_time"].as_i64().and_then(|created_at|
+        expiry_timestamp(metadata["content"].as_str().unwrap_or(""), created_at));
+    if finish_expired(&mut result, expires_at, chrono::Utc::now().timestamp()) {
+        if result.media_type == "expired" && metadata["local_type"] == (6i64 << 32 | 49) {
+            result.filename = wechat_messages::extract_xml_tag(metadata["content"].as_str().unwrap_or(""), "title")
+                .unwrap_or_default();
+        }
+        return Json(result);
+    }
+    let advertised = best_image_target(metadata["content"].as_str().unwrap_or(""));
+    let target_rank = if params.quality == ImageQuality::Best && metadata["local_type"] == 3 {
+        image_quality_rank(Some(advertised))
+    } else {
+        0
+    };
+    if target_rank > 0 && result.data.is_some()
+        && image_quality_rank(result.quality.as_deref()) >= target_rank
+    {
+        return Json(result);
+    }
+    if !needs_native_transfer(params.quality, metadata["local_type"].as_i64().unwrap_or_default(), advertised) {
+        // This build's native resource-3 request fetches originals, not the
+        // standard copy. Chat entry can fetch standard, but media GET must not
+        // select chats; return the best variant already in WeChat's cache.
+        return Json(result);
+    }
+    let Some((_, identity)) = current_process(&account) else { return Json(result); };
+    if !ensure_queued(account.clone(), metadata).await {
+        return if current_process(&account).map(|(_, key)| key).as_ref() == Some(&identity) {
+            Json(result)
+        } else {
+            Json(pending())
+        };
+    }
+    let mut best_so_far = result;
+    // A bounded HTTP wait; further GETs reuse the native submission for five minutes.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        if current_process(&account).map(|(_, key)| key).as_ref() != Some(&identity) { return Json(pending()); }
+        let a = account.clone(); let k = request_keys.clone(); let c = request_chat.clone();
+        let i = request_image_keys.clone();
+        let found = tokio::task::spawn_blocking(move || get_message_media(&a, &k, &c, local_id, i, params.quality))
+            .await.unwrap_or_else(|_| pending());
+        if found.data.is_some() {
+            if current_process(&account).map(|(_, key)| key).as_ref() != Some(&identity) { return Json(pending()); }
+            if target_rank == 0 || image_quality_rank(found.quality.as_deref()) >= target_rank {
+                return Json(found);
+            }
+            if best_so_far.data.is_none()
+                || image_quality_rank(found.quality.as_deref()) > image_quality_rank(best_so_far.quality.as_deref())
+            {
+                best_so_far = found;
+            }
+        }
+    }
+    Json(best_so_far)
 }
 
 #[derive(Deserialize)]
@@ -198,7 +359,19 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         };
         let path = format!("/tmp/send_image_{}{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), ext);
+        if img.data.len() > super::MAX_UPLOAD_BASE64_BYTES {
+            return Json(SendResult {
+                success: false,
+                error: Some("Image exceeds the 128 MiB upload limit".to_string()),
+            });
+        }
         if let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &img.data) {
+            if bytes.len() > super::MAX_UPLOAD_BYTES {
+                return Json(SendResult {
+                    success: false,
+                    error: Some("Image exceeds the 128 MiB upload limit".to_string()),
+                });
+            }
             if std::fs::write(&path, &bytes).is_ok() {
                 image_mime = Some(img.mime_type.clone());
                 image_path = Some(path);
@@ -223,9 +396,22 @@ pub async fn send_message(Json(input): Json<SendParams>) -> Json<SendResult> {
         }).collect();
         let path = format!("/tmp/send_file_{}_{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(), safe_name);
+        if f.data.len() > super::MAX_UPLOAD_BASE64_BYTES {
+            return Json(SendResult {
+                success: false,
+                error: Some("File exceeds the 128 MiB upload limit".to_string()),
+            });
+        }
         match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &f.data) {
             Ok(bytes) => match std::fs::write(&path, &bytes) {
-                Ok(_) => { file_path = Some(path); }
+                Ok(_) if bytes.len() <= super::MAX_UPLOAD_BYTES => { file_path = Some(path); }
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&path);
+                    return Json(SendResult {
+                        success: false,
+                        error: Some("File exceeds the 128 MiB upload limit".to_string()),
+                    });
+                }
                 Err(e) => {
                     return Json(SendResult {
                         success: false,

@@ -1,4 +1,5 @@
 use super::Plan;
+use super::composer::find_edit_and_send_button;
 use crate::ia::actions;
 use crate::ia::selectors::query_selector;
 use crate::ia::types::*;
@@ -6,6 +7,55 @@ use crate::tools::chat_select::{open_chat, OpenChatResult};
 use crate::tools::exec::{exec_command, ExecOptions};
 
 pub struct SendMessagePlan;
+
+#[cfg(test)]
+mod composer_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn editor(y: f64) -> Value {
+        json!({"role":"text","name":"","states":["EDITABLE"],
+            "bounds":{"x":300.0,"y":y,"width":650.0,"height":80.0}})
+    }
+    fn send(name: &str) -> Value {
+        json!({"role":"push-button","name":name,"states":["DISABLED"],
+            "bounds":{"x":890.0,"y":700.0,"width":55.0,"height":24.0}})
+    }
+    fn group(children: Vec<Value>) -> Value {
+        json!({"role":"filler","name":"","children":children})
+    }
+    fn parse(value: Value) -> A11yNode { serde_json::from_value(value).unwrap() }
+
+    #[test]
+    fn legacy_sibling_composer() {
+        let tree = parse(group(vec![editor(610.0), send("Send(S)")]));
+        assert!(find_edit_and_send_button(&tree).is_some());
+    }
+
+    #[test]
+    fn nested_new_composer_with_search_field() {
+        let composer = group(vec![group(vec![editor(610.0)]),
+            group(vec![group(vec![send("Send Voice"), send("Send")])])]);
+        let tree = parse(group(vec![editor(45.0), composer]));
+        let (edit, button) = find_edit_and_send_button(&tree).unwrap();
+        assert_eq!(edit.bounds.as_ref().unwrap().y, 610.0);
+        assert_eq!(button.name, "Send");
+    }
+
+    #[test]
+    fn does_not_pair_search_field_with_send() {
+        let tree = parse(group(vec![group(vec![editor(45.0)]), group(vec![send("Send")])]));
+        assert!(find_edit_and_send_button(&tree).is_none());
+    }
+
+    #[test]
+    fn rejects_ambiguous_editors_and_voice_button() {
+        let tree = parse(group(vec![group(vec![editor(610.0), editor(610.0)]), group(vec![send("Send")])]));
+        assert!(find_edit_and_send_button(&tree).is_none());
+        let voice = parse(group(vec![editor(610.0), send("Send Voice")]));
+        assert!(find_edit_and_send_button(&voice).is_none());
+    }
+}
 
 pub struct SendMessageParams {
     pub chat_id: String,
@@ -27,49 +77,6 @@ pub struct SendMessagePlanState {
     pub phase: SendMessagePhase,
     pub open_result: Option<OpenChatResult>,
     pub confirm_attempts: u32,
-}
-
-fn find_edit_and_send_button(a11y: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    let send_btn = query_selector(a11y, r#"push-button[name="Send(S)"]"#)?;
-    // Find sibling EDITABLE text node via parent
-    // Since we don't have parent refs in the tree-based approach,
-    // we search the tree for the pattern
-    find_edit_near_send(a11y, send_btn)
-}
-
-fn find_edit_near_send<'a>(
-    root: &'a A11yNode,
-    _send_btn: &A11yNode,
-) -> Option<(&'a A11yNode, &'a A11yNode)> {
-    // Walk tree looking for a parent that has both an EDITABLE text and Send(S) button
-    find_edit_send_pair(root)
-}
-
-fn find_edit_send_pair(node: &A11yNode) -> Option<(&A11yNode, &A11yNode)> {
-    if let Some(children) = &node.children {
-        let send_btn = children.iter().find(|c| {
-            c.role == "push-button" && c.name == "Send(S)"
-        });
-        let edit_node = children.iter().find(|c| {
-            c.role == "text"
-                && c.states
-                    .as_ref()
-                    .map(|s| s.iter().any(|st| st == "EDITABLE"))
-                    .unwrap_or(false)
-        });
-
-        if let (Some(edit), Some(send)) = (edit_node, send_btn) {
-            return Some((edit, send));
-        }
-
-        // Recurse
-        for child in children {
-            if let Some(result) = find_edit_send_pair(child) {
-                return Some(result);
-            }
-        }
-    }
-    None
 }
 
 #[async_trait::async_trait]

@@ -1,6 +1,7 @@
 import { Command, Option } from "commander";
 import { WeChatClient, type WeChatClientOptions } from "@agent-wechat/shared";
 import { createSubscriptionClient, type SubscriptionClientOptions } from "./lib/client.js";
+import { expiredMediaMessage } from "./lib/media-status.js";
 import { spawn, execSync } from "child_process";
 import { randomBytes } from "crypto";
 import fs from "fs";
@@ -324,10 +325,18 @@ messagesCmd
 
 messagesCmd
   .command("media <chatId> <localId>")
-  .description("Save media attachment (image thumbnail, emoji, or voice)")
+  .description("Save a media attachment (best available image, file, or voice)")
+  .option("--full", "Require the original-resolution image")
+  .option("--thumbnail", "Retrieve an image thumbnail instead of full resolution")
+  .option("--best", "Retrieve the best available image (default)")
   .option("-o, --output <path>", "Output file path")
   .action(async (chatId: string, localIdStr: string, opts) => {
-    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output);
+    if (Number(!!opts.full) + Number(!!opts.thumbnail) + Number(!!opts.best) > 1) {
+      console.error("Choose only one of --full, --thumbnail, or --best.");
+      process.exit(1);
+    }
+    const quality = opts.full ? "full" : opts.thumbnail ? "thumbnail" : "best";
+    await cmdMedia(getClient(), chatId, parseInt(localIdStr, 10), opts.output, quality);
   });
 
 messagesCmd
@@ -336,11 +345,22 @@ messagesCmd
   .option("--text <text>", "Text message to send")
   .option("--image <path>", "Image file to send")
   .option("--file <path>", "File to send")
-  .action(async (chatId: string, opts: { text?: string; image?: string; file?: string }) => {
-    if (!opts.text && !opts.image && !opts.file) {
-      console.error("Must provide --text, --image, or --file");
+  .option("--voice <path>", "Record audio as one or more voice notes")
+  .option("--detach", "Return after the voice job is queued")
+  .action(async (chatId: string, opts: { text?: string; image?: string; file?: string; voice?: string; detach?: boolean }) => {
+    if (!opts.text && !opts.image && !opts.file && !opts.voice) {
+      console.error("Must provide --text, --image, --file, or --voice");
       process.exit(1);
     }
+    if (opts.voice) {
+      if (opts.text || opts.image || opts.file) throw new Error("--voice must be sent on its own");
+      const audio = fs.readFileSync(opts.voice);
+      const job = await getClient().createVoiceJob(chatId, audio, randomBytes(16).toString("hex"));
+      console.log(`Voice job: ${job.jobId}`);
+      if (!opts.detach) await waitVoiceJob(getClient(), job.jobId);
+      return;
+    }
+    if (opts.detach) throw new Error("--detach requires --voice");
 
     let image: { data: string; mimeType: string } | undefined;
     if (opts.image) {
@@ -367,6 +387,36 @@ messagesCmd
 
     await cmdSend(getClient(), chatId, opts.text, image, file);
   });
+
+const voiceCmd = messagesCmd.command("voice").description("Inspect or cancel voice jobs");
+voiceCmd.command("status <jobId>").action(async (jobId: string) => {
+  console.log(JSON.stringify(await getClient().getVoiceJob(jobId), null, 2));
+});
+voiceCmd.command("cancel <jobId>").action(async (jobId: string) => {
+  const job = await getClient().cancelVoiceJob(jobId);
+  console.log(`Cancellation requested for ${job.jobId}`);
+});
+
+async function waitVoiceJob(client: WeChatClient, jobId: string): Promise<void> {
+  let lastProgress = "";
+  for (;;) {
+    const job = await client.getVoiceJob(jobId);
+    const verified = job.chunks.filter((chunk) => chunk.status === "verified").length;
+    const progress = `${job.status}: ${verified}/${job.chunks.length} notes verified`;
+    if (progress !== lastProgress) {
+      console.log(progress);
+      lastProgress = progress;
+    }
+    if (job.status === "completed") {
+      console.log(`Message IDs: ${job.chunks.map((chunk) => chunk.messageId).join(", ")}`);
+      return;
+    }
+    if (["failed", "cancelled", "needs_review"].includes(job.status)) {
+      throw new Error(`${job.status}: ${job.error ?? "No further details"}. Job ${jobId}; do not resend the whole recording.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
 
 // ============================================
 // Update Command
@@ -685,9 +735,17 @@ async function cmdMessages(client: WeChatClient, chatId: string, limit: number =
   console.log(`\n${messages.length} message(s) shown.`);
 }
 
-async function cmdMedia(client: WeChatClient, chatId: string, localId: number, outputPath?: string) {
-  const result = await client.getMedia(chatId, localId);
+async function cmdMedia(
+  client: WeChatClient, chatId: string, localId: number, outputPath?: string,
+  quality: "full" | "thumbnail" | "best" = "best",
+) {
+  const result = await client.getMedia(chatId, localId, quality);
 
+  const expired = expiredMediaMessage(result);
+  if (expired) {
+    console.error(expired);
+    process.exit(1);
+  }
   if (result.type === "unsupported") {
     console.error("No media found for this message (unsupported type or not found).");
     process.exit(1);
@@ -703,9 +761,10 @@ async function cmdMedia(client: WeChatClient, chatId: string, localId: number, o
     // Decode base64
     const buffer = Buffer.from(result.data, "base64");
     fs.writeFileSync(outFile, buffer);
-    console.log(`Saved ${result.type} to ${outFile} (${buffer.length} bytes)`);
+    const variant = result.type === "image" && result.quality ? ` (${result.quality})` : "";
+    console.log(`Saved ${result.type}${variant} to ${outFile} (${buffer.length} bytes)`);
   } else if (result.type === "image") {
-    console.error("Image thumbnail not yet cached by WeChat. Try opening the chat in the app first.");
+    console.error(`Requested image ${quality} is not yet available.${quality === "full" ? " Regular phone sends may have no Original copy; try without --full." : ""}`);
     process.exit(1);
   } else if (result.type === "video") {
     console.error("Video not yet downloaded by WeChat. Try playing the video in the app first.");
