@@ -61,6 +61,8 @@ jobs:
               - 'scripts/test-npm-release-workflow.mjs'
               - 'scripts/npm-release-utils.mjs'
               - 'scripts/npm-release-utils.test.mjs'
+              - 'scripts/release-notes.mjs'
+              - 'scripts/release-notes.test.mjs'
               - 'scripts/verify-published-npm-release.mjs'
               - 'scripts/smoke-npm-packages.mjs'
               - 'scripts/test-packed-cli.sh'
@@ -178,6 +180,7 @@ jobs:
         run: |
           pnpm test:release-boundary -- --require-rendered
           pnpm test:npm-release-workflow
+          node --test scripts/release-notes.test.mjs
           pnpm test:ghcr-release
           pnpm test:ref-image-workflow
           pnpm test:root-cli-image
