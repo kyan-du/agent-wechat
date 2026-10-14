@@ -64,6 +64,13 @@ jobs:
       - name: Validate exact release version and package metadata
         run: node scripts/check-npm-production-release.mjs "${{ inputs.version }}"
 
+      - name: Build release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          node --test scripts/release-notes.test.mjs
+          node scripts/release-notes.mjs "${{ inputs.version }}" RELEASE_NOTES.md
+          cat RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Test and build
         env:
           CI: true
@@ -85,6 +92,7 @@ jobs:
           npm pack ./packages/openclaw-extension --json --ignore-scripts --pack-destination .release-pack
           npm pack ./packages/wechaty-puppet --json --ignore-scripts --pack-destination .release-pack
           shasum -a 256 .release-pack/*.tgz > .release-pack/SHA256SUMS
+          cp RELEASE_NOTES.md .release-pack/RELEASE_NOTES.md
           node scripts/check-npm-production-release.mjs "${{ inputs.version }}" --tarballs .release-pack
 
       - name: Clean-install and import packed tarballs
@@ -162,11 +170,14 @@ jobs:
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --jq .ref
           fi
+          notes=.release-pack/RELEASE_NOTES.md
+          test -s "$notes"
           if gh release view "$tag" >/dev/null 2>&1; then
             release_tag=$(gh release view "$tag" --json tagName --jq .tagName)
             test "$release_tag" = "$tag"
+            gh release edit "$tag" --notes-file "$notes"
           else
-            gh release create "$tag" --verify-tag --title "$tag" --notes "Release $tag"
+            gh release create "$tag" --verify-tag --title "$tag" --notes-file "$notes" --latest
           fi
 
   publish-ghcr:

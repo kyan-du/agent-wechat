@@ -81,6 +81,17 @@ assert.match(
   "existing GitHub Release must only be checked by tagName, not recreated",
 );
 
+assert.match(
+  createTag.run,
+  /gh release create "\$tag" --verify-tag --title "\$tag" --notes-file "\$notes"/,
+  "GitHub Release notes must come from CHANGELOG.md, not a placeholder",
+);
+assert.doesNotMatch(createTag.run, /--notes "Release \$tag"/);
+assert.match(createTag.run, /gh release edit "\$tag" --notes-file "\$notes"/);
+const notesStep = jobs.verify.steps.find((step) => step.name === "Build release notes from CHANGELOG.md");
+assert.ok(notesStep, "verify job builds release notes before publishing");
+assert.match(notesStep.run, /node scripts\/release-notes\.mjs "\$\{\{ inputs\.version \}\}" RELEASE_NOTES\.md/);
+
 const yamlEscapedSemver = /^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$/;
 assert.equal(yamlEscapedSemver.test("0.14.1"), false, "the old YAML-escaped regex rejects 0.14.1");
 
