@@ -1,5 +1,7 @@
 # @agent-wechat/agent-server
 
+## 0.15.2
+
 ## 0.15.1
 
 ### Minor Changes

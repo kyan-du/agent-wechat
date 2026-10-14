@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.15.2
+
+### Patch Changes
+
+- [#155](https://github.com/kyan-du/agent-wechat/pull/155) [`f492feb`](https://github.com/kyan-du/agent-wechat/commit/f492feb08cb373a7957c64f71c6c1b9a06f62c9b) Thanks [@kyan-du](https://github.com/kyan-du)! - Fix plugin load on OpenClaw 2026.10.3: import group-policy helpers from `openclaw/plugin-sdk/runtime-group-policy` instead of the removed `config-runtime` subpath, and inline sender command authorization now that `openclaw/plugin-sdk/command-auth` is gone.
+
 ## 0.15.1
 
 ### Minor Changes
