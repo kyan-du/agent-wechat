@@ -6,8 +6,7 @@ import {
 import {
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-} from "openclaw/plugin-sdk/config-runtime";
-import { resolveSenderCommandAuthorization } from "openclaw/plugin-sdk/command-auth";
+} from "openclaw/plugin-sdk/runtime-group-policy";
 import type { ResolvedWeChatAccount, WeChatDmPolicy, WeChatGroupPolicy } from "./types.js";
 
 type WeChatGroupEntry = NonNullable<ResolvedWeChatAccount["groups"]>[string];
@@ -282,18 +281,30 @@ export async function resolveWeChatCommandAuthorization(params: {
   deps: CommandAuthorizationDeps;
 }): Promise<boolean | undefined> {
   const normalizedSenderId = normalizeWeChatId(params.senderId ?? "");
-  const { commandAuthorized } = await resolveSenderCommandAuthorization({
-    cfg: params.cfg,
-    rawBody: params.rawBody,
-    isGroup: params.isGroup,
-    dmPolicy: params.dmPolicy,
-    configuredAllowFrom: params.allowFromForCommands,
-    senderId: normalizedSenderId,
-    isSenderAllowed: (senderId, allowFrom) =>
-      isWeChatSenderAllowed(senderId, normalizeWeChatAllowFrom(allowFrom)),
-    readAllowFromStore: async () => normalizeWeChatAllowFrom(await params.deps.readAllowFromStore()),
-    shouldComputeCommandAuthorized: params.deps.shouldComputeCommandAuthorized,
-    resolveCommandAuthorizedFromAuthorizers: params.deps.resolveCommandAuthorizedFromAuthorizers,
+  // `openclaw/plugin-sdk/command-auth` (resolveSenderCommandAuthorization) was
+  // removed in OpenClaw 2026.10.3. Inline its semantics for our call shape
+  // (no access-group expansion, no separate group allowlist).
+  if (!params.deps.shouldComputeCommandAuthorized(params.rawBody, params.cfg)) {
+    return undefined;
+  }
+  const isSenderAllowed = (allowFrom: string[]) =>
+    isWeChatSenderAllowed(normalizedSenderId, normalizeWeChatAllowFrom(allowFrom));
+  const configuredAllowFrom = normalizeAllowEntries(params.allowFromForCommands);
+  const storeAllowFrom =
+    !params.isGroup && params.dmPolicy !== "allowlist" && params.dmPolicy !== "open"
+      ? normalizeWeChatAllowFrom(await params.deps.readAllowFromStore().catch(() => []))
+      : [];
+  const effectiveAllowFrom = normalizeAllowEntries([...configuredAllowFrom, ...storeAllowFrom]);
+  const effectiveGroupAllowFrom = configuredAllowFrom;
+  const commandAuthorized = params.deps.resolveCommandAuthorizedFromAuthorizers({
+    useAccessGroups: params.cfg.commands?.useAccessGroups !== false,
+    authorizers: [
+      { configured: effectiveAllowFrom.length > 0, allowed: isSenderAllowed(effectiveAllowFrom) },
+      {
+        configured: effectiveGroupAllowFrom.length > 0,
+        allowed: isSenderAllowed(effectiveGroupAllowFrom),
+      },
+    ],
   });
   return commandAuthorized;
 }
@@ -320,4 +331,8 @@ export function resolveWeChatMentionGate(params: {
   const effectiveWasMentioned = baseWasMentioned || shouldBypassMention;
   const shouldSkip = params.requireMention && params.canDetectMention && !effectiveWasMentioned;
   return { effectiveWasMentioned, shouldSkip, shouldBypassMention };
+}
+
+function normalizeAllowEntries(entries: ReadonlyArray<string | number> | undefined): string[] {
+  return (entries ?? []).map((entry) => String(entry).trim()).filter(Boolean);
 }
