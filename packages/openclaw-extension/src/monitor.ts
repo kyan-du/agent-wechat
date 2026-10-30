@@ -143,7 +143,9 @@ export async function startWeChatMonitor(
   const startupBaselines = new Map<string, StartupBaseline>();
   const chatScanState: ChatScanState = { initialScanComplete: false };
   const pendingMessageScans = loadPendingResetRetries(account.accountId);
-  const inboundLedger = loadInboundEventLedger(account.accountId);
+  const inboundLedger = loadInboundEventLedger(account.accountId, undefined, {
+    warn: (message) => (log?.error ?? console.warn)(`[wechat:${account.accountId}] ${message}`),
+  });
   const mediaPipeline = loadMediaPipeline(account.accountId);
   const emptyUnreadBackoff: EmptyUnreadBackoff = new Map();
   const cleanupMedia = async () => {

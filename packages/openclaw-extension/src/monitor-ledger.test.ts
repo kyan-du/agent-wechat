@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,8 @@ import {
   InboundEventLedger,
   InboundLedgerStateError,
   MAX_INBOUND_EVENT_ATTEMPTS,
+  MAX_INBOUND_MESSAGE_KEY_LENGTH,
+  boundLedgerString,
   inboundEventId,
 } from "./monitor-ledger.ts";
 
@@ -92,4 +94,53 @@ test("nested media bindings are distinct and stable across partial-result orderi
   assert.notEqual(nestedMediaEventId(parent, first), parent);
   assert.equal(nestedMediaEventId(parent, second), nestedMediaEventId(parent, [second, first][0]));
   assert.notEqual(nestedMediaEventId(parent, first), nestedMediaEventId("other-parent", first));
+});
+
+const LONG = 5969;
+
+test("a 5969-char message key is bounded on write and survives restart", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-ledger-"));
+  const long = message(673, "长".repeat(LONG));
+  const first = new InboundEventLedger("default", dir);
+  const id = first.ensure("default", "34438530917@chatroom", long, 0);
+  first.markProcessing(id, 0);
+  first.markProcessed(id, "buffered", 1);
+  const stored = first.get(id)!;
+  assert.ok(stored.messageKey.length <= MAX_INBOUND_MESSAGE_KEY_LENGTH);
+  const warnings: string[] = [];
+  const second = new InboundEventLedger("default", dir, { warn: (m) => warnings.push(m) });
+  assert.equal(second.get(id)?.status, "processed");
+  assert.equal(second.shouldProcess(id, 2), false);
+  assert.deepEqual(warnings, []);
+});
+
+test("boundLedgerString keeps short values and distinguishes long ones", () => {
+  assert.equal(boundLedgerString("abc", 10), "abc");
+  const a = boundLedgerString("x".repeat(LONG), 4096);
+  const b = boundLedgerString(`${"x".repeat(LONG - 1)}y`, 4096);
+  assert.equal(a.length, 4096);
+  assert.notEqual(a, b);
+  assert.ok(boundLedgerString("\u{1F600}".repeat(3000), 4096).length <= 4096);
+});
+
+test("an invalid 5969-char entry on disk is dropped with a warning instead of blocking", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wechat-ledger-"));
+  const seed = new InboundEventLedger("default", dir);
+  const goodId = seed.ensure("default", "wxid_chat", message(1), 0);
+  const path = join(dir, "wechat", "inbound-ledger-default.json");
+  const file = JSON.parse(readFileSync(path, "utf8"));
+  const bad = { ...file.entries[0], eventId: "a".repeat(64), localId: 673, messageKey: "k".repeat(LONG), status: "processed", outcome: "buffered" };
+  file.entries.push(bad, { not: "an event" });
+  writeFileSync(path, JSON.stringify(file));
+  const warnings: string[] = [];
+  const ledger = new InboundEventLedger("default", dir, { warn: (m) => warnings.push(m) });
+  assert.equal(existsSync(`${path}.blocked`), false);
+  assert.ok(ledger.get(goodId));
+  assert.equal(ledger.get("a".repeat(64)), undefined);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /dropped 2 invalid/);
+  ledger.ensure("default", "wxid_chat", message(2), 1);
+  const rewritten = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(rewritten.entries.length, 2);
+  assert.ok(rewritten.entries.every((e: { messageKey: string }) => e.messageKey.length <= MAX_INBOUND_MESSAGE_KEY_LENGTH));
 });
