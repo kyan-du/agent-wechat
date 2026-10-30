@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.16.1
+
+### Patch Changes
+
+- [#165](https://github.com/kyan-du/agent-wechat/pull/165) [`ead0355`](https://github.com/kyan-du/agent-wechat/commit/ead035542eb75d7b53458b13c419f46637d66861) Thanks [@kyan-du](https://github.com/kyan-du)! - Fix voice-note sending: the voice worker now reads this fork's paged `/api/messages` response (`items`) and string message types, instead of failing every job with "string indices must be integers".
+
 ## 0.16.0
 
 ### Patch Changes
