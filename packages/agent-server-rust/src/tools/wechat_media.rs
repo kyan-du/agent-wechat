@@ -885,8 +885,59 @@ fn find_file_hash_via_resource_db(
     Some(file_hash)
 }
 
-/// Look up the .dat filename from message_resource.db. The packed_info blob in
+/// Image cache variants in best-first order: `_h` is the original (HD) image,
+/// the bare name is WeChat's standard image and `_t` is the thumbnail.
+/// (Port of upstream a71cf8b/9f524a5 "best available" image selection.)
+pub(crate) const IMAGE_DAT_VARIANTS: [(&str, &str); 3] =
+    [("_h", "full"), ("", "standard"), ("_t", "thumbnail")];
+
+/// Existing `.dat` candidates for `hash` under `img_dir`, best first.
+pub(crate) fn existing_dat_variants(img_dir: &Path, file_hash: &str) -> Vec<(String, &'static str)> {
+    IMAGE_DAT_VARIANTS
+        .iter()
+        .map(|(suffix, label)| (img_dir.join(format!("{file_hash}{suffix}.dat")), *label))
+        .filter(|(path, _)| path.exists())
+        .map(|(path, label)| (path.to_string_lossy().to_string(), label))
+        .collect()
+}
+
+/// Look up the .dat candidates from message_resource.db. The packed_info blob in
 /// MessageResourceInfo contains the file hash used as the .dat filename.
+fn find_dat_candidates_via_resource_db(
+    account_dir: &str,
+    keys: &HashMap<String, String>,
+    chat_id: &str,
+    local_id: i64,
+    create_time: i64,
+) -> Vec<(String, &'static str)> {
+    let Some(file_hash) = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id) else {
+        return Vec::new();
+    };
+
+    // Build path: msg/attach/<md5(chatId)>/<year-month>/Img/<hash>{_h,,_t}.dat
+    let chat_hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
+    let Some(dt) = chrono::DateTime::from_timestamp(create_time, 0) else {
+        return Vec::new();
+    };
+    let year_month = dt.format("%Y-%m").to_string();
+
+    for base in &account_base_paths(account_dir) {
+        let img_dir = Path::new(base)
+            .join("msg/attach")
+            .join(&chat_hash)
+            .join(&year_month)
+            .join("Img");
+        let found = existing_dat_variants(&img_dir, &file_hash);
+        if !found.is_empty() {
+            return found;
+        }
+    }
+
+    tracing::warn!("[media:resource-db] file not on disk hash_present=true");
+    Vec::new()
+}
+
+#[cfg(test)]
 fn find_dat_via_resource_db(
     account_dir: &str,
     keys: &HashMap<String, String>,
@@ -894,30 +945,10 @@ fn find_dat_via_resource_db(
     local_id: i64,
     create_time: i64,
 ) -> Option<String> {
-    let file_hash = find_file_hash_via_resource_db(account_dir, keys, chat_id, local_id)?;
-
-    // Build path: msg/attach/<md5(chatId)>/<year-month>/Img/<hash>.dat
-    let chat_hash = format!("{:x}", Md5::digest(chat_id.as_bytes()));
-    let dt = chrono::DateTime::from_timestamp(create_time, 0)?;
-    let year_month = dt.format("%Y-%m").to_string();
-
-    for base in &account_base_paths(account_dir) {
-        // Try mid-res .dat first, then _t.dat thumbnail
-        for suffix in &["", "_t"] {
-            let dat_path = Path::new(base)
-                .join("msg/attach")
-                .join(&chat_hash)
-                .join(&year_month)
-                .join("Img")
-                .join(format!("{file_hash}{suffix}.dat"));
-            if dat_path.exists() {
-                return Some(dat_path.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    tracing::warn!("[media:resource-db] file not on disk hash_present=true");
-    None
+    find_dat_candidates_via_resource_db(account_dir, keys, chat_id, local_id, create_time)
+        .into_iter()
+        .next()
+        .map(|(path, _)| path)
 }
 
 /// Get video data: .mp4 if downloaded, otherwise cover .jpg or _thumb.jpg.
@@ -2108,43 +2139,59 @@ pub fn get_message_media(
                 content.len()
             );
 
-            // Try cached thumbnail first
-            if let Some(thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
-                tracing::info!("[media] found thumbnail");
-                let mut thumb = thumb;
-                thumb.source = Some("thumbnail".into());
-                return thumb;
-            }
-            tracing::info!("[media] no thumbnail message_ref_present=true");
-
-            // Try .dat decryption if we have image keys
+            // Best available first: decrypt each .dat variant (full → standard →
+            // thumbnail) independently so an incomplete _h.dat cannot hide an
+            // intact standard image. The cached Thumb .jpg is the last resort.
+            let mut last_pending: Option<MediaResult> = None;
             if let Some((aes_hex, xor_byte)) = image_keys_raw {
                 let image_keys = ImageKeys {
                     aes_key_hex: aes_hex,
                     xor_byte,
                 };
 
-                // Primary: look up filename from message_resource.db
-                if let Some(dat_path) =
-                    find_dat_via_resource_db(account_dir, keys, chat_id, local_id, create_time)
-                {
-                    tracing::info!("[media] found dat via resource-db path_present=true");
-                    return decrypt_and_return(&dat_path, &image_keys, local_id);
+                let candidates =
+                    find_dat_candidates_via_resource_db(account_dir, keys, chat_id, local_id, create_time);
+                for (dat_path, label) in &candidates {
+                    let mut found = decrypt_and_return(dat_path, &image_keys, local_id);
+                    if found.data.is_some() {
+                        tracing::info!("[media] found dat via resource-db variant={}", label);
+                        // `source` stays within the published "original" | "thumbnail"
+                        // contract so older plugins keep parsing responses.
+                        if *label == "thumbnail" {
+                            found.source = Some("thumbnail".into());
+                        }
+                        return found;
+                    }
+                    last_pending = Some(found);
                 }
 
                 // Fallback: try hardlink.db (older images may not be in resource db)
-                if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content)
-                {
-                    tracing::info!("[media] found dat via hardlink path_present=true");
-                    return decrypt_and_return(&dat_path, &image_keys, local_id);
+                if candidates.is_empty() {
+                    if let Some(dat_path) = find_dat_via_hardlink(account_dir, keys, chat_id, &content) {
+                        tracing::info!("[media] found dat via hardlink path_present=true");
+                        let found = decrypt_and_return(&dat_path, &image_keys, local_id);
+                        if found.data.is_some() {
+                            return found;
+                        }
+                        last_pending = Some(found);
+                    }
                 }
 
                 tracing::warn!(
-                    "[media] no dat found md5_present={}",
+                    "[media] no decodable dat md5_present={}",
                     xml_attr(&content, "md5").is_some()
                 );
             } else {
                 tracing::warn!("[media] no image keys available message_ref_present=true");
+            }
+
+            if let Some(mut thumb) = get_image_thumbnail(account_dir, chat_id, local_id, create_time) {
+                tracing::info!("[media] falling back to cached thumbnail");
+                thumb.source = Some("thumbnail".into());
+                return thumb;
+            }
+            if let Some(pending) = last_pending {
+                return pending;
             }
 
             // Image exists but can't be retrieved
@@ -2174,6 +2221,22 @@ pub fn get_message_media(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn image_variants_are_best_first_and_skip_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path();
+        assert!(super::existing_dat_variants(img, "abc").is_empty());
+        std::fs::write(img.join("abc_t.dat"), b"t").unwrap();
+        std::fs::write(img.join("abc.dat"), b"s").unwrap();
+        let labels: Vec<_> = super::existing_dat_variants(img, "abc").into_iter().map(|(_, l)| l).collect();
+        assert_eq!(labels, vec!["standard", "thumbnail"]);
+        std::fs::write(img.join("abc_h.dat"), b"h").unwrap();
+        let found = super::existing_dat_variants(img, "abc");
+        assert_eq!(found[0].1, "full");
+        assert!(found[0].0.ends_with("abc_h.dat"));
+        assert_eq!(found.len(), 3);
+    }
+
     use super::*;
     use std::sync::{Arc, Mutex};
 
