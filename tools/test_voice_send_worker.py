@@ -13,6 +13,21 @@ worker = importlib.util.module_from_spec(spec)
 loader.exec_module(worker)
 
 
+class ApiShapeTests(unittest.TestCase):
+    def test_message_items_accepts_paged_and_bare_lists(self):
+        item = {"localId": 7, "type": "34", "isSelf": True}
+        self.assertEqual(worker.message_items({"items": [item], "nextCursor": None, "schemaVersion": 1}), [item])
+        self.assertEqual(worker.message_items([item]), [item])
+        with self.assertRaises(RuntimeError):
+            worker.message_items({"error": "x"})
+
+    def test_voice_type_accepts_string_and_int(self):
+        self.assertTrue(worker.is_voice_message({"type": "34"}))
+        self.assertTrue(worker.is_voice_message({"type": 34}))
+        self.assertFalse(worker.is_voice_message({"type": "1"}))
+        self.assertFalse(worker.is_voice_message({}))
+
+
 class VoicePreparationTests(unittest.TestCase):
     def test_boundaries(self):
         cases = {
