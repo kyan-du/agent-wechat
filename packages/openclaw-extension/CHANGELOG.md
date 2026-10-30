@@ -1,5 +1,18 @@
 # @agent-wechat/wechat
 
+## 0.16.0
+
+### Minor Changes
+
+- [#161](https://github.com/kyan-du/agent-wechat/pull/161) [`baeff3e`](https://github.com/kyan-du/agent-wechat/commit/baeff3e23c9a3643d7bedae71668322ce8d080fd) Thanks [@kyan-du](https://github.com/kyan-du)! - Decide WeChat access with OpenClaw's channel ingress policy instead of a local copy of it (ported from upstream thisnick/agent-wechat e743310). DM and group sender gates, per-group overrides, control-command authorization and @mention gating now come from OpenClaw core, so `accessGroup:<name>` entries work in `allowFrom`, `groupAllowFrom` and per-group `allowFrom`. Existing configs keep their behavior, with two exceptions:
+
+  - The pairing store no longer admits group senders or authorizes commands. WeChat has no pairing flow, so the store is normally empty.
+  - `dmPolicy: "open"` without `"*"` in `allowFrom` still admits everyone, but now logs a reminder to add `"*"`.
+
+  The plugin is now built and type-checked against the OpenClaw 2026.10 SDK directly (the `channel-outbound` typecheck shim is gone), so CI and release jobs run on Node 24. The plugin needs an OpenClaw host of 2026.10 or newer.
+
+- [#162](https://github.com/kyan-du/agent-wechat/pull/162) [`503b51e`](https://github.com/kyan-du/agent-wechat/commit/503b51eb83a5e6b976ad94387c089d67e744a9e9) Thanks [@kyan-du](https://github.com/kyan-du)! - Add queued voice-note sending (port of upstream b288698): 50-second audio splitting, job status and cancellation, `wx send --voice` / `wx voice status|cancel`, and OpenClaw `audioAsVoice` delivery. Requires a rebuilt container image (PulseAudio + voice worker); a missing audio device only disables voice sending.
+
 ## 0.15.3
 
 ### Patch Changes

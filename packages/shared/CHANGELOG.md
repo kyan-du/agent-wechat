@@ -1,5 +1,11 @@
 # @kyan-du/agent-wechat-shared
 
+## 0.2.0
+
+### Minor Changes
+
+- [#162](https://github.com/kyan-du/agent-wechat/pull/162) [`503b51e`](https://github.com/kyan-du/agent-wechat/commit/503b51eb83a5e6b976ad94387c089d67e744a9e9) Thanks [@kyan-du](https://github.com/kyan-du)! - Add queued voice-note sending (port of upstream b288698): 50-second audio splitting, job status and cancellation, `wx send --voice` / `wx voice status|cancel`, and OpenClaw `audioAsVoice` delivery. Requires a rebuilt container image (PulseAudio + voice worker); a missing audio device only disables voice sending.
+
 ## 0.1.3
 
 ### Patch Changes
