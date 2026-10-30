@@ -22,6 +22,24 @@ pub fn try_acquire_plan_lock() -> Option<tokio::sync::MutexGuard<'static, ()>> {
     PLAN_LOCK.try_lock().ok()
 }
 
+/// Holds GUI ownership (the plan lock) with health monitoring paused, for work
+/// that drives the WeChat window outside a plan, such as voice-note sending.
+pub struct GuiGuard {
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for GuiGuard {
+    fn drop(&mut self) {
+        crate::sessions::health_monitor::resume_monitoring();
+    }
+}
+
+pub async fn acquire_gui_guard() -> GuiGuard {
+    let lock = PLAN_LOCK.lock().await;
+    crate::sessions::health_monitor::pause_monitoring();
+    GuiGuard { _lock: lock }
+}
+
 pub struct ExecutionResult {
     pub success: bool,
     pub error: Option<String>,

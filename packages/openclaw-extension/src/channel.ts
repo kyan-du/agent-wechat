@@ -13,6 +13,7 @@ import { loginStart, loginWait, loginTerminal } from "./login.js";
 import { createWeChatConfirmedSendTool, createWeChatGroupMembersTool, createWeChatLoginTool } from "./agent-tools.js";
 import { normalizeWeChatCommandBody, normalizeWeChatId } from "./access-control.js";
 import { sendLogicalMediaTask } from "./outbound.js";
+import { AUDIO_EXT_MIME, sendVoiceNote } from "./voice-delivery.js";
 
 async function sendWeChatText(cfg: unknown, to: string, text: string): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
@@ -35,11 +36,13 @@ async function sendWeChatMedia(
   to: string,
   text: string,
   mediaUrl: string | undefined,
+  audioAsVoice = false,
 ): Promise<string> {
   const account = resolveWeChatAccount(cfg as Record<string, unknown>);
   if (!account?.serverUrl) throw new Error("No serverUrl configured");
   const client = new WeChatClient({ baseUrl: account.serverUrl, token: account.token });
   if (!mediaUrl) {
+    if (audioAsVoice) throw new Error("Voice sending requires an audio attachment");
     const result = await client.sendMessage({
       chatId: to,
       text: text || undefined,
@@ -68,9 +71,22 @@ async function sendWeChatMedia(
     const ext = pathmod.extname(mediaUrl).toLowerCase().replace(".", "");
     const extMime: Record<string, string> = {
       png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-      gif: "image/gif", webp: "image/webp",
+      gif: "image/gif", webp: "image/webp", ...AUDIO_EXT_MIME,
     };
     mimeType = extMime[ext] ?? "application/octet-stream";
+  }
+
+  mimeType = mimeType.split(";")[0].trim();
+  if (mimeType === "application/octet-stream") {
+    mimeType = AUDIO_EXT_MIME[pathmod.extname(filename).toLowerCase().slice(1)] ?? mimeType;
+  }
+  if (audioAsVoice) {
+    const jobId = await sendVoiceNote(client, to, new Uint8Array(Buffer.from(base64, "base64")), mimeType);
+    if (text) {
+      const caption = await client.sendMessage({ chatId: to, text, source: "openclaw" });
+      if (!caption.success) throw new Error(`Voice job ${jobId} completed, but caption failed: ${caption.error ?? "unknown error"}`);
+    }
+    return `${OPENCLAW_CHANNEL_ID}:voice:${jobId}`;
   }
 
   const isImage = mimeType.startsWith("image/");
@@ -99,9 +115,9 @@ const wechatMessageAdapter = createChannelMessageAdapterFromOutbound({
       channel: OPENCLAW_CHANNEL_ID,
       messageId: await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: OPENCLAW_CHANNEL_ID,
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice === true),
     }),
   },
 });
@@ -275,9 +291,9 @@ export const wechatPlugin: ChannelPlugin<ResolvedWeChatAccount> = {
       channel: OPENCLAW_CHANNEL_ID,
       messageId: await sendWeChatText(cfg, to, text),
     }),
-    sendMedia: async ({ cfg, to, text, mediaUrl }) => ({
+    sendMedia: async ({ cfg, to, text, mediaUrl, audioAsVoice }) => ({
       channel: OPENCLAW_CHANNEL_ID,
-      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl),
+      messageId: await sendWeChatMedia(cfg, to, text, mediaUrl, audioAsVoice === true),
     }),
   },
 

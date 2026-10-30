@@ -199,7 +199,11 @@ fi
 # Start PulseAudio (for audio support)
 # ============================================
 if command -v pulseaudio >/dev/null 2>&1; then
-  su -s /bin/bash -c "pulseaudio --start --exit-idle-time=-1" wechat || true
+  su -s /bin/bash -c "HOME=$WECHAT_HOME pulseaudio --start --exit-idle-time=-1" wechat || true
+  if ! su -s /bin/bash -c "HOME=$WECHAT_HOME /opt/tools/voice-audio-ready" wechat; then
+    # Voice notes are optional: keep WeChat (and the live login) running.
+    echo "PulseAudio voice devices did not become ready; voice-note sending is unavailable" >&2
+  fi
 fi
 
 # ============================================

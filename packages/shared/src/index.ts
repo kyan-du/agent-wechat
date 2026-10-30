@@ -34,6 +34,7 @@ export {
   type AuthStatus,
   type MonitorInterest,
   type CursorPage,
+  type VoiceJob,
 } from "./client.js";
 
 // Export schemas (but not the inferred types which duplicate types/)

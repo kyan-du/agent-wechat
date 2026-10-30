@@ -405,9 +405,20 @@ program.command("messages <chat-id>").description("Read messages without opening
 
 program.command("send <chat-id>").description("Send exactly one payload to a stable chat ID")
   .option("--text <message>").option("--image <path>").option("--file <path>")
+  .option("--voice <path>", "record audio as one or more verified voice notes")
+  .option("--detach", "with --voice: return once the voice job is queued")
   .option("--idempotency-key <key>", "stable key for retry/reconciliation")
   .option("--confirm-similar", "confirm operator-reviewed similar text")
   .action((chatId, options) => action(async () => {
+    if (options.voice) {
+      if (options.text || options.image || options.file) throw new CliError("ARGUMENT_CONFLICT", "--voice must be sent on its own", EXIT.ARGUMENT);
+      const job = await client().createVoiceJob(chatId, new Uint8Array(regularUpload(options.voice)), options.idempotencyKey || randomBytes(16).toString("hex"));
+      if (options.detach) { output(job, () => console.log(`Voice job: ${job.jobId}`)); return; }
+      const done = await waitVoiceJob(job.jobId);
+      output(done, () => console.log(`Voice job ${done.jobId} completed: ${done.chunks.length} notes verified`));
+      return;
+    }
+    if (options.detach) throw new CliError("INVALID_ARGUMENT", "--detach requires --voice", EXIT.ARGUMENT);
     const image: SendParams["image"] | undefined = options.image ? { data: regularUpload(options.image).toString("base64"), mimeType: path.extname(options.image).toLowerCase() === ".jpg" ? "image/jpeg" : "image/png" } : undefined;
     const file: SendParams["file"] | undefined = options.file ? { data: regularUpload(options.file).toString("base64"), filename: path.basename(options.file) } : undefined;
     let params: SendParams;
@@ -423,6 +434,21 @@ program.command("send <chat-id>").description("Send exactly one payload to a sta
     }
     output(result, () => console.log("Message sent"));
   }));
+
+async function waitVoiceJob(jobId: string) {
+  for (;;) {
+    const job = await client().getVoiceJob(jobId);
+    if (job.status === "completed") return job;
+    if (["failed", "cancelled", "needs_review"].includes(job.status)) {
+      const verified = job.chunks.filter((chunk) => chunk.status === "verified").length;
+      throw new CliError("VOICE_" + job.status.toUpperCase(), `${job.status}: ${verified}/${job.chunks.length} notes verified. ${job.error ?? ""} Job ${jobId}; do not resend the whole recording.`, job.status === "needs_review" ? EXIT.UNCERTAIN : EXIT.SERVICE);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+const voice = program.command("voice").description("Inspect or cancel voice-note jobs");
+voice.command("status <job-id>").action((jobId) => action(async () => { const job = await client().getVoiceJob(jobId); output(job, () => console.log(JSON.stringify(job, null, 2))); }));
+voice.command("cancel <job-id>").action((jobId) => action(async () => { const job = await client().cancelVoiceJob(jobId); output(job, () => console.log(`Cancellation requested for ${job.jobId}`)); }));
 
 program.command("upgrade").description("Check CLI/image upgrades without claiming atomic self-upgrade")
   .addOption(new Option("--check", "read-only upgrade check"))
