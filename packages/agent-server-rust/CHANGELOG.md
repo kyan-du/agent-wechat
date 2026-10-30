@@ -1,5 +1,11 @@
 # @agent-wechat/agent-server
 
+## 0.16.0
+
+### Patch Changes
+
+- [#163](https://github.com/kyan-du/agent-wechat/pull/163) [`18b5978`](https://github.com/kyan-du/agent-wechat/commit/18b597831e198e81ee66fed38b470c992e4315bb) Thanks [@kyan-du](https://github.com/kyan-du)! - Return the best available image instead of the cached thumbnail (port of upstream a71cf8b/9f524a5): try the original `_h.dat`, then the standard `.dat`, then `_t.dat`, each decrypted independently, and fall back to the cached Thumb `.jpg` only when none decode. The `source` field keeps its `original` / `thumbnail` values.
+
 ## 0.15.3
 
 ## 0.15.2
