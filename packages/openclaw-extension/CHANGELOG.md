@@ -1,5 +1,11 @@
 # @agent-wechat/wechat
 
+## 0.15.3
+
+### Patch Changes
+
+- [#158](https://github.com/kyan-du/agent-wechat/pull/158) [`8cb817a`](https://github.com/kyan-du/agent-wechat/commit/8cb817aa23a2da8149cb99f00123b19ca5a44ffc) Thanks [@kyan-du](https://github.com/kyan-du)! - Inbound ledger no longer locks the WeChat channel because of one oversized entry: writes bound `messageKey`, `chatId` and error codes (prefix + sha256) so they always pass validation, and loads drop invalid or duplicate entries with a warning instead of quarantining the whole ledger.
+
 ## 0.15.2
 
 ### Patch Changes
