@@ -109,8 +109,26 @@ def api(path):
         return json.load(response)
 
 
+def message_items(response):
+    # This fork's /api/messages is paged ({"items": [...], "nextCursor": ...});
+    # upstream returned a bare list. Accept both.
+    if isinstance(response, dict):
+        response = response.get("items")
+    if not isinstance(response, list):
+        raise RuntimeError("Unexpected /api/messages response shape")
+    return response
+
+
+def is_voice_message(item):
+    # Message type is serialized as a string ("34") here, an int upstream.
+    try:
+        return int(item.get("type")) == 34
+    except (TypeError, ValueError):
+        return False
+
+
 def messages(chat_id):
-    return api("/api/messages/" + urllib.parse.quote(chat_id, safe="") + "?limit=50")
+    return message_items(api("/api/messages/" + urllib.parse.quote(chat_id, safe="") + "?limit=50"))
 
 
 def walk(node):
@@ -197,7 +215,7 @@ def verify_voice(directory, status, part, prior_ids, display_name):
         fresh = [item for item in messages(chat_id) if item["localId"] not in prior_ids]
         if len(fresh) > 1:
             raise RuntimeError("More than one new message appeared after voice Send")
-        if len(fresh) == 1 and fresh[0].get("type") == 34 and fresh[0].get("isSelf"):
+        if len(fresh) == 1 and is_voice_message(fresh[0]) and fresh[0].get("isSelf"):
             matched = fresh[0]
             break
         time.sleep(0.5)
