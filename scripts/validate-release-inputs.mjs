@@ -31,7 +31,7 @@ assert.deepEqual(instructions,instructionAllowlist.instructions,'effective Docke
 // This policy is deliberately independent of the mutable allowlist. Any instruction
 // that can fetch or install content must remain one of these reviewed semantics.
 const approvedSensitiveInstructionHashes=new Set([
-  'c800a90a1de2560793aa2730949337f9391435273fc686c5fb6c8fc60bffe3bb', // runtime packages
+  '78a88e65d45ee5fbab1feb87f04d5fa01450e9d0001adbbb062db829cfdaef92', // runtime packages (+pulseaudio-utils for voice notes)
   '857d515e7e5bf29d4828f05f8076962545230bcea4febe9a4856f8fb5641ad7e', // locked Python packages
   '29745539dec974d85e96332400d4d9911ef953f356213ea8150ea6b5b72a29bc', // noVNC
   '9b8d3cee08d655c745e64a8669864c81ba19db346c0d22821c2f5a1901282c02', // SQLCipher
