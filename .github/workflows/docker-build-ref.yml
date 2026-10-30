@@ -104,8 +104,13 @@ jobs:
           context: docker
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=build-ref-${{ matrix.arch }}
-          cache-to: type=gha,scope=build-ref-${{ matrix.arch }},mode=max
+          cache-from: |
+            type=gha,scope=build-ref-${{ matrix.arch }}
+            type=gha,scope=${{ matrix.arch }}
+            type=gha,scope=commit-verification-${{ matrix.arch }}
+            type=gha,scope=stable-release-${{ matrix.arch }}
+            type=gha,scope=ghcr-${{ matrix.arch }}
+          cache-to: type=gha,scope=build-ref-${{ matrix.arch }},mode=max,ignore-error=true
       - name: Export digest
         run: |
           set -euo pipefail

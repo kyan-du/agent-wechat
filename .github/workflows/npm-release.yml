@@ -242,10 +242,12 @@ jobs:
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: |
             type=gha,scope=stable-release-${{ matrix.arch }}
-            type=gha,scope=build-ref-${{ matrix.arch }}
+            type=gha,scope=${{ matrix.arch }}
             type=gha,scope=commit-verification-${{ matrix.arch }}
+            type=gha,scope=build-ref-${{ matrix.arch }}
+            type=gha,scope=ghcr-${{ matrix.arch }}
             type=registry,ref=ghcr.io/kyan-du/agent-wechat:ref-dd72ae9
-          cache-to: type=gha,scope=stable-release-${{ matrix.arch }},mode=max
+          cache-to: type=gha,scope=stable-release-${{ matrix.arch }},mode=max,ignore-error=true
       - name: Export digest
         run: |
           set -euo pipefail
