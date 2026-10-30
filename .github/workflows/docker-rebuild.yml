@@ -97,5 +97,10 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: false
           outputs: type=cacheonly
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,scope=${{ matrix.arch }},mode=max
+          cache-from: |
+            type=gha,scope=${{ matrix.arch }}
+            type=gha,scope=commit-verification-${{ matrix.arch }}
+            type=gha,scope=build-ref-${{ matrix.arch }}
+            type=gha,scope=stable-release-${{ matrix.arch }}
+            type=gha,scope=ghcr-${{ matrix.arch }}
+          cache-to: type=gha,scope=${{ matrix.arch }},mode=max,ignore-error=true
