@@ -38,6 +38,21 @@ type LedgerFile = { version: 1; entries: InboundEventRecord[] };
 export const MAX_INBOUND_LEDGER_ENTRIES = 10_000;
 export const MAX_INBOUND_EVENT_ATTEMPTS = 5;
 export const MAX_INBOUND_RETRY_DELAY_MS = 60_000;
+export const MAX_INBOUND_MESSAGE_KEY_LENGTH = 4096;
+export const MAX_INBOUND_CHAT_ID_LENGTH = 512;
+export const MAX_INBOUND_ERROR_CODE_LENGTH = 128;
+
+/** Clamp a string to `max` UTF-16 units. Over-long values keep a readable
+ * prefix plus a sha256 of the full value, so distinct inputs stay distinct and
+ * the stored value always passes read validation. */
+export function boundLedgerString(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const suffix = `#sha256:${createHash("sha256").update(value).digest("hex")}`;
+  let prefix = value.slice(0, Math.max(0, max - suffix.length));
+  // Do not leave a dangling high surrogate at the cut.
+  if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+  return `${prefix}${suffix}`;
+}
 
 export class InboundLedgerStateError extends Error {
   readonly code = "INBOUND_LEDGER_BLOCKED" as const;
@@ -65,8 +80,8 @@ function validRecord(value: unknown): value is InboundEventRecord {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
   return typeof row.eventId === "string" && /^[a-f0-9]{64}$/.test(row.eventId) &&
-    typeof row.chatId === "string" && row.chatId.length > 0 && row.chatId.length <= 512 &&
-    Number.isSafeInteger(row.localId) && typeof row.messageKey === "string" && row.messageKey.length <= 4096 &&
+    typeof row.chatId === "string" && row.chatId.length > 0 && row.chatId.length <= MAX_INBOUND_CHAT_ID_LENGTH &&
+    Number.isSafeInteger(row.localId) && typeof row.messageKey === "string" && row.messageKey.length <= MAX_INBOUND_MESSAGE_KEY_LENGTH &&
     ["pending", "processing", "processed", "failed", "dead_letter"].includes(String(row.status)) &&
     Number.isSafeInteger(row.attempts) && Number(row.attempts) >= 0 &&
     typeof row.createdAt === "number" && Number.isFinite(row.createdAt) &&
@@ -76,20 +91,36 @@ function validRecord(value: unknown): value is InboundEventRecord {
     (row.outcome === undefined || ["dispatched", "filtered", "buffered", "read_only", "stale"].includes(String(row.outcome)));
 }
 
-function validateFile(value: unknown): LedgerFile {
+export type LedgerLogger = { warn: (message: string) => void };
+const defaultLogger: LedgerLogger = { warn: (message) => console.warn(message) };
+
+/** Keep only well-formed, unique entries. One bad row must never take the
+ * whole channel down, so invalid or duplicate rows are dropped with a warning. */
+function sanitizeEntries(raw: unknown[], logger: LedgerLogger, source: string): InboundEventRecord[] {
+  const byId = new Map<string, InboundEventRecord>();
+  let invalid = 0;
+  let duplicate = 0;
+  for (const entry of raw) {
+    if (!validRecord(entry)) { invalid += 1; continue; }
+    if (byId.has(entry.eventId)) duplicate += 1;
+    byId.set(entry.eventId, entry);
+  }
+  if (invalid || duplicate) {
+    logger.warn(`[agent-wechat] inbound ledger ${source}: dropped ${invalid} invalid and ${duplicate} duplicate event(s)`);
+  }
+  return [...byId.values()];
+}
+
+function validateFile(value: unknown, logger: LedgerLogger, source: string): LedgerFile {
   if (!value || typeof value !== "object") throw new InboundLedgerStateError("inbound ledger is not an object");
   const row = value as Record<string, unknown>;
   if (row.version !== 1 || !Array.isArray(row.entries) || row.entries.length > MAX_INBOUND_LEDGER_ENTRIES) {
     throw new InboundLedgerStateError("inbound ledger schema or capacity is invalid");
   }
-  const entries = row.entries as unknown[];
-  if (!entries.every(validRecord)) throw new InboundLedgerStateError("inbound ledger contains an invalid event");
-  const ids = new Set(entries.map((entry) => entry.eventId));
-  if (ids.size !== entries.length) throw new InboundLedgerStateError("inbound ledger contains duplicate events");
-  return { version: 1, entries: entries as InboundEventRecord[] };
+  return { version: 1, entries: sanitizeEntries(row.entries as unknown[], logger, source) };
 }
 
-function loadFile(path: string): LedgerFile {
+function loadFile(path: string, logger: LedgerLogger): LedgerFile {
   if (existsSync(blockerPath(path))) {
     throw new InboundLedgerStateError(`inbound ledger is blocked: ${blockerPath(path)}`);
   }
@@ -97,7 +128,7 @@ function loadFile(path: string): LedgerFile {
   try {
     const parsed = readDurableJson<unknown>(path);
     if (parsed === undefined) return { version: 1, entries: [] };
-    return validateFile(parsed);
+    return validateFile(parsed, logger, path);
   } catch (error) {
     const quarantine = quarantinePath(path);
     try {
@@ -131,18 +162,21 @@ export function nestedMediaEventId(parentEventId: string, item: { type?: string;
 export class InboundEventLedger {
   private readonly path: string;
   private readonly entries = new Map<string, InboundEventRecord>();
+  private readonly logger: LedgerLogger;
 
-  constructor(accountId: string, stateDir?: string) {
+  constructor(accountId: string, stateDir?: string, logger: LedgerLogger = defaultLogger) {
     this.path = statePath(accountId, stateDir);
+    this.logger = logger;
     recoverDurableQuarantine(this.path);
-    for (const entry of loadFile(this.path).entries) this.entries.set(entry.eventId, entry);
+    for (const entry of loadFile(this.path, logger).entries) this.entries.set(entry.eventId, entry);
   }
 
   private persist(): void {
     const localEntries = [...this.entries.values()];
     const next = updateDurableJson<LedgerFile>(this.path, (current) => {
-      const merged = new Map((current?.entries ?? []).map((entry) => [entry.eventId, entry]));
-      for (const entry of localEntries) merged.set(entry.eventId, entry);
+      const onDisk = Array.isArray(current?.entries) ? sanitizeEntries(current.entries, this.logger, this.path) : [];
+      const merged = new Map(onDisk.map((entry) => [entry.eventId, entry]));
+      for (const entry of localEntries) if (validRecord(entry)) merged.set(entry.eventId, entry);
       const entries = [...merged.values()].sort((a, b) => a.updatedAt - b.updatedAt || a.eventId.localeCompare(b.eventId));
       if (entries.length > MAX_INBOUND_LEDGER_ENTRIES) {
         const retained = entries.filter((entry) => entry.status !== "processed");
@@ -164,7 +198,10 @@ export class InboundEventLedger {
     const eventId = inboundEventId(accountId, chatId, message);
     if (!this.entries.has(eventId)) {
       this.entries.set(eventId, {
-        eventId, chatId, localId: message.localId, messageKey: cursorMessageKey(message),
+        eventId,
+        chatId: boundLedgerString(chatId, MAX_INBOUND_CHAT_ID_LENGTH),
+        localId: message.localId,
+        messageKey: boundLedgerString(cursorMessageKey(message), MAX_INBOUND_MESSAGE_KEY_LENGTH),
         status: "pending", attempts: 0, createdAt: now, updatedAt: now,
       });
       this.persist();
@@ -203,7 +240,7 @@ export class InboundEventLedger {
     const entry = this.entries.get(eventId);
     if (!entry) return;
     entry.updatedAt = now;
-    entry.lastErrorCode = errorCode.slice(0, 128);
+    entry.lastErrorCode = boundLedgerString(errorCode, MAX_INBOUND_ERROR_CODE_LENGTH);
     if (entry.attempts >= MAX_INBOUND_EVENT_ATTEMPTS) {
       entry.status = "dead_letter";
       entry.nextRetryAt = undefined;
@@ -243,6 +280,6 @@ export class InboundEventLedger {
   }
 }
 
-export function loadInboundEventLedger(accountId: string, stateDir?: string): InboundEventLedger {
-  return new InboundEventLedger(accountId, stateDir);
+export function loadInboundEventLedger(accountId: string, stateDir?: string, logger?: LedgerLogger): InboundEventLedger {
+  return new InboundEventLedger(accountId, stateDir, logger);
 }
