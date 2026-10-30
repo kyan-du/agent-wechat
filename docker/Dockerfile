@@ -75,7 +75,7 @@ RUN apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https
     libxkbcommon0 libxkbcommon-x11-0 libxcb-icccm4 \
     libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxss1 \
     # Audio - needed for message notifications
-    pulseaudio alsa-base alsa-utils \
+    pulseaudio pulseaudio-utils alsa-base alsa-utils \
     gstreamer1.0-pulseaudio gstreamer1.0-alsa \
     # Media conversion (WXGF→JPEG/GIF, SILK→MP3)
     ffmpeg \

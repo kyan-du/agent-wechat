@@ -1489,6 +1489,11 @@ impl OutboundSender {
         self.pause()
     }
 
+    /// True while outbound sending is paused or disabled; voice jobs honour this too.
+    pub fn is_read_only(&self) -> bool {
+        self.control.is_read_only()
+    }
+
     pub fn pause(&self) -> OutboundStatus {
         if !self.control.is_runtime_paused() {
             self.diagnostics.pause_total.fetch_add(1, Ordering::Relaxed);
