@@ -47,7 +47,7 @@
     "yaml": "^2.9.0"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24.16"
   },
   "packageManager": "pnpm@9.15.4"
 }

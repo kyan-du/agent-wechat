@@ -39,14 +39,33 @@ import {
   recordResetRetryFailure,
   trimPendingResetRetries,
 } from "./monitor-retry.js";
+import { resolveStableChannelMessageIngress } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import {
   normalizeWeChatCommandBody,
-  resolveWeChatCommandAuthorization,
-  resolveWeChatInboundAccessDecision,
-  resolveWeChatMentionGate,
+  resolveWeChatIngress,
   resolveWeChatPolicyContext,
+  type WeChatIngressResolver,
   type WeChatPolicyContext,
 } from "./access-control.js";
+
+const warnedOpenDmWildcard = new Set<string>();
+
+/** Decides whether one sender's message may enter processing (sender and group route gates). */
+type WeChatSenderAdmission = (params: {
+  isGroup: boolean;
+  senderId: string;
+}) => Promise<{ allowed: boolean; reason: string }>;
+
+/**
+ * Prefer the runtime-bound resolver (OpenClaw 2026.10+); otherwise use the SDK helper,
+ * which applies the same policy.
+ */
+function getIngressResolver(core: ReturnType<typeof getWeChatRuntime>): WeChatIngressResolver {
+  const runtimeResolve = (core.channel as any).inbound?.ingress?.resolveStable as
+    | WeChatIngressResolver
+    | undefined;
+  return runtimeResolve ?? resolveStableChannelMessageIngress;
+}
 import { decideCatchup, nextReconnectState, shouldFoldSegments } from "./catchup.js";
 import { formatType49MediaFailureBody, safeBodyAfterKnownMediaFailure } from "./inbound-media.js";
 import {
@@ -480,7 +499,7 @@ async function prepareMessage(
   chatId: string,
   chat: Chat,
   liveAccount: ResolvedWeChatAccount,
-  policy: WeChatPolicyContext,
+  admitSender: WeChatSenderAdmission,
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void },
   skipOpen?: boolean,
 ): Promise<ProcessedMessage | null> {
@@ -499,11 +518,7 @@ async function prepareMessage(
 
   const access = shouldBypassNewsappAuthorization(chat)
     ? { allowed: true as const, reason: "newsapp-system-feed" }
-    : resolveWeChatInboundAccessDecision({
-        isGroup,
-        senderId,
-        policy,
-      });
+    : await admitSender({ isGroup, senderId });
   if (!access.allowed) {
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Blocked by policy (${access.reason}) from ${senderId}`,
@@ -758,43 +773,40 @@ async function dispatchSegment(
 
   const hasControlCommand =
     allowTextCommands && core.channel.commands.isControlCommandMessage(commandBody, cfg);
-  const commandAuthorized = await resolveWeChatCommandAuthorization({
+  const wasMentioned = segment.some((pm) => pm.isMentioned);
+  const ingress = await resolveWeChatIngress({
+    resolve: getIngressResolver(core),
     cfg,
-    rawBody: commandBody,
+    accountId: liveAccount.accountId,
+    policy,
     isGroup,
+    chatId,
     senderId,
-    dmPolicy: policy.dmPolicy,
-    allowFromForCommands: isGroup ? policy.effectiveGroupAllowFrom : policy.effectiveAllowFrom,
-    deps: {
-      shouldComputeCommandAuthorized: (raw, loadedCfg) =>
-        core.channel.commands.shouldComputeCommandAuthorized(raw, loadedCfg),
-      resolveCommandAuthorizedFromAuthorizers: (params) =>
-        core.channel.commands.resolveCommandAuthorizedFromAuthorizers(params),
-      readAllowFromStore: async () => storeAllowFrom,
-    },
+    readStoreAllowFrom: async () => storeAllowFrom,
+    command: { allowTextCommands, hasControlCommand },
+    mention: { wasMentioned, allowTextCommands },
   });
-  if (isGroup && allowTextCommands && hasControlCommand && commandAuthorized !== true) {
+  if (ingress.ingress.admission === "skip") {
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Dropping unauthorized group control command from ${senderId} in ${chatId}`,
+      `[wechat:${liveAccount.accountId}] Skipping group segment (${ingress.ingress.reasonCode}) in ${chatId}`,
     );
     return false;
   }
-
-  const mentionGate = resolveWeChatMentionGate({
-    isGroup,
-    requireMention: policy.requireMention,
-    canDetectMention: true,
-    wasMentioned: segment.some((pm) => pm.isMentioned),
-    allowTextCommands,
-    hasControlCommand,
-    commandAuthorized: commandAuthorized === true,
-  });
-  if (isGroup && mentionGate.shouldSkip) {
+  // In DMs an unauthorized control command still reaches the agent as text
+  // (CommandAuthorized false), as before; only groups drop it.
+  const dmUnauthorizedCommand =
+    !isGroup && ingress.ingress.reasonCode === "control_command_unauthorized";
+  if (ingress.ingress.admission !== "dispatch" && !dmUnauthorizedCommand) {
     log?.info?.(
-      `[wechat:${liveAccount.accountId}] Skipping group segment (mention required) in ${chatId}`,
+      `[wechat:${liveAccount.accountId}] Dropping segment (${ingress.ingress.reasonCode}) from ${senderId} in ${chatId}`,
     );
     return false;
   }
+  // Only report command authorization for command-like bodies, as before.
+  const commandAuthorized = core.channel.commands.shouldComputeCommandAuthorized(commandBody, cfg)
+    ? ingress.commandAccess.authorized
+    : undefined;
+  const effectiveWasMentioned = ingress.activationAccess.effectiveWasMentioned ?? wasMentioned;
 
   try {
     // Resolve routing using the last (triggering) message
@@ -904,7 +916,7 @@ async function dispatchSegment(
       Provider: OPENCLAW_CHANNEL_ID,
       Surface: OPENCLAW_CHANNEL_ID,
       MessageSid: `${OPENCLAW_CHANNEL_ID}:${chatId}:${msg.localId}`,
-      WasMentioned: isGroup ? mentionGate.effectiveWasMentioned : undefined,
+      WasMentioned: isGroup ? effectiveWasMentioned : undefined,
       CommandAuthorized: commandAuthorized,
       OriginatingChannel: OPENCLAW_CHANNEL_ID,
       OriginatingTo: `${OPENCLAW_CHANNEL_ID}:${chatId}`,
@@ -1109,8 +1121,31 @@ async function processUnreadChat(
     account: liveAccount,
     cfg: cfg as any,
     chatId,
-    storeAllowFrom,
   });
+  if (policy.impliedOpenDmWildcard && !warnedOpenDmWildcard.has(liveAccount.accountId)) {
+    warnedOpenDmWildcard.add(liveAccount.accountId);
+    log?.info?.(
+      `[wechat:${liveAccount.accountId}] dmPolicy is "open" but allowFrom has no "*"; treating it as ["*"]. ` +
+        `Add "*" to channels.agent-wechat.allowFrom to make this explicit.`,
+    );
+  }
+  const resolveIngress = getIngressResolver(core);
+  const admitSender: WeChatSenderAdmission = async ({ isGroup, senderId }) => {
+    const result = await resolveWeChatIngress({
+      resolve: resolveIngress,
+      cfg,
+      accountId: liveAccount.accountId,
+      policy,
+      isGroup,
+      chatId,
+      senderId,
+      readStoreAllowFrom: async () => storeAllowFrom,
+    });
+    return {
+      allowed: result.ingress.admission === "dispatch",
+      reason: result.ingress.reasonCode,
+    };
+  };
   const allowTextCommands = core.channel.commands.shouldHandleTextCommands({
     cfg,
     surface: OPENCLAW_CHANNEL_ID,
@@ -1306,13 +1341,20 @@ async function processUnreadChat(
   // Open (and clear unreads) only when at least one inbound row would pass
   // allowFrom. Denied senders keep their badge; we tip-ack them later instead
   // of asking WeChat to mark-read a chat OpenClaw will not answer.
-  const anyAllowlistedInbound = newMessages.some((msg) => {
-    if (msg.isSelf) return false;
-    if (shouldBypassNewsappAuthorization(chat)) return true;
+  let anyAllowlistedInbound = false;
+  for (const msg of newMessages) {
+    if (msg.isSelf) continue;
+    if (shouldBypassNewsappAuthorization(chat)) {
+      anyAllowlistedInbound = true;
+      break;
+    }
     const isGroup = chatId.includes("@chatroom");
     const senderId = msg.sender ?? chatId;
-    return resolveWeChatInboundAccessDecision({ isGroup, senderId, policy }).allowed;
-  });
+    if ((await admitSender({ isGroup, senderId })).allowed) {
+      anyAllowlistedInbound = true;
+      break;
+    }
+  }
   if (anyAllowlistedInbound && !isNewsappChat(chat)) await openChatIfNeeded();
 
   const catchUpLimits = {
@@ -1371,7 +1413,7 @@ async function processUnreadChat(
     log?.info?.(
       `[wechat:${liveAccount.accountId}] Processing msg ${msg.localId}: type=${msg.type}, sender=${msg.sender}, isSelf=${msg.isSelf}, content=${(msg.content || "").slice(0, 50)}`,
     );
-    const pm = await prepareMessage(client, mediaPipeline, msg, chatId, chat, liveAccount, policy, log, skipOpen);
+    const pm = await prepareMessage(client, mediaPipeline, msg, chatId, chat, liveAccount, admitSender, log, skipOpen);
     if (pm) {
       processed.push(pm);
     } else {
